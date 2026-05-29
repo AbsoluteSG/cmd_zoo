@@ -1,0 +1,8 @@
+# Static-link the MSVC C runtime so the resulting cmd_zoo.exe runs on a
+# vanilla Windows install without needing the "Microsoft Visual C++ 2015–2022
+# Redistributable" pre-installed. Trade-off: ~200 KB larger binary.
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]
+
+[target.i686-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]

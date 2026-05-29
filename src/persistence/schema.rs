@@ -1,0 +1,76 @@
+use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
+use uuid::Uuid;
+
+pub const SCHEMA_VERSION: u32 = 10;
+
+#[derive(Serialize, Deserialize, Clone)]
+pub struct ZooSnapshot {
+    pub schema_version: u32,
+    pub player: PlayerDto,
+    pub last_saved_at: DateTime<Utc>,
+    pub coins: u64,
+    pub food: u64,
+    /// Secondary currency added in v9. Older saves migrate with `dna_helix: 0`;
+    /// `serde(default)` keeps hand-rolled v8-ish test JSON loadable too.
+    #[serde(default)]
+    pub dna_helix: u64,
+    pub habitats: Vec<HabitatDto>,
+    pub animals: Vec<AnimalDto>,
+    pub structures: Vec<StructureDto>,
+    pub claimed_gifts: Vec<Uuid>,
+    /// Hybrid species ids the player has unlocked. Empty on fresh saves.
+    pub discovered_recipes: Vec<String>,
+    /// How many concurrent breedings the player can run (1..=4).
+    pub nest_count: u8,
+    /// New in v10. Index of an exotic-shop window the player paid to open
+    /// early; `None` normally. `serde(default)` keeps older test JSON loadable.
+    #[serde(default)]
+    pub exotic_skip_window: Option<i64>,
+}
+
+#[derive(Serialize, Deserialize, Clone)]
+pub struct PlayerDto {
+    pub id: Uuid,
+    pub name: String,
+}
+
+#[derive(Serialize, Deserialize, Clone)]
+pub struct HabitatDto {
+    pub id: Uuid,
+    pub theme: String,
+    pub level: u8,
+    pub animal_ids: Vec<Uuid>,
+    /// New in v9. When `Some`, a level-up to `level+1` is in flight; finishes
+    /// at this instant. None when idle (or fresh from v8 migration).
+    #[serde(default)]
+    pub upgrade_finishes_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Serialize, Deserialize, Clone)]
+pub struct AnimalDto {
+    pub id: Uuid,
+    pub species: String,
+    pub level: u8,
+    pub last_collected_at: DateTime<Utc>,
+    pub state: AnimalStateDto,
+}
+
+#[derive(Serialize, Deserialize, Clone)]
+#[serde(tag = "kind")]
+pub enum AnimalStateDto {
+    Idle,
+    /// `destination` was removed in v8 — redeem-on-click made it dead state.
+    Breeding {
+        partner_id: Uuid,
+        ends_at: DateTime<Utc>,
+    },
+}
+
+#[derive(Serialize, Deserialize, Clone)]
+pub struct StructureDto {
+    pub id: Uuid,
+    pub kind: String,
+    pub level: u8,
+    pub last_collected_at: DateTime<Utc>,
+}

@@ -6,11 +6,12 @@ use uuid::Uuid;
 
 use super::animal::{Animal, AnimalState, MAX_ANIMAL_LEVEL, animal_level_up_cost};
 use super::habitat::{
-    Habitat, MAX_HABITAT_LEVEL, habitat_purchase_cost, habitat_upgrade_cost,
+    Habitat, MAX_HABITAT_LEVEL, footprints_overlap, habitat_purchase_cost, habitat_upgrade_cost,
     habitat_upgrade_duration,
 };
 use super::player::Player;
 use super::species::{self, HabitatTheme, SpeciesId};
+use super::visitor::VisitorRecord;
 use super::structure::{
     MAX_STRUCTURE_LEVEL, STRUCTURE_TOTAL_CAP, Structure, structure_purchase_cost,
     structure_upgrade_cost,
@@ -21,7 +22,13 @@ use crate::share::{
 };
 
 pub struct Zoo {
+    /// The local owner of this zoo (host in M2 co-op). Keeping the field name
+    /// `player` here for source compatibility; semantically this is the host.
     pub player: Player,
+    /// Persisted state for non-owner players who have visited. Keyed by their
+    /// stable `player_id` so a returning visitor matches their existing
+    /// record. Empty in pure single-player saves. Added in schema v12.
+    pub visitors: HashMap<Uuid, VisitorRecord>,
     pub coins: u64,
     pub food: u64,
     /// Secondary "DNA Helix" currency. Earned from rare hybrid drops on
@@ -93,6 +100,7 @@ impl Zoo {
         let starter_structure = Structure::new("hay_bale", now);
         Self {
             player: Player::new_default(),
+            visitors: HashMap::new(),
             coins: 100,
             food: 0,
             dna_helix: 0,
@@ -294,9 +302,18 @@ impl Zoo {
         let is_hybrid_drop =
             offspring_species != species_a && offspring_species != species_b;
 
-        // Auto-placement validates space before mutating, so on Err the pair
-        // stays in Breeding state and the nest reads "Ready" again.
-        let placed = self.auto_place_animal(offspring_species, 1, now)?;
+        // Place the offspring. Prefer a compatible habitat (legacy model); in
+        // the freeform world there are no habitats, so fall back to spawning
+        // the critter onto the open plane (`habitat_id` is then nil). Other
+        // errors (e.g. unknown species) still propagate.
+        let placed = match self.auto_place_animal(offspring_species, 1, now) {
+            Ok(p) => p,
+            Err(ZooError::NoHabitatWithSpace) => {
+                let id = self.spawn_animal_freeform(offspring_species, 1, now)?;
+                (Uuid::nil(), id)
+            }
+            Err(e) => return Err(e),
+        };
 
         // Reward + codex are recorded only after a successful place — the
         // hybrid drop is the player's actual "win".
@@ -322,23 +339,64 @@ impl Zoo {
         self.habitats.iter().filter(|h| h.theme == theme).count()
     }
 
-    /// Buy the (single) habitat of a theme. Fails with `HabitatAlreadyExists`
-    /// if the player already owns one of that theme — single-habitat-per-theme
-    /// is now enforced; capacity grows through `start_habitat_upgrade` instead
-    /// of buying duplicates.
-    pub fn buy_habitat(&mut self, theme: HabitatTheme) -> Result<Uuid, ZooError> {
+    /// Whether `theme`'s footprint anchored at `tile` is within grid bounds and
+    /// free of any existing habitat (optionally ignoring one habitat id, used
+    /// when relocating an existing habitat onto tiles it already covers).
+    pub fn placement_ok(
+        &self,
+        theme: HabitatTheme,
+        tile: (i32, i32),
+        ignore_id: Option<Uuid>,
+    ) -> Result<(), ZooError> {
+        if !Habitat::footprint_in_bounds(theme, tile) {
+            return Err(ZooError::OutOfBounds);
+        }
+        let collides = self
+            .habitats
+            .iter()
+            .filter(|h| Some(h.id) != ignore_id)
+            .any(|h| footprints_overlap(theme, tile, h.theme, h.tile));
+        if collides {
+            return Err(ZooError::TileOccupied);
+        }
+        Ok(())
+    }
+
+    /// Buy the (single) habitat of a theme and place it at `tile`. Fails with
+    /// `HabitatAlreadyExists` if the player already owns one of that theme —
+    /// single-habitat-per-theme is enforced; capacity grows through
+    /// `start_habitat_upgrade` instead of buying duplicates. Placement is
+    /// validated (bounds + collision) before any coins are spent.
+    pub fn buy_habitat(&mut self, theme: HabitatTheme, tile: (i32, i32)) -> Result<Uuid, ZooError> {
         if self.count_habitats_with_theme(theme) > 0 {
             return Err(ZooError::HabitatAlreadyExists);
         }
+        self.placement_ok(theme, tile, None)?;
         let cost = habitat_purchase_cost();
         if self.coins < cost {
             return Err(ZooError::NotEnoughCoins);
         }
         self.coins -= cost;
-        let h = Habitat::new(theme);
+        let h = Habitat::new_at(theme, tile);
         let id = h.id;
         self.habitats.push(h);
         Ok(id)
+    }
+
+    /// Relocate an existing habitat to a new anchor tile, collision-checked
+    /// against the other habitats (and grid bounds). Used by click-to-place.
+    pub fn move_habitat(&mut self, habitat_id: Uuid, new_tile: (i32, i32)) -> Result<(), ZooError> {
+        let theme = self
+            .habitats
+            .iter()
+            .find(|h| h.id == habitat_id)
+            .map(|h| h.theme)
+            .ok_or(ZooError::UnknownHabitat)?;
+        self.placement_ok(theme, new_tile, Some(habitat_id))?;
+        if let Some(h) = self.habitats.iter_mut().find(|h| h.id == habitat_id) {
+            h.tile = new_tile;
+        }
+        Ok(())
     }
 
     pub fn buy_structure(
@@ -417,6 +475,51 @@ impl Zoo {
             species::IncomeKind::DnaHelix => self.dna_helix -= def.purchase_cost,
         }
         self.auto_place_animal(def.id, 1, now)
+    }
+
+    /// Spawn an animal directly into the world with no habitat — the freeform
+    /// model where critters roam the open plane. Returns the new animal id.
+    /// Panics-free analog of `auto_place_animal` (cannot fail on space).
+    pub fn spawn_animal_freeform(
+        &mut self,
+        species_id: SpeciesId,
+        level: u8,
+        now: DateTime<Utc>,
+    ) -> Result<Uuid, ZooError> {
+        let def = species::try_get(species_id).ok_or(ZooError::UnknownSpecies)?;
+        let mut animal = Animal::new(def.id, now);
+        animal.level = level.clamp(1, MAX_ANIMAL_LEVEL);
+        let animal_id = animal.id;
+        self.animals.insert(animal_id, animal);
+        Ok(animal_id)
+    }
+
+    /// Freeform shop buy: validate affordability in the species' purchase
+    /// currency, charge, and spawn the critter onto the plane (no habitat
+    /// required). Returns the new animal id.
+    pub fn purchase_animal(
+        &mut self,
+        species_id: SpeciesId,
+        now: DateTime<Utc>,
+    ) -> Result<Uuid, ZooError> {
+        let def = species::try_get(species_id).ok_or(ZooError::UnknownSpecies)?;
+        match def.purchase_currency {
+            species::IncomeKind::Coin => {
+                if self.coins < def.purchase_cost {
+                    return Err(ZooError::NotEnoughCoins);
+                }
+            }
+            species::IncomeKind::DnaHelix => {
+                if self.dna_helix < def.purchase_cost {
+                    return Err(ZooError::NotEnoughDna);
+                }
+            }
+        }
+        match def.purchase_currency {
+            species::IncomeKind::Coin => self.coins -= def.purchase_cost,
+            species::IncomeKind::DnaHelix => self.dna_helix -= def.purchase_cost,
+        }
+        self.spawn_animal_freeform(def.id, 1, now)
     }
 
     /// Sweep at-cap income from every animal in a habitat into the
@@ -713,6 +816,10 @@ pub enum ZooError {
     SpeciesMismatch,
     /// Tried to buy a second habitat of a theme that already exists.
     HabitatAlreadyExists,
+    /// Placement footprint extends outside the grid bounds.
+    OutOfBounds,
+    /// Placement footprint overlaps an existing habitat.
+    TileOccupied,
     /// Tried to start an upgrade on a habitat whose upgrade is already in flight.
     UpgradeInProgress,
     /// `claim_habitat_upgrade` called while the upgrade timer is still running.
@@ -740,7 +847,7 @@ mod tests {
         let now = ts();
         let mut zoo = Zoo::new(now);
         zoo.coins = 1000;
-        let (_, aid) = zoo.buy_animal("fieldMouse", now).unwrap();
+        let (_, aid) = zoo.buy_animal("field_mouse", now).unwrap();
         // No food → fails.
         let err = zoo.level_up_animal(aid, now).unwrap_err();
         assert!(matches!(err, ZooError::NotEnoughFood));
@@ -768,13 +875,83 @@ mod tests {
         // habitat means trying to buy a second Forest immediately fails.
         let mut zoo = Zoo::new(ts());
         zoo.coins = 100_000;
-        let err = zoo.buy_habitat(HabitatTheme::Forest).unwrap_err();
+        let err = zoo.buy_habitat(HabitatTheme::Forest, (4, 0)).unwrap_err();
         assert!(matches!(err, ZooError::HabitatAlreadyExists));
         // A different theme is fine.
-        zoo.buy_habitat(HabitatTheme::Wetland).unwrap();
+        zoo.buy_habitat(HabitatTheme::Wetland, (4, 0)).unwrap();
         // But buying a second of *that* theme also errors.
-        let err = zoo.buy_habitat(HabitatTheme::Wetland).unwrap_err();
+        let err = zoo.buy_habitat(HabitatTheme::Wetland, (4, 0)).unwrap_err();
         assert!(matches!(err, ZooError::HabitatAlreadyExists));
+    }
+
+    #[test]
+    fn habitat_placement_rejects_collision_and_oob() {
+        let mut zoo = Zoo::new(ts());
+        zoo.coins = 100_000;
+        // Starter Forest occupies (0,0)..(1,1). A Wetland overlapping it fails.
+        let err = zoo.buy_habitat(HabitatTheme::Wetland, (1, 1)).unwrap_err();
+        assert!(matches!(err, ZooError::TileOccupied));
+        // Off-grid placement fails.
+        let err = zoo
+            .buy_habitat(HabitatTheme::Wetland, (super::super::habitat::GRID_W - 1, 0))
+            .unwrap_err();
+        assert!(matches!(err, ZooError::OutOfBounds));
+        // A clear, in-bounds spot succeeds and is charged.
+        let before = zoo.coins;
+        zoo.buy_habitat(HabitatTheme::Wetland, (4, 4)).unwrap();
+        assert!(zoo.coins < before);
+    }
+
+    #[test]
+    fn move_habitat_relocates_and_collision_checks() {
+        let mut zoo = Zoo::new(ts());
+        zoo.coins = 100_000;
+        let wid = zoo.buy_habitat(HabitatTheme::Wetland, (4, 4)).unwrap();
+        // Move onto a free spot works.
+        zoo.move_habitat(wid, (8, 8)).unwrap();
+        assert_eq!(
+            zoo.habitats.iter().find(|h| h.id == wid).unwrap().tile,
+            (8, 8)
+        );
+        // Moving onto the starter Forest (0,0) collides.
+        let err = zoo.move_habitat(wid, (0, 0)).unwrap_err();
+        assert!(matches!(err, ZooError::TileOccupied));
+        // Moving an unknown habitat errors.
+        let err = zoo.move_habitat(Uuid::new_v4(), (2, 2)).unwrap_err();
+        assert!(matches!(err, ZooError::UnknownHabitat));
+    }
+
+    #[test]
+    fn purchase_animal_spawns_freeform_and_charges() {
+        let mut zoo = Zoo::new(ts());
+        zoo.habitats.clear(); // no habitats in the freeform world
+        zoo.coins = 1000;
+        let before = zoo.animals.len();
+        // blue_frog costs 50 coins and needs no habitat.
+        let id = zoo.purchase_animal("blue_frog", ts()).unwrap();
+        assert_eq!(zoo.animals.len(), before + 1);
+        assert!(zoo.animals.contains_key(&id));
+        assert_eq!(zoo.coins, 950);
+        // Can't afford a second when broke.
+        zoo.coins = 0;
+        assert!(matches!(
+            zoo.purchase_animal("blue_frog", ts()),
+            Err(ZooError::NotEnoughCoins)
+        ));
+    }
+
+    #[test]
+    fn claim_breeding_falls_back_to_freeform_without_habitat() {
+        let mut zoo = Zoo::new(ts());
+        zoo.habitats.clear(); // freeform: no habitats to place into
+        let a = zoo.spawn_animal_freeform("fox", 1, ts()).unwrap();
+        let b = zoo.spawn_animal_freeform("treeFrog", 1, ts()).unwrap();
+        let ends = zoo.start_breeding(a, b, ts()).unwrap();
+        let later = ends + chrono::Duration::seconds(1);
+        let claimed = zoo.claim_completed_breeding(a, later).unwrap();
+        // No habitat → nil habitat id, but the offspring still spawned.
+        assert_eq!(claimed.habitat_id, Uuid::nil());
+        assert!(zoo.animals.contains_key(&claimed.animal_id));
     }
 
     #[test]
@@ -833,8 +1010,8 @@ mod tests {
         let mut zoo = Zoo::new(now);
         zoo.coins = 100_000;
         // Set up two legal cross-species pairs (each with a pool).
-        zoo.buy_habitat(HabitatTheme::Wetland).unwrap();
-        zoo.buy_habitat(HabitatTheme::Savanna).unwrap();
+        zoo.buy_habitat(HabitatTheme::Wetland, (4, 0)).unwrap();
+        zoo.buy_habitat(HabitatTheme::Savanna, (8, 0)).unwrap();
         let (_, fox) = zoo.buy_animal("fox", now).unwrap();
         let (_, frog) = zoo.buy_animal("treeFrog", now).unwrap();
         zoo.start_breeding(fox, frog, now).unwrap();
@@ -852,7 +1029,7 @@ mod tests {
         zoo.coins = 100_000;
         // Set up a crossbreed pair so a successful redeem *would* add to
         // discovered_recipes; cancelling must skip that.
-        zoo.buy_habitat(HabitatTheme::Wetland).unwrap();
+        zoo.buy_habitat(HabitatTheme::Wetland, (4, 0)).unwrap();
         let (_, fox) = zoo.buy_animal("fox", now).unwrap();
         let (_, frog) = zoo.buy_animal("treeFrog", now).unwrap();
         zoo.start_breeding(fox, frog, now).unwrap();
@@ -875,7 +1052,7 @@ mod tests {
         let now = ts();
         let mut zoo = Zoo::new(now);
         zoo.coins = 100;
-        let (_, mouse) = zoo.buy_animal("fieldMouse", now).unwrap();
+        let (_, mouse) = zoo.buy_animal("field_mouse", now).unwrap();
         let err = zoo.cancel_breeding(mouse, now).unwrap_err();
         assert!(matches!(err, ZooError::NotBreeding));
     }
@@ -900,7 +1077,7 @@ mod tests {
         let now = ts();
         let mut zoo = Zoo::new(now);
         zoo.coins = 10_000;
-        zoo.buy_habitat(HabitatTheme::Wetland).unwrap();
+        zoo.buy_habitat(HabitatTheme::Wetland, (4, 0)).unwrap();
         let (_, fox) = zoo.buy_animal("fox", now).unwrap();
         let (_, frog) = zoo.buy_animal("treeFrog", now).unwrap();
 
@@ -938,8 +1115,8 @@ mod tests {
         let mut zoo = Zoo::new(now);
         zoo.coins = 10_000;
         // mouse (Forest) + frog (Wetland) — no recipe defined for that pair.
-        zoo.buy_habitat(HabitatTheme::Wetland).unwrap();
-        let (_, mouse) = zoo.buy_animal("fieldMouse", now).unwrap();
+        zoo.buy_habitat(HabitatTheme::Wetland, (4, 0)).unwrap();
+        let (_, mouse) = zoo.buy_animal("field_mouse", now).unwrap();
         let (_, frog) = zoo.buy_animal("treeFrog", now).unwrap();
         assert!(matches!(
             zoo.start_breeding(mouse, frog, now),
@@ -952,11 +1129,11 @@ mod tests {
         let now = ts();
         let mut zoo = Zoo::new(now);
         zoo.coins = 10_000;
-        let (_, mouse_a) = zoo.buy_animal("fieldMouse", now).unwrap();
-        let (_, mouse_b) = zoo.buy_animal("fieldMouse", now).unwrap();
-        zoo.buy_habitat(HabitatTheme::Wetland).unwrap();
+        let (_, mouse_a) = zoo.buy_animal("field_mouse", now).unwrap();
+        let (_, mouse_b) = zoo.buy_animal("field_mouse", now).unwrap();
+        zoo.buy_habitat(HabitatTheme::Wetland, (4, 0)).unwrap();
         let (_, frog) = zoo.buy_animal("treeFrog", now).unwrap();
-        zoo.buy_habitat(HabitatTheme::Savanna).unwrap();
+        zoo.buy_habitat(HabitatTheme::Savanna, (8, 0)).unwrap();
         let (_, lion) = zoo.buy_animal("lion", now).unwrap();
 
         // Same-animal: still a SameAnimal error.
@@ -994,7 +1171,7 @@ mod tests {
         let now = ts();
         let mut zoo = Zoo::new(now);
         zoo.coins = 10_000;
-        zoo.buy_habitat(HabitatTheme::Wetland).unwrap();
+        zoo.buy_habitat(HabitatTheme::Wetland, (4, 0)).unwrap();
         let (_, a) = zoo.buy_animal("fox", now).unwrap();
         let (_, b) = zoo.buy_animal("treeFrog", now).unwrap();
         let before = zoo.animals.len();
@@ -1032,7 +1209,7 @@ mod tests {
         let now = ts();
         let mut zoo = Zoo::new(now);
         zoo.coins = 100_000;
-        zoo.buy_habitat(HabitatTheme::Wetland).unwrap();
+        zoo.buy_habitat(HabitatTheme::Wetland, (4, 0)).unwrap();
         // Forest has capacity 3; fill it.
         let (_, a) = zoo.buy_animal("fox", now).unwrap();
         zoo.buy_animal("fox", now).unwrap();
@@ -1085,7 +1262,7 @@ mod tests {
         let now = ts();
         let mut sender = Zoo::new(now);
         sender.coins = 1_000;
-        let (_, mouse_id) = sender.buy_animal("fieldMouse", now).unwrap();
+        let (_, mouse_id) = sender.buy_animal("field_mouse", now).unwrap();
         assert_eq!(sender.animals.len(), 1);
 
         let gift = sender.send_animal_gift(mouse_id, now).unwrap();
@@ -1113,7 +1290,7 @@ mod tests {
         let now = ts();
         let mut zoo = Zoo::new(now);
         zoo.coins = 10_000;
-        zoo.buy_habitat(HabitatTheme::Wetland).unwrap();
+        zoo.buy_habitat(HabitatTheme::Wetland, (4, 0)).unwrap();
         let (_, a) = zoo.buy_animal("fox", now).unwrap();
         let (_, b) = zoo.buy_animal("treeFrog", now).unwrap();
         zoo.start_breeding(a, b, now).unwrap();
@@ -1128,8 +1305,8 @@ mod tests {
         let now = ts();
         let mut zoo = Zoo::new(now);
         zoo.coins = 10_000;
-        zoo.buy_animal("fieldMouse", now).unwrap();
-        zoo.buy_animal("fieldMouse", now).unwrap();
+        zoo.buy_animal("field_mouse", now).unwrap();
+        zoo.buy_animal("field_mouse", now).unwrap();
         zoo.buy_animal("fox", now).unwrap();
         let snap = zoo.build_shared_snapshot(now);
         assert_eq!(snap.view.animal_count, 3);
@@ -1137,7 +1314,7 @@ mod tests {
             .view
             .species_tally
             .iter()
-            .find(|e| e.species_id == "fieldMouse")
+            .find(|e| e.species_id == "field_mouse")
             .unwrap();
         assert_eq!(mouse_entry.count, 2);
         // Two mice at L1 each → total_level = 2.
@@ -1155,7 +1332,7 @@ mod tests {
             sender_name: "Friend".into(),
             created_at: now,
             contents: GiftContents::Animal {
-                species_id: "fieldMouse".into(),
+                species_id: "field_mouse".into(),
                 level: 2,
             },
         };
@@ -1164,7 +1341,7 @@ mod tests {
         assert!(matches!(err, ZooError::AlreadyClaimed));
         // The placed mouse exists at the gifted level.
         let placed = zoo.animals.values().next().unwrap();
-        assert_eq!(placed.species, "fieldMouse");
+        assert_eq!(placed.species, "field_mouse");
         assert_eq!(placed.level, 2);
     }
 }
@@ -1191,6 +1368,8 @@ impl fmt::Display for ZooError {
             ZooError::NotReady => "gestation has not finished yet",
             ZooError::SpeciesMismatch => "no breeding pool for this pair",
             ZooError::HabitatAlreadyExists => "you already own a habitat of this theme — upgrade it instead",
+            ZooError::OutOfBounds => "that spot is off the grid",
+            ZooError::TileOccupied => "those tiles are already occupied",
             ZooError::UpgradeInProgress => "this habitat is already upgrading",
             ZooError::UpgradeNotReady => "habitat upgrade has not finished yet",
             ZooError::AllNestsBusy => "all nests are in use — wait or buy another",

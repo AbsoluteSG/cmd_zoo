@@ -1,10 +1,10 @@
-use chrono::{DateTime, Utc};
+﻿use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-pub const SCHEMA_VERSION: u32 = 10;
+pub const SCHEMA_VERSION: u32 = 12;
 
-#[derive(Serialize, Deserialize, Clone)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct ZooSnapshot {
     pub schema_version: u32,
     pub player: PlayerDto,
@@ -27,15 +27,42 @@ pub struct ZooSnapshot {
     /// early; `None` normally. `serde(default)` keeps older test JSON loadable.
     #[serde(default)]
     pub exotic_skip_window: Option<i64>,
+    /// New in v12. Persisted state for non-owner players who have visited
+    /// this zoo. Empty in pure single-player saves. `serde(default)` keeps
+    /// pre-v12 JSON loadable through the migrator.
+    #[serde(default)]
+    pub visitors: Vec<VisitorDto>,
 }
 
-#[derive(Serialize, Deserialize, Clone)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct VisitorDto {
+    pub player_id: Uuid,
+    pub display_name: String,
+    pub first_visited_at: DateTime<Utc>,
+    pub last_visited_at: DateTime<Utc>,
+    pub last_pos_x: f32,
+    pub last_pos_y: f32,
+    #[serde(default)]
+    pub gift_inbox: Vec<GiftRecordDto>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct GiftRecordDto {
+    pub id: Uuid,
+    pub sender_id: Uuid,
+    pub sender_name: String,
+    pub species: String,
+    pub level: u8,
+    pub dropped_at: DateTime<Utc>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct PlayerDto {
     pub id: Uuid,
     pub name: String,
 }
 
-#[derive(Serialize, Deserialize, Clone)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct HabitatDto {
     pub id: Uuid,
     pub theme: String,
@@ -45,9 +72,16 @@ pub struct HabitatDto {
     /// at this instant. None when idle (or fresh from v8 migration).
     #[serde(default)]
     pub upgrade_finishes_at: Option<DateTime<Utc>>,
+    /// New in v11. Anchor tile (grid coords) of this habitat's footprint on
+    /// the isometric world grid. `serde(default)` → (0,0) for pre-v11 JSON;
+    /// the v10→v11 migration assigns non-overlapping tiles.
+    #[serde(default)]
+    pub tile_x: i32,
+    #[serde(default)]
+    pub tile_y: i32,
 }
 
-#[derive(Serialize, Deserialize, Clone)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct AnimalDto {
     pub id: Uuid,
     pub species: String,
@@ -56,7 +90,7 @@ pub struct AnimalDto {
     pub state: AnimalStateDto,
 }
 
-#[derive(Serialize, Deserialize, Clone)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(tag = "kind")]
 pub enum AnimalStateDto {
     Idle,
@@ -67,7 +101,7 @@ pub enum AnimalStateDto {
     },
 }
 
-#[derive(Serialize, Deserialize, Clone)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct StructureDto {
     pub id: Uuid,
     pub kind: String,

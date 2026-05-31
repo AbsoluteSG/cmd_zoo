@@ -1,1 +1,6 @@
-/target
+/target/
+*.pdb
+*.orig
+*.bk
+*.swp
+*~

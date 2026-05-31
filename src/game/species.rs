@@ -118,6 +118,21 @@ static CATALOG: Lazy<HashMap<SpeciesId, SpeciesDef>> = Lazy::new(|| {
             income_kind: IncomeKind::Coin,
             purchase_currency: IncomeKind::Coin,
         },
+        SpeciesDef {
+            id: "blue_frog",
+            display_name: "Blue Frog",
+            theme: HabitatTheme::Wetland,
+            base_rate_per_sec: 2.0,
+            base_storage_cap: 120,
+            purchase_cost: 50,
+            gestation_seconds: 90,
+            level_rate_bonus: scaling::BALANCED.0,
+            level_cap_bonus: scaling::BALANCED.1,
+            hybrid: false,
+            exotic: false,
+            income_kind: IncomeKind::Coin,
+            purchase_currency: IncomeKind::Coin,
+        },
         // Tank: slow trickle, huge storage — leave it overnight.
         SpeciesDef {
             id: "treeFrog",

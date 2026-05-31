@@ -1,4 +1,6 @@
 pub mod animal;
+pub mod avatar;
+pub mod avatar_system;
 pub mod economy;
 pub mod exotic_shop;
 pub mod habitat;
@@ -6,6 +8,7 @@ pub mod player;
 pub mod species;
 pub mod structure;
 pub mod structure_kind;
+pub mod visitor;
 pub mod zoo;
 
 pub use animal::{Animal, AnimalState};

@@ -262,7 +262,7 @@ mod tests {
                 structure_count: 2,
                 animal_count: 7,
                 species_tally: vec![SpeciesTallyEntry {
-                    species_id: "fieldMouse".into(),
+                    species_id: "field_mouse".into(),
                     count: 4,
                     total_level: 5,
                 }],
@@ -274,7 +274,7 @@ mod tests {
             Payload::Snapshot(s) => {
                 assert_eq!(s.view.coins, 5000);
                 assert_eq!(s.view.species_tally.len(), 1);
-                assert_eq!(s.view.species_tally[0].species_id, "fieldMouse");
+                assert_eq!(s.view.species_tally[0].species_id, "field_mouse");
             }
             _ => panic!("wrong variant"),
         }
@@ -309,7 +309,7 @@ mod tests {
             sender_name: "Alex".into(),
             created_at: ts(),
             contents: GiftContents::Animal {
-                species_id: "fieldMouse".into(),
+                species_id: "field_mouse".into(),
                 level: 1,
             },
         });

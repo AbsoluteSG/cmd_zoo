@@ -5,18 +5,29 @@ use std::time::SystemTime;
 
 use anyhow::{Context, Result};
 use chrono::Utc;
+use macroquad::prelude::*;
 
-use cmd_zoo::app::EguiApp;
+use cmd_zoo::app::GameApp;
+use cmd_zoo::game::animal::Animal;
 use cmd_zoo::game::{Zoo, economy};
 use cmd_zoo::persistence::json_file::JsonFileRepository;
 
-fn main() -> Result<()> {
-    // Repo + initial load under lock; identical pattern to the old ratatui main.
-    let repo = Arc::new(
-        JsonFileRepository::at_default_path().context("preparing save file")?,
-    );
+fn window_conf() -> Conf {
+    Conf {
+        window_title: "cmd_zoo".to_owned(),
+        window_width: 1100,
+        window_height: 720,
+        high_dpi: true,
+        ..Default::default()
+    }
+}
+
+/// Repo + initial load + offline catch-up, then build the app. Renderer-agnostic
+/// — identical dance to the old egui/ratatui boot, just feeds a `GameApp`.
+fn boot() -> Result<(GameApp, Vec<String>)> {
+    let repo = Arc::new(JsonFileRepository::at_default_path().context("preparing save file")?);
     let now = Utc::now();
-    let (mut zoo, initial_warnings) = {
+    let (mut zoo, warnings) = {
         let access = repo.lock().context("initial save lock")?;
         match access.load_if_newer(SystemTime::UNIX_EPOCH)? {
             Some((zoo, _, warnings)) => (zoo, warnings),
@@ -28,44 +39,48 @@ fn main() -> Result<()> {
         }
     };
 
-    // Offline catch-up so any breeding that completed while the app was closed
-    // is reflected before the window opens.
     economy::advance(&mut zoo, now);
+    // Seed a starter critter so a fresh save has something to collect. The
+    // animal lives in `zoo.animals` directly (no habitat needed in the
+    // freeform model); it persists and reloads like any other animal.
+    if zoo.animals.is_empty() {
+        let frog = Animal::new("blue_frog", now);
+        zoo.animals.insert(frog.id, frog);
+    }
     zoo.last_saved_at = now;
     let last_modtime = {
         let access = repo.lock().context("post catch-up save lock")?;
         access.save(&zoo)?
     };
 
-    let mut app = EguiApp::new(zoo, repo, last_modtime);
-    // Surface load-time warnings (e.g. "dropped 1 animal(s) of unknown species
-    // 'frog'") as a status banner so the user knows why their zoo shrank.
-    if !initial_warnings.is_empty() {
-        for w in &initial_warnings {
+    Ok((GameApp::new(zoo, repo, last_modtime), warnings))
+}
+
+#[macroquad::main(window_conf)]
+async fn main() {
+    let (mut app, warnings) = match boot() {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("fatal: failed to start cmd_zoo: {e:?}");
+            return;
+        }
+    };
+    if let Some(first) = warnings.first() {
+        for w in &warnings {
             eprintln!("load warning: {w}");
         }
-        let summary = if initial_warnings.len() == 1 {
-            initial_warnings[0].clone()
-        } else {
-            format!("{} load warnings — first: {}", initial_warnings.len(), initial_warnings[0])
-        };
-        app.set_status(summary, true, now);
+        app.set_status(first.clone());
     }
 
-    let opts = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default()
-            .with_inner_size([1100.0, 720.0])
-            .with_min_inner_size([720.0, 480.0])
-            .with_title("cmd_zoo"),
-        ..Default::default()
-    };
-    eframe::run_native(
-        "cmd_zoo",
-        opts,
-        Box::new(|cc| {
-            cmd_zoo::ui::theme::install(&cc.egui_ctx);
-            Ok(Box::new(app))
-        }),
-    )
-    .map_err(|e| anyhow::anyhow!("eframe: {e}"))
+    // Decode embedded sound effects (async) and use a custom in-game cursor.
+    app.sounds = cmd_zoo::audio::Sounds::load_all().await;
+    show_mouse(false);
+
+    loop {
+        let now = Utc::now();
+        app.tick(now);
+        app.handle_input(now);
+        app.draw(now);
+        next_frame().await;
+    }
 }

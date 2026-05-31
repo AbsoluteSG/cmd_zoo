@@ -100,7 +100,7 @@ mod tests {
     fn stored_grows_linearly_until_cap() {
         let base = Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap();
         // mouse L1: 0.5/s, cap 60
-        let a = Animal::new("fieldMouse", base);
+        let a = Animal::new("field_mouse", base);
         assert_eq!(a.stored_at(base), 0);
         assert_eq!(a.stored_at(base + Duration::seconds(60)), 30);
         assert_eq!(a.stored_at(base + Duration::seconds(120)), 60);
@@ -110,7 +110,7 @@ mod tests {
     #[test]
     fn stored_is_zero_before_last_collected_at() {
         let base = Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap();
-        let a = Animal::new("fieldMouse", base);
+        let a = Animal::new("field_mouse", base);
         assert_eq!(a.stored_at(base - Duration::seconds(10)), 0);
     }
 
@@ -118,7 +118,7 @@ mod tests {
     fn balanced_species_scales_rate_and_cap_linearly() {
         // Mouse is BALANCED (0.5, 1.0): doubles cap and adds 0.5×base/s per level.
         let base = Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap();
-        let mut a = Animal::new("fieldMouse", base);
+        let mut a = Animal::new("field_mouse", base);
         a.level = 2;
         assert!((a.rate_per_sec() - 0.75).abs() < 1e-9);
         assert_eq!(a.storage_cap(), 120);

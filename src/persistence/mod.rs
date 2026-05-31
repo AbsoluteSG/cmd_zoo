@@ -10,7 +10,9 @@ use uuid::Uuid;
 use crate::game::player::{DEFAULT_PLAYER_NAME, Player};
 use crate::game::species::SpeciesId;
 use crate::game::structure_kind;
+use crate::game::visitor::{GiftRecord, VisitorRecord};
 use crate::game::{Animal, AnimalState, Habitat, HabitatTheme, Structure, Zoo, species};
+use macroquad::math::vec2;
 use schema::*;
 
 /// Single-instance convenience API. The shared-instance fast path uses
@@ -43,6 +45,8 @@ pub fn snapshot_from_zoo(zoo: &Zoo) -> ZooSnapshot {
                 level: h.level,
                 animal_ids: h.animal_ids.clone(),
                 upgrade_finishes_at: h.upgrade_finishes_at,
+                tile_x: h.tile.0,
+                tile_y: h.tile.1,
             })
             .collect(),
         animals: zoo
@@ -83,6 +87,30 @@ pub fn snapshot_from_zoo(zoo: &Zoo) -> ZooSnapshot {
             .collect(),
         nest_count: zoo.nest_count,
         exotic_skip_window: zoo.exotic_skip_window,
+        visitors: zoo
+            .visitors
+            .values()
+            .map(|v| VisitorDto {
+                player_id: v.player_id,
+                display_name: v.display_name.clone(),
+                first_visited_at: v.first_visited_at,
+                last_visited_at: v.last_visited_at,
+                last_pos_x: v.last_pos.x,
+                last_pos_y: v.last_pos.y,
+                gift_inbox: v
+                    .gift_inbox
+                    .iter()
+                    .map(|g| GiftRecordDto {
+                        id: g.id,
+                        sender_id: g.sender_id,
+                        sender_name: g.sender_name.clone(),
+                        species: g.species.to_string(),
+                        level: g.level,
+                        dropped_at: g.dropped_at,
+                    })
+                    .collect(),
+            })
+            .collect(),
     }
 }
 
@@ -144,6 +172,14 @@ pub fn parse_snapshot_with_notes(bytes: &[u8]) -> Result<(ZooSnapshot, Migration
             9 => {
                 migrate_v9_to_v10(&mut value);
                 version = 10;
+            }
+            10 => {
+                migrate_v10_to_v11(&mut value);
+                version = 11;
+            }
+            11 => {
+                migrate_v11_to_v12(&mut value);
+                version = 12;
             }
             v => bail!("no migration path from schema version {v}"),
         }
@@ -406,6 +442,38 @@ fn migrate_v9_to_v10(value: &mut Value) {
     }
 }
 
+/// v12 introduces co-op visitor records. Pre-v12 saves have no `visitors`
+/// field; seed it as an empty array — no other state changes.
+fn migrate_v11_to_v12(value: &mut Value) {
+    if let Value::Object(map) = value {
+        map.insert("schema_version".into(), Value::from(12u64));
+        map.entry("visitors".to_string())
+            .or_insert(Value::Array(Vec::new()));
+    }
+}
+
+/// v11 introduces isometric grid placement: each habitat gains `tile_x`/`tile_y`.
+/// Pre-v11 saves have no coordinates, so auto-layout the habitats onto the grid
+/// deterministically — row-major, stepping by the 2×2 footprint so nothing
+/// overlaps (8 columns fit in the 16-wide grid).
+fn migrate_v10_to_v11(value: &mut Value) {
+    if let Value::Object(map) = value {
+        map.insert("schema_version".into(), Value::from(11u64));
+        if let Some(Value::Array(habs)) = map.get_mut("habitats") {
+            const COLS: i64 = 8; // 16-wide grid / 2-wide footprint
+            for (i, h) in habs.iter_mut().enumerate() {
+                if let Some(obj) = h.as_object_mut() {
+                    let i = i as i64;
+                    let x = (i % COLS) * 2;
+                    let y = (i / COLS) * 2;
+                    obj.entry("tile_x".to_string()).or_insert(Value::from(x));
+                    obj.entry("tile_y".to_string()).or_insert(Value::from(y));
+                }
+            }
+        }
+    }
+}
+
 /// Outcome of loading a snapshot. `warnings` carries human-readable messages
 /// about entries that were silently dropped (e.g. an animal whose species id
 /// has been retired from the catalog in a refactor). Surfacing these as a
@@ -445,6 +513,7 @@ pub fn zoo_from_snapshot(s: ZooSnapshot) -> Result<LoadedZoo> {
                 theme,
                 level: h.level,
                 animal_ids: h.animal_ids,
+                tile: (h.tile_x, h.tile_y),
                 upgrade_finishes_at: h.upgrade_finishes_at,
             })
         })
@@ -527,11 +596,49 @@ pub fn zoo_from_snapshot(s: ZooSnapshot) -> Result<LoadedZoo> {
         ));
     }
 
+    let mut visitors: HashMap<Uuid, VisitorRecord> = HashMap::new();
+    let mut dropped_gift_species: std::collections::HashMap<String, usize> = Default::default();
+    for v in s.visitors {
+        let mut inbox: Vec<GiftRecord> = Vec::new();
+        for g in v.gift_inbox {
+            match species::try_get(&g.species) {
+                Some(def) => inbox.push(GiftRecord {
+                    id: g.id,
+                    sender_id: g.sender_id,
+                    sender_name: g.sender_name,
+                    species: def.id,
+                    level: g.level,
+                    dropped_at: g.dropped_at,
+                }),
+                None => {
+                    *dropped_gift_species.entry(g.species).or_default() += 1;
+                }
+            }
+        }
+        visitors.insert(
+            v.player_id,
+            VisitorRecord {
+                player_id: v.player_id,
+                display_name: v.display_name,
+                first_visited_at: v.first_visited_at,
+                last_visited_at: v.last_visited_at,
+                last_pos: vec2(v.last_pos_x, v.last_pos_y),
+                gift_inbox: inbox,
+            },
+        );
+    }
+    for (species_id, n) in dropped_gift_species {
+        warnings.push(format!(
+            "dropped {n} gift(s) of unknown species '{species_id}'"
+        ));
+    }
+
     let zoo = Zoo {
         player: Player {
             id: s.player.id,
             name: s.player.name,
         },
+        visitors,
         coins: s.coins,
         food: s.food,
         // dna_helix loads from the schema field after the v9 bump; until
@@ -562,8 +669,8 @@ mod tests {
         zoo.player.rename("Alex");
         zoo.coins = 5000;
         zoo.food = 200;
-        zoo.buy_animal("fieldMouse", now).unwrap();
-        zoo.buy_animal("fieldMouse", now).unwrap();
+        zoo.buy_animal("field_mouse", now).unwrap();
+        zoo.buy_animal("field_mouse", now).unwrap();
         zoo.claimed_gifts.insert(Uuid::new_v4());
 
         let snap = snapshot_from_zoo(&zoo);
@@ -709,7 +816,7 @@ mod tests {
             "habitats": [],
             "animals": [{
                 "id": Uuid::new_v4().to_string(),
-                "species": "fieldMouse",
+                "species": "field_mouse",
                 "level": 1,
                 "last_collected_at": "2026-01-01T00:00:00Z",
                 "state": {
@@ -721,10 +828,10 @@ mod tests {
             }],
             "structures": [],
             "claimed_gifts": [],
-            "pending_offspring": [{"species": "fieldMouse", "bred_at": "2026-01-01T00:00:00Z"}],
+            "pending_offspring": [{"species": "field_mouse", "bred_at": "2026-01-01T00:00:00Z"}],
             "discovered_recipes": [],
             "nest_count": 1,
-            "holding_pen": [{"species": "fieldMouse", "level": 1, "bred_at": "2026-01-01T00:00:00Z"}]
+            "holding_pen": [{"species": "field_mouse", "level": 1, "bred_at": "2026-01-01T00:00:00Z"}]
         });
         let bytes = serde_json::to_vec(&v7).unwrap();
         let snap = parse_snapshot(&bytes).unwrap();
@@ -734,6 +841,110 @@ mod tests {
             AnimalStateDto::Breeding { .. } => {}
             _ => panic!("expected Breeding state on the migrated animal"),
         }
+    }
+
+    #[test]
+    fn v10_save_migrates_to_v11_with_grid_layout() {
+        // Two habitats, no tile coords. v10→v11 must assign non-overlapping
+        // anchors (2×2 footprints stepping by 2).
+        let v10 = serde_json::json!({
+            "schema_version": 10,
+            "player": {"id": Uuid::new_v4().to_string(), "name": "Alex"},
+            "last_saved_at": "2026-01-01T00:00:00Z",
+            "coins": 1,
+            "food": 0,
+            "dna_helix": 0,
+            "habitats": [
+                {"id": Uuid::new_v4().to_string(), "theme": "Forest", "level": 1, "animal_ids": [], "upgrade_finishes_at": null},
+                {"id": Uuid::new_v4().to_string(), "theme": "Wetland", "level": 1, "animal_ids": [], "upgrade_finishes_at": null}
+            ],
+            "animals": [],
+            "structures": [],
+            "claimed_gifts": [],
+            "discovered_recipes": [],
+            "nest_count": 1,
+            "exotic_skip_window": null
+        });
+        let bytes = serde_json::to_vec(&v10).unwrap();
+        let snap = parse_snapshot(&bytes).unwrap();
+        assert_eq!(snap.schema_version, SCHEMA_VERSION);
+        assert_eq!((snap.habitats[0].tile_x, snap.habitats[0].tile_y), (0, 0));
+        assert_eq!((snap.habitats[1].tile_x, snap.habitats[1].tile_y), (2, 0));
+        // And the loaded zoo's habitats carry those tiles.
+        let loaded = zoo_from_snapshot(snap).unwrap();
+        let mut tiles: Vec<_> = loaded.zoo.habitats.iter().map(|h| h.tile).collect();
+        tiles.sort();
+        assert_eq!(tiles, vec![(0, 0), (2, 0)]);
+    }
+
+    #[test]
+    fn v11_save_migrates_to_v12_with_empty_visitors() {
+        let v11 = serde_json::json!({
+            "schema_version": 11,
+            "player": {"id": Uuid::new_v4().to_string(), "name": "Alex"},
+            "last_saved_at": "2026-01-01T00:00:00Z",
+            "coins": 1,
+            "food": 0,
+            "dna_helix": 0,
+            "habitats": [],
+            "animals": [],
+            "structures": [],
+            "claimed_gifts": [],
+            "discovered_recipes": [],
+            "nest_count": 1,
+            "exotic_skip_window": null
+        });
+        let bytes = serde_json::to_vec(&v11).unwrap();
+        let snap = parse_snapshot(&bytes).unwrap();
+        assert_eq!(snap.schema_version, SCHEMA_VERSION);
+        assert!(snap.visitors.is_empty());
+        let loaded = zoo_from_snapshot(snap).unwrap();
+        assert!(loaded.zoo.visitors.is_empty());
+        assert!(loaded.warnings.is_empty());
+    }
+
+    #[test]
+    fn v12_round_trips_visitor_records() {
+        use crate::game::visitor::{GiftRecord, VisitorRecord};
+        let now = Utc.with_ymd_and_hms(2026, 1, 1, 12, 0, 0).unwrap();
+        let mut zoo = Zoo::new(now);
+        let visitor_id = Uuid::new_v4();
+        let mut v = VisitorRecord::new(visitor_id, "Buddy", now);
+        v.last_pos = macroquad::math::vec2(123.5, 678.25);
+        v.gift_inbox.push(GiftRecord {
+            id: Uuid::new_v4(),
+            sender_id: Uuid::new_v4(),
+            sender_name: "Pal".to_string(),
+            species: "field_mouse",
+            level: 2,
+            dropped_at: now,
+        });
+        zoo.visitors.insert(visitor_id, v);
+
+        let snap = snapshot_from_zoo(&zoo);
+        let bytes = serde_json::to_vec(&snap).unwrap();
+        let snap2 = parse_snapshot(&bytes).unwrap();
+        let loaded = zoo_from_snapshot(snap2).unwrap();
+        let restored = loaded.zoo.visitors.get(&visitor_id).expect("visitor preserved");
+        assert_eq!(restored.display_name, "Buddy");
+        assert_eq!(restored.last_pos.x, 123.5);
+        assert_eq!(restored.last_pos.y, 678.25);
+        assert_eq!(restored.gift_inbox.len(), 1);
+        assert_eq!(restored.gift_inbox[0].species, "field_mouse");
+    }
+
+    #[test]
+    fn v11_snapshot_round_trips_tiles() {
+        let now = Utc.with_ymd_and_hms(2026, 1, 1, 12, 0, 0).unwrap();
+        let mut zoo = Zoo::new(now);
+        zoo.coins = 100_000;
+        let wid = zoo.buy_habitat(HabitatTheme::Wetland, (6, 4)).unwrap();
+        let snap = snapshot_from_zoo(&zoo);
+        let json = serde_json::to_vec(&snap).unwrap();
+        let snap2 = parse_snapshot(&json).unwrap();
+        let zoo2 = zoo_from_snapshot(snap2).unwrap().zoo;
+        let w = zoo2.habitats.iter().find(|h| h.id == wid).unwrap();
+        assert_eq!(w.tile, (6, 4));
     }
 
     /// Regression: an old save that references a species id that's no
@@ -771,7 +982,7 @@ mod tests {
                 },
                 {
                     "id": live_animal_id.to_string(),
-                    "species": "fieldMouse",
+                    "species": "field_mouse",
                     "level": 1,
                     "last_collected_at": "2026-01-01T00:00:00Z",
                     "state": {"kind": "Idle"}

@@ -4,6 +4,7 @@ pub mod avatar_system;
 pub mod economy;
 pub mod exotic_shop;
 pub mod habitat;
+pub mod npc;
 pub mod player;
 pub mod species;
 pub mod structure;
@@ -13,6 +14,7 @@ pub mod zoo;
 
 pub use animal::{Animal, AnimalState};
 pub use habitat::Habitat;
+pub use npc::Npc;
 pub use species::HabitatTheme;
 pub use structure::Structure;
 pub use zoo::Zoo;

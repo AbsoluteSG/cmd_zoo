@@ -16,8 +16,9 @@ use std::collections::HashMap;
 
 use crate::audio::Sounds;
 use crate::game::avatar_system::{self, Behavior};
+use crate::game::npc::{self, Npc};
 use crate::game::{Animal, AnimalState, Zoo, economy, species};
-use crate::input::{AvatarController, ControllerCtx, KeyboardController, RemoteController};
+use crate::input::{ActionFlags, AvatarController, ControllerCtx, KeyboardController, RemoteController};
 use crate::net::demo_bot::DemoBot;
 use crate::net::{Session, loopback, protocol::JoinCode};
 use crate::persistence::json_file::JsonFileRepository;
@@ -33,6 +34,10 @@ pub enum Screen {
     Shop,
     Breeding,
     Settings,
+    /// Shop opened by interacting with a ShopKeeper NPC (index into `GameApp::npcs`).
+    NpcShop(usize),
+    /// Breeding menu opened by interacting with a Breeder NPC.
+    NpcBreeder(usize),
 }
 
 /// Full-screen post-process filter applied to the world (UI stays crisp).
@@ -206,6 +211,11 @@ pub struct GameApp {
     /// Currently-being-typed join code in the Settings join-friend field.
     /// 6 chars max; uppercase Crockford base32 (matches `JoinCode::random`).
     pub join_code_buffer: String,
+    /// Fixed-position world NPCs (ShopKeeper, Breeder).
+    pub npcs: Vec<Npc>,
+    /// Index into `npcs` of the nearest NPC within interact range, if any.
+    /// Used to render the "[E] Talk to …" proximity prompt.
+    pub nearby_npc: Option<usize>,
 }
 
 /// How often (seconds) the host re-broadcasts a full ZooSnapshot to visitors.
@@ -244,6 +254,8 @@ impl GameApp {
             demo_bot: None,
             snapshot_broadcast_t: 0.0,
             join_code_buffer: String::new(),
+            npcs: npc::default_npcs(),
+            nearby_npc: None,
         }
     }
 
@@ -588,6 +600,32 @@ impl GameApp {
         for (id, intent) in intents {
             if let Some(a) = self.session.avatars.get_mut(&id) {
                 avatar_system::step(a, &intent, &world, dt, &self.behaviors);
+            }
+        }
+
+        // NPC tick + proximity detection.
+        for n in &mut self.npcs {
+            n.tick(dt);
+        }
+        let avatar_pos = self.session.my_avatar().pos;
+        self.nearby_npc = self
+            .npcs
+            .iter()
+            .enumerate()
+            .filter(|(_, n)| n.in_range(avatar_pos))
+            .min_by(|(_, a), (_, b)| {
+                let da = (a.pos - avatar_pos).length();
+                let db = (b.pos - avatar_pos).length();
+                da.partial_cmp(&db).unwrap_or(std::cmp::Ordering::Equal)
+            })
+            .map(|(i, _)| i);
+
+        if !menu_open && local_intent.actions.contains(ActionFlags::INTERACT) {
+            if let Some(idx) = self.nearby_npc {
+                match &self.npcs[idx].role {
+                    npc::NpcRole::ShopKeeper { .. } => self.set_screen(Screen::NpcShop(idx)),
+                    npc::NpcRole::Breeder { .. } => self.set_screen(Screen::NpcBreeder(idx)),
+                }
             }
         }
 

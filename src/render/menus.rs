@@ -8,7 +8,9 @@ use macroquad::prelude::*;
 
 use crate::app::{GameApp, PostEffect, Screen};
 use crate::game::exotic_shop::{self, Price};
+use crate::game::npc::{NpcRole, ShopListingKind};
 use crate::game::species::{self, IncomeKind, SpeciesId};
+use crate::game::structure_kind;
 use crate::game::zoo::{MAX_NESTS, nest_purchase_cost};
 
 const PANEL: Color = color_u8!(24, 27, 33, 250);
@@ -57,8 +59,10 @@ pub fn draw(app: &mut GameApp, now: DateTime<Utc>) {
     };
     match app.shown_menu {
         Screen::Shop => draw_shop(app, now, ctx),
-        Screen::Breeding => draw_breeding(app, now, ctx),
+        Screen::Breeding => draw_breeding(app, now, ctx, None),
         Screen::Settings => draw_settings(app, now, ctx),
+        Screen::NpcShop(idx) => draw_npc_shop(app, now, ctx, idx),
+        Screen::NpcBreeder(idx) => draw_npc_breeder(app, now, ctx, idx),
         Screen::World => {}
     }
 }
@@ -259,6 +263,137 @@ fn draw_settings(app: &mut GameApp, now: DateTime<Utc>, ctx: Ctx) {
     }
 }
 
+// ───────────────────────────── NPC Shop ─────────────────────────
+
+fn draw_npc_shop(app: &mut GameApp, now: DateTime<Utc>, ctx: Ctx, npc_idx: usize) {
+    // Extract NPC data before borrowing app mutably in button handlers.
+    let (greeting, animal_ids, struct_ids, sells_nests) = {
+        let npc = &app.npcs[npc_idx];
+        let NpcRole::ShopKeeper { inventory, dialog } = &npc.role else { return };
+        let a: Vec<_> = inventory
+            .listings
+            .iter()
+            .filter_map(|l| match l.kind {
+                ShopListingKind::Animal(id) => Some(id),
+                _ => None,
+            })
+            .collect();
+        let s: Vec<_> = inventory
+            .listings
+            .iter()
+            .filter_map(|l| match l.kind {
+                ShopListingKind::Structure(id) => Some(id),
+                _ => None,
+            })
+            .collect();
+        let nests = inventory.listings.iter().any(|l| matches!(l.kind, ShopListingKind::NestSlot));
+        (dialog.greeting, a, s, nests)
+    };
+
+    let coins = app.zoo.coins;
+    let nest_cost = nest_purchase_cost(app.zoo.nest_count);
+
+    let animals: Vec<(SpeciesId, String, bool)> = animal_ids
+        .iter()
+        .map(|&id| {
+            let d = species::get(id);
+            let (afford, cur) = match d.purchase_currency {
+                IncomeKind::Coin => (coins >= d.purchase_cost, "c"),
+                IncomeKind::DnaHelix => (app.zoo.dna_helix >= d.purchase_cost, "DNA"),
+            };
+            (id, format!("{}  ·  {} {}", d.display_name, d.purchase_cost, cur), afford)
+        })
+        .collect();
+
+    let structures: Vec<(&str, String, bool)> = struct_ids
+        .iter()
+        .map(|&id| {
+            let d = structure_kind::get(id);
+            (id, format!("{}  ·  {} c", d.display_name, d.purchase_cost), coins >= d.purchase_cost)
+        })
+        .collect();
+
+    let pw = 760.0;
+    let anim_rows = animals.len().div_ceil(2);
+    let ph = 30.0 + 96.0 + anim_rows as f32 * 34.0
+        + 24.0 + structures.len() as f32 * 34.0
+        + if sells_nests { 44.0 } else { 0.0 }
+        + 50.0;
+    let (px, py) = (ctx.center.x - pw * 0.5, ctx.center.y - ph * 0.5);
+
+    panel(&ctx, px, py, pw, ph);
+    label(&ctx, px + 26.0, py + 24.0, greeting, 15.0, TEXT_DIM);
+    title(&ctx, px + 26.0, py + 50.0, "SHOP");
+    right_text(
+        &ctx,
+        px + pw - 26.0,
+        py + 50.0,
+        &format!("{coins} coins    {} DNA", app.zoo.dna_helix),
+    );
+
+    label(&ctx, px + 26.0, py + 82.0, "Animals", 18.0, ACCENT);
+    let col_w = (pw - 52.0 - 12.0) * 0.5;
+    let mut y = py + 96.0;
+    for (i, (id, lbl, afford)) in animals.iter().enumerate() {
+        let col = (i % 2) as f32;
+        let bx = px + 26.0 + col * (col_w + 12.0);
+        if i % 2 == 0 && i != 0 {
+            y += 34.0;
+        }
+        if button(&ctx, bx, y, col_w, 28.0, lbl, *afford) {
+            match app.zoo.purchase_animal(*id, now) {
+                Ok(_) => {
+                    app.sync_critters();
+                    app.save_under_lock(now);
+                    app.set_status(format!("bought {}", species::get(*id).display_name));
+                }
+                Err(e) => app.set_status(format!("{e}")),
+            }
+        }
+    }
+
+    y += 44.0;
+    label(&ctx, px + 26.0, y, "Food Structures", 18.0, ACCENT);
+    y += 14.0;
+    for (id, lbl, afford) in &structures {
+        if button(&ctx, px + 26.0, y, pw - 52.0, 28.0, lbl, *afford) {
+            match app.zoo.buy_structure(id, now) {
+                Ok(_) => {
+                    app.save_under_lock(now);
+                    app.set_status(format!("built {}", structure_kind::get(id).display_name));
+                }
+                Err(e) => app.set_status(format!("{e}")),
+            }
+        }
+        y += 34.0;
+    }
+
+    if sells_nests && app.zoo.nest_count < MAX_NESTS {
+        y += 6.0;
+        if button(
+            &ctx,
+            px + 26.0,
+            y,
+            pw - 52.0,
+            28.0,
+            &format!("Buy Breeding Nest  ·  {nest_cost} c"),
+            coins >= nest_cost,
+        ) {
+            match app.zoo.buy_nest() {
+                Ok(_) => {
+                    app.save_under_lock(now);
+                    app.set_status("bought a nest");
+                }
+                Err(e) => app.set_status(format!("{e}")),
+            }
+        }
+    }
+
+    if button(&ctx, px + pw - 26.0 - 120.0, py + ph - 42.0, 120.0, 30.0, "Close  [Esc]", true) {
+        app.set_screen(Screen::World);
+    }
+}
+
 // ───────────────────────────── Shop ─────────────────────────────
 
 fn draw_shop(app: &mut GameApp, now: DateTime<Utc>, ctx: Ctx) {
@@ -400,7 +535,15 @@ fn buy_exotic(app: &mut GameApp, sp: SpeciesId, price: Price, now: DateTime<Utc>
 
 // ─────────────────────────── Breeding ───────────────────────────
 
-fn draw_breeding(app: &mut GameApp, now: DateTime<Utc>, ctx: Ctx) {
+fn draw_npc_breeder(app: &mut GameApp, now: DateTime<Utc>, ctx: Ctx, npc_idx: usize) {
+    let greeting = match &app.npcs[npc_idx].role {
+        NpcRole::Breeder { dialog } => dialog.greeting,
+        _ => return,
+    };
+    draw_breeding(app, now, ctx, Some(greeting));
+}
+
+fn draw_breeding(app: &mut GameApp, now: DateTime<Utc>, ctx: Ctx, greeting: Option<&str>) {
     let owned = app.zoo.nest_count;
     let busy = app.zoo.active_breeding_pair_count() as u8;
     let nest_cost = nest_purchase_cost(owned);
@@ -441,22 +584,26 @@ fn draw_breeding(app: &mut GameApp, now: DateTime<Utc>, ctx: Ctx) {
 
     let pw = 760.0;
     let cand_rows = candidates.len().div_ceil(2).max(1);
-    let ph = 150.0 + gestations.len() as f32 * 34.0 + cand_rows as f32 * 32.0 + 130.0;
+    let greeting_h = if greeting.is_some() { 28.0 } else { 0.0 };
+    let ph = 150.0 + gestations.len() as f32 * 34.0 + cand_rows as f32 * 32.0 + 130.0 + greeting_h;
     let (px, py) = (ctx.center.x - pw * 0.5, ctx.center.y - ph * 0.5);
 
     panel(&ctx, px, py, pw, ph);
-    title(&ctx, px + 26.0, py + 30.0, "BREEDING");
+    if let Some(g) = greeting {
+        label(&ctx, px + 26.0, py + 24.0, g, 15.0, TEXT_DIM);
+    }
+    title(&ctx, px + 26.0, py + 30.0 + greeting_h, "BREEDING");
     right_text(
         &ctx,
         px + pw - 26.0,
-        py + 30.0,
+        py + 30.0 + greeting_h,
         &format!("nests {busy}/{owned}  (cap {MAX_NESTS})"),
     );
     if owned < MAX_NESTS
         && button(
             &ctx,
             px + pw - 26.0 - 200.0,
-            py + 44.0,
+            py + 44.0 + greeting_h,
             200.0,
             26.0,
             &format!("Buy nest · {nest_cost} c"),
@@ -472,7 +619,7 @@ fn draw_breeding(app: &mut GameApp, now: DateTime<Utc>, ctx: Ctx) {
         }
     }
 
-    let mut y = py + 82.0;
+    let mut y = py + 82.0 + greeting_h;
     label(&ctx, px + 26.0, y, "Active", 18.0, ACCENT);
     y += 14.0;
     if gestations.is_empty() {

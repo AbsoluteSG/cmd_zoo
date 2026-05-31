@@ -6,6 +6,7 @@ use macroquad::prelude::*;
 
 use crate::app::GameApp;
 use crate::game::avatar::{Facing, PlayerAvatar};
+use crate::game::npc::{Npc, NpcRole};
 use crate::game::species::{self, IncomeKind};
 use super::view::{self, Camera, CRITTER_H, PLANE_H, PLANE_W};
 
@@ -52,6 +53,7 @@ pub fn draw_scene(app: &mut GameApp, now: DateTime<Utc>) {
     enum Item {
         Critter(usize),
         Avatar(uuid::Uuid),
+        Npc(usize),
     }
     let mut order: Vec<(f32, Item)> = app
         .critters
@@ -61,6 +63,9 @@ pub fn draw_scene(app: &mut GameApp, now: DateTime<Utc>) {
         .collect();
     for (id, a) in app.session.avatars.iter() {
         order.push((a.pos.y, Item::Avatar(*id)));
+    }
+    for (i, n) in app.npcs.iter().enumerate() {
+        order.push((n.pos.y, Item::Npc(i)));
     }
     order.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
 
@@ -89,8 +94,36 @@ pub fn draw_scene(app: &mut GameApp, now: DateTime<Utc>) {
                     draw_avatar(a, tex.as_ref(), &cam);
                 }
             }
+            Item::Npc(i) => {
+                draw_npc(&app.npcs[i], &cam);
+            }
         }
     }
+}
+
+/// Draw an NPC as a colored placeholder figure until real NPC art is added.
+fn draw_npc(npc: &Npc, cam: &Camera) {
+    let feet = view::world_to_screen(npc.pos, cam);
+    let h = CRITTER_H * cam.zoom;
+    let sink = h * FOOT_SINK;
+    let bottom = feet.y + sink;
+
+    draw_ellipse(feet.x, feet.y, h * 0.30, h * 0.10, 0.0, SHADOW);
+
+    let body_color = match &npc.role {
+        NpcRole::ShopKeeper { .. } => color_u8!(255, 195, 60, 255),
+        NpcRole::Breeder { .. } => color_u8!(100, 185, 255, 255),
+    };
+    let head_color = color_u8!(240, 210, 175, 255);
+
+    draw_rectangle(
+        feet.x - h * 0.14,
+        bottom - h * 0.60,
+        h * 0.28,
+        h * 0.48,
+        body_color,
+    );
+    draw_circle(feet.x, bottom - h * 0.70, h * 0.15, head_color);
 }
 
 /// Draw the local player avatar in the same projection as critters: feet on
@@ -236,12 +269,25 @@ pub fn draw_hud(app: &GameApp) {
         TEXT,
     );
     draw_text(
-        "1 Shop · 2 Breeding · 3 Settings · WASD move · scroll zoom",
+        "1 Shop · 2 Breed · 3 Settings · WASD move · E Talk · scroll zoom",
         14.0,
         46.0,
         18.0,
         TEXT_DIM,
     );
+    if let Some(idx) = app.nearby_npc {
+        let name = app.npcs[idx].name;
+        let prompt = format!("[E] Talk to {name}");
+        let fs = 22.0;
+        let dim = measure_text(&prompt, None, fs as u16, 1.0);
+        draw_text(
+            &prompt,
+            (screen_width() - dim.width) * 0.5,
+            screen_height() - 60.0,
+            fs,
+            color_u8!(255, 235, 140, 255),
+        );
+    }
     if let Some((msg, _)) = &app.status {
         draw_text(
             msg,

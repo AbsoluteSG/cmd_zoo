@@ -59,7 +59,68 @@ pub fn draw(app: &mut GameApp, now: DateTime<Utc>) {
         Screen::Shop => draw_shop(app, now, ctx),
         Screen::Breeding => draw_breeding(app, now, ctx),
         Screen::Settings => draw_settings(app, now, ctx),
+        Screen::Waypoints => draw_waypoints(app, now, ctx),
         Screen::World => {}
+    }
+}
+
+// ─────────────────────────── Waypoints ───────────────────────────
+
+fn draw_waypoints(app: &mut GameApp, now: DateTime<Utc>, ctx: Ctx) {
+    use crate::game::world_chunks::zoo_center;
+
+    // Snapshot the list so we can call &mut app methods while iterating.
+    let waypoints: Vec<(uuid::Uuid, String, Vec2)> = app
+        .zoo
+        .waypoints
+        .iter()
+        .map(|w| (w.id, w.name.clone(), w.pos))
+        .collect();
+    let cap = crate::game::zoo::Zoo::MAX_WAYPOINTS;
+
+    let pw = 480.0;
+    // rows: home + each waypoint, then the "add" button + close.
+    let rows = 1 + waypoints.len();
+    let ph = 150.0 + rows as f32 * 38.0 + 36.0;
+    let (px, py) = (ctx.center.x - pw * 0.5, ctx.center.y - ph * 0.5);
+
+    panel(&ctx, px, py, pw, ph);
+    title(&ctx, px + 26.0, py + 30.0, "WAYPOINTS");
+    label(&ctx, px + 26.0, py + 64.0, "Teleport to", 18.0, ACCENT);
+
+    let tp_w = pw - 52.0 - 40.0 - 8.0;
+    let mut y = py + 78.0;
+
+    // Default destination: the home zoo.
+    if button(&ctx, px + 26.0, y, tp_w, 32.0, "Home Zoo", true) {
+        app.teleport_to(zoo_center());
+    }
+    y += 38.0;
+
+    // Player-placed waypoints, each with a teleport + remove control.
+    for (id, name, pos) in &waypoints {
+        if button(&ctx, px + 26.0, y, tp_w, 32.0, name, true) {
+            app.teleport_to(*pos);
+        }
+        if button(&ctx, px + 26.0 + tp_w + 8.0, y, 40.0, 32.0, "X", true) {
+            app.remove_waypoint(*id, now);
+        }
+        y += 38.0;
+    }
+
+    y += 6.0;
+    let can_add = waypoints.len() < cap;
+    let add_lbl = if can_add {
+        "+ Add waypoint here".to_string()
+    } else {
+        format!("Waypoint limit reached ({cap})")
+    };
+    if button(&ctx, px + 26.0, y, pw - 52.0, 34.0, &add_lbl, can_add) {
+        app.add_waypoint_here(now);
+    }
+
+    if button(&ctx, px + pw - 26.0 - 120.0, py + ph - 42.0, 120.0, 30.0, "Close  [Esc]", true) {
+        app.set_screen(Screen::World);
     }
 }
 

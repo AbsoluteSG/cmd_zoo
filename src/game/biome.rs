@@ -22,78 +22,96 @@ use macroquad::math::{Vec2, vec2};
 use crate::game::species::HabitatTheme;
 use crate::game::wild_animal::Moveset;
 
-// ── 1. Voronoi biome seeds ────────────────────────────────────────────────────
+// ── 1. Seed-driven climate biomes ─────────────────────────────────────────────
+//
+// Biomes are derived on the fly from two low-frequency "climate" noise fields —
+// temperature and moisture — sampled in a per-world seed-shifted noise space and
+// lightly domain-warped for organic edges. This scales to an arbitrarily large
+// world (no fixed seed-point table) and produces a different layout per save.
 
-/// Fixed seed points. The zoo starts in Forest (centre seed) so early play is
-/// safe. Dangerous biomes (Savanna lion-country, Arctic, deep Ocean) lie at
-/// increasing distance from the centre.
-const SEEDS: &[(f32, f32, HabitatTheme)] = &[
-    // ── Innermost ring (zoo zone, safe) ──────────────────────────────────
-    (4096.0, 4096.0, HabitatTheme::Forest),   // zoo centre
-    // ── Near ring (~1500 units) ───────────────────────────────────────────
-    (2300.0, 2500.0, HabitatTheme::Farmland),
-    (5800.0, 2200.0, HabitatTheme::Wetland),
-    (2200.0, 5800.0, HabitatTheme::Wetland),
-    (6100.0, 5900.0, HabitatTheme::Jungle),
-    // ── Mid ring (~2500–3500 units) ───────────────────────────────────────
-    (1000.0, 1100.0, HabitatTheme::Forest),
-    (3600.0,  750.0, HabitatTheme::Farmland),
-    (7000.0, 1300.0, HabitatTheme::Savanna),
-    ( 650.0, 4100.0, HabitatTheme::Jungle),
-    (7500.0, 3900.0, HabitatTheme::Savanna),
-    ( 750.0, 7100.0, HabitatTheme::Forest),
-    (7600.0, 7300.0, HabitatTheme::Jungle),
-    (3800.0, 6900.0, HabitatTheme::Farmland),
-    // ── Outer ring / edges (most dangerous) ──────────────────────────────
-    (2500.0,  350.0, HabitatTheme::Arctic),
-    (5900.0,  350.0, HabitatTheme::Arctic),
-    (7900.0,  400.0, HabitatTheme::Ocean),
-    ( 350.0, 6600.0, HabitatTheme::Ocean),
-    (3100.0, 7800.0, HabitatTheme::Ocean),
-    (6600.0, 7800.0, HabitatTheme::Arctic),
-    (7900.0, 7500.0, HabitatTheme::Savanna),
-];
+/// Feature size (world units) of biome regions — large so each biome spans many
+/// chunks.
+const BIOME_SCALE: f32 = 42_000.0;
+/// Domain-warp feature size and strength (world units) — bends biome borders so
+/// they read as natural coastlines/treelines rather than smooth blobs.
+const WARP_SCALE: f32 = 16_000.0;
+const WARP_AMOUNT: f32 = 6_000.0;
 
-/// Hard biome at `pos` — nearest seed wins.
-pub fn biome_at(pos: Vec2) -> HabitatTheme {
-    SEEDS
-        .iter()
-        .min_by(|a, b| {
-            dist_sq(pos, vec2(a.0, a.1))
-                .partial_cmp(&dist_sq(pos, vec2(b.0, b.1)))
-                .unwrap_or(std::cmp::Ordering::Equal)
-        })
-        .map(|(_, _, t)| *t)
-        .unwrap_or(HabitatTheme::Forest)
+/// A large pseudo-random offset into noise space, derived from the world seed
+/// and a channel id, so each world (and each climate field) samples a different
+/// region of the noise function.
+fn seed_offset(seed: u64, channel: u64) -> Vec2 {
+    let mut r = LcgRng::new(seed ^ channel.wrapping_mul(0x9E37_79B9_7F4A_7C15));
+    vec2(
+        (r.next_f32() * 2.0 - 1.0) * 100_000.0,
+        (r.next_f32() * 2.0 - 1.0) * 100_000.0,
+    )
 }
 
-/// Smoothly blended ground colour at `pos`.
-/// Inverse-distance blends the **3 nearest** seed colours so biome boundaries
-/// become gradual colour gradients rather than hard edges.
-pub fn biome_color_at(pos: Vec2) -> Color {
-    let mut dists: Vec<(f32, Color)> = SEEDS
-        .iter()
-        .map(|(sx, sy, t)| (dist_sq(pos, vec2(*sx, *sy)), biome_color(*t)))
-        .collect();
-    dists.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+/// Continuous (temperature, moisture) climate at `pos` in [0, 1]², with domain
+/// warp applied. Deterministic for a given `seed`.
+fn climate_at(pos: Vec2, seed: u64) -> (f32, f32) {
+    let wo = seed_offset(seed, 7);
+    let wx = noise2d(pos.x + wo.x, pos.y + wo.y, WARP_SCALE) - 0.5;
+    let wy = noise2d(pos.x + wo.x + 4096.0, pos.y + wo.y - 4096.0, WARP_SCALE) - 0.5;
+    let warped = vec2(pos.x + wx * WARP_AMOUNT, pos.y + wy * WARP_AMOUNT);
 
-    let n = 3.min(dists.len());
-    // Floor prevents ÷0 and controls transition sharpness — smaller = harder edge.
-    let weights: Vec<f32> = dists[..n]
-        .iter()
-        .map(|(d, _)| 1.0 / (d.sqrt() + 350.0))
-        .collect();
-    let total: f32 = weights.iter().sum();
+    let to = seed_offset(seed, 1);
+    let mo = seed_offset(seed, 2);
+    let temp = noise2d(warped.x + to.x, warped.y + to.y, BIOME_SCALE);
+    let moist = noise2d(warped.x + mo.x, warped.y + mo.y, BIOME_SCALE);
+    (temp, moist)
+}
 
-    let (mut r, mut g, mut b) = (0.0_f32, 0.0_f32, 0.0_f32);
-    for (i, w) in weights.iter().enumerate() {
-        let c = dists[i].1;
-        let t = w / total;
-        r += c.r * t;
-        g += c.g * t;
-        b += c.b * t;
+/// Map a (temperature, moisture) pair to a biome. Thresholds are tuned so every
+/// theme appears with a reasonable share of the world.
+fn classify(temp: f32, moist: f32) -> HabitatTheme {
+    use HabitatTheme::*;
+    if temp < 0.28 {
+        return Arctic;
     }
-    Color::new(r, g, b, 1.0)
+    if moist > 0.80 {
+        return Ocean;
+    }
+    if temp > 0.72 {
+        return if moist > 0.50 { Jungle } else { Savanna };
+    }
+    // Temperate band.
+    if moist > 0.60 {
+        Wetland
+    } else if moist > 0.38 {
+        Forest
+    } else {
+        Farmland
+    }
+}
+
+/// Hard biome at `pos` for the given world `seed`.
+pub fn biome_at(pos: Vec2, seed: u64) -> HabitatTheme {
+    let (t, m) = climate_at(pos, seed);
+    classify(t, m)
+}
+
+/// Smoothly blended ground colour at `pos`. Averages the biome colour of a few
+/// nearby samples so biome boundaries read as gradients rather than hard edges.
+pub fn biome_color_at(pos: Vec2, seed: u64) -> Color {
+    const O: f32 = 1400.0;
+    let samples = [
+        pos,
+        pos + vec2(O, 0.0),
+        pos + vec2(-O, 0.0),
+        pos + vec2(0.0, O),
+        pos + vec2(0.0, -O),
+    ];
+    let (mut r, mut g, mut b) = (0.0_f32, 0.0_f32, 0.0_f32);
+    for s in samples {
+        let c = biome_color(biome_at(s, seed));
+        r += c.r;
+        g += c.g;
+        b += c.b;
+    }
+    let n = samples.len() as f32;
+    Color::new(r / n, g / n, b / n, 1.0)
 }
 
 /// Per-biome ground colour (used by `biome_color_at` for blending).
@@ -269,14 +287,28 @@ pub struct SpawnEntry {
 /// High noise (0.60–1.0) → aggressive, pack-feeling zones.
 /// Bands intentionally overlap so the transition is gradual.
 const SPAWN_TABLE: &[SpawnEntry] = &[
-    // ── Forest ────────────────────────────────────────────────────────────
-    SpawnEntry { species: "field_mouse",    mk_moveset: Moveset::zigzagger, biome: HabitatTheme::Forest,   noise_min: 0.00, noise_max: 0.50, weight: 35 },
-    SpawnEntry { species: "blue_frog",      mk_moveset: Moveset::panicker,  biome: HabitatTheme::Forest,   noise_min: 0.00, noise_max: 0.45, weight: 25 },
-    SpawnEntry { species: "treeFrog",       mk_moveset: Moveset::freezer,   biome: HabitatTheme::Forest,   noise_min: 0.00, noise_max: 0.40, weight: 18 },
+    // ── Forest (starting zone — kept rich so the early game has variety) ────
+    // Low noise: docile starters + small woodland critters.
+    SpawnEntry { species: "field_mouse",    mk_moveset: Moveset::zigzagger, biome: HabitatTheme::Forest,   noise_min: 0.00, noise_max: 0.50, weight: 32 },
+    SpawnEntry { species: "blue_frog",      mk_moveset: Moveset::panicker,  biome: HabitatTheme::Forest,   noise_min: 0.00, noise_max: 0.45, weight: 24 },
+    SpawnEntry { species: "treeFrog",       mk_moveset: Moveset::freezer,   biome: HabitatTheme::Forest,   noise_min: 0.00, noise_max: 0.40, weight: 16 },
+    SpawnEntry { species: "robin",          mk_moveset: Moveset::panicker,  biome: HabitatTheme::Forest,   noise_min: 0.00, noise_max: 0.50, weight: 20 },
+    SpawnEntry { species: "squirrel",       mk_moveset: Moveset::zigzagger, biome: HabitatTheme::Forest,   noise_min: 0.00, noise_max: 0.55, weight: 22 },
+    SpawnEntry { species: "hedgehog",       mk_moveset: Moveset::freezer,   biome: HabitatTheme::Forest,   noise_min: 0.00, noise_max: 0.50, weight: 16 },
+    SpawnEntry { species: "mole",           mk_moveset: Moveset::vanisher,  biome: HabitatTheme::Forest,   noise_min: 0.00, noise_max: 0.45, weight: 12 },
+    SpawnEntry { species: "albinoDeer",     mk_moveset: Moveset::burster,   biome: HabitatTheme::Forest,   noise_min: 0.10, noise_max: 0.60, weight: 10 },
+    // Medium noise: foxes and busier woodland life.
     SpawnEntry { species: "fox",            mk_moveset: Moveset::burster,   biome: HabitatTheme::Forest,   noise_min: 0.30, noise_max: 0.75, weight: 22 },
+    SpawnEntry { species: "raccoon",        mk_moveset: Moveset::zigzagger, biome: HabitatTheme::Forest,   noise_min: 0.30, noise_max: 0.78, weight: 18 },
     SpawnEntry { species: "snowyOwl",       mk_moveset: Moveset::vanisher,  biome: HabitatTheme::Forest,   noise_min: 0.35, noise_max: 0.80, weight: 14 },
-    SpawnEntry { species: "fox",            mk_moveset: Moveset::zigzagger, biome: HabitatTheme::Forest,   noise_min: 0.55, noise_max: 1.00, weight: 18 },
-    SpawnEntry { species: "lion",           mk_moveset: Moveset::aggressor, biome: HabitatTheme::Forest,   noise_min: 0.70, noise_max: 1.00, weight: 8  },
+    SpawnEntry { species: "badger",         mk_moveset: Moveset::aggressor, biome: HabitatTheme::Forest,   noise_min: 0.40, noise_max: 0.85, weight: 14 },
+    SpawnEntry { species: "lynx",           mk_moveset: Moveset::burster,   biome: HabitatTheme::Forest,   noise_min: 0.45, noise_max: 0.90, weight: 14 },
+    SpawnEntry { species: "fox",            mk_moveset: Moveset::zigzagger, biome: HabitatTheme::Forest,   noise_min: 0.55, noise_max: 1.00, weight: 16 },
+    // High noise: the dangerous, pack-feeling edge of the forest.
+    SpawnEntry { species: "boar",           mk_moveset: Moveset::aggressor, biome: HabitatTheme::Forest,   noise_min: 0.60, noise_max: 1.00, weight: 14 },
+    SpawnEntry { species: "wolf",           mk_moveset: Moveset::basher,    biome: HabitatTheme::Forest,   noise_min: 0.65, noise_max: 1.00, weight: 14 },
+    SpawnEntry { species: "fox",            mk_moveset: Moveset::vanisher,  biome: HabitatTheme::Forest,   noise_min: 0.70, noise_max: 1.00, weight: 10 },
+    SpawnEntry { species: "lion",           mk_moveset: Moveset::aggressor, biome: HabitatTheme::Forest,   noise_min: 0.72, noise_max: 1.00, weight: 8  },
     // ── Arctic ────────────────────────────────────────────────────────────
     SpawnEntry { species: "penguin",        mk_moveset: Moveset::circler,   biome: HabitatTheme::Arctic,   noise_min: 0.00, noise_max: 0.55, weight: 30 },
     SpawnEntry { species: "snowyOwl",       mk_moveset: Moveset::vanisher,  biome: HabitatTheme::Arctic,   noise_min: 0.20, noise_max: 0.70, weight: 22 },
@@ -360,9 +392,43 @@ pub fn weighted_spawn(
     None
 }
 
-// ── Shared helpers ────────────────────────────────────────────────────────────
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashSet;
 
-fn dist_sq(a: Vec2, b: Vec2) -> f32 {
-    let d = a - b;
-    d.dot(d)
+    /// The seeded climate biomes should produce a varied distribution across the
+    /// full 500k world, not one giant biome.
+    #[test]
+    fn biomes_are_varied_across_world() {
+        let seed = 0xC0FFEE;
+        let mut seen: HashSet<HabitatTheme> = HashSet::new();
+        let n = 60;
+        let span = crate::game::world_chunks::WORLD_W;
+        for i in 0..n {
+            for j in 0..n {
+                let x = (i as f32 / n as f32) * span;
+                let y = (j as f32 / n as f32) * span;
+                seen.insert(biome_at(vec2(x, y), seed));
+            }
+        }
+        assert!(seen.len() >= 4, "expected >=4 biomes across world, got {}", seen.len());
+    }
+
+    /// Biome layout must be deterministic for a seed and differ between seeds.
+    #[test]
+    fn biome_layout_depends_on_seed() {
+        let p = vec2(123_456.0, 78_910.0);
+        assert_eq!(biome_at(p, 42), biome_at(p, 42));
+        let mut differs = false;
+        for k in 0..200 {
+            let q = vec2(k as f32 * 2500.0, k as f32 * 1700.0);
+            if biome_at(q, 1) != biome_at(q, 999) {
+                differs = true;
+                break;
+            }
+        }
+        assert!(differs, "biome layout identical across seeds");
+    }
 }
+

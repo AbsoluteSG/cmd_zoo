@@ -174,21 +174,36 @@ pub struct WildAnimal {
     /// actually captured into the zoo; until then each successful catch only
     /// bumps this counter and the animal stays in the world.
     pub catches: u32,
+    /// The chunk this animal was procedurally spawned in. Stable across
+    /// migration and chunk regeneration — used as the key for persisted deltas.
+    pub origin_chunk: (i32, i32),
+    /// This animal's deterministic spawn index within its origin chunk. Together
+    /// with `origin_chunk` it forms the animal's persistent identity, so capture
+    /// deltas survive eviction + regeneration from the world seed.
+    pub spawn_index: u16,
 }
 
 impl WildAnimal {
-    pub fn new(species: SpeciesId, pos: Vec2, moveset: Moveset) -> Self {
+    pub fn new(
+        species: SpeciesId,
+        pos: Vec2,
+        moveset: Moveset,
+        origin_chunk: (i32, i32),
+        spawn_index: u16,
+    ) -> Self {
         Self {
             id: Uuid::new_v4(),
             species,
             pos,
             vel: vec2(0.0, 0.0),
             moveset,
-            wander_target: random_plane_point(),
+            wander_target: local_wander_point(pos),
             is_fleeing: false,
             flee_cooldown: 0.0,
             hidden: false,
             catches: 0,
+            origin_chunk,
+            spawn_index,
         }
     }
 
@@ -492,7 +507,7 @@ impl WildAnimal {
         let to = self.wander_target - self.pos;
         let dist = to.length();
         if dist < 12.0 {
-            self.wander_target = random_plane_point();
+            self.wander_target = local_wander_point(self.pos);
             return vec2(0.0, 0.0);
         }
         // Occasional spontaneous pause mid-wander.
@@ -517,10 +532,17 @@ fn safe_normalize(v: Vec2) -> Vec2 {
     if len < 0.001 { vec2(0.0, 0.0) } else { v / len }
 }
 
-/// Uniformly random world-space point inside the plane.
-pub fn random_plane_point() -> Vec2 {
+/// Radius (world units) within which a calm wild animal picks its next wander
+/// target. Keeps animals roaming their local neighborhood instead of striking
+/// out across the (now enormous) world.
+const WANDER_RADIUS: f32 = 600.0;
+
+/// A random wander target within `WANDER_RADIUS` of `from`, clamped to the world.
+pub fn local_wander_point(from: Vec2) -> Vec2 {
+    let dx = rand::gen_range(-WANDER_RADIUS, WANDER_RADIUS);
+    let dy = rand::gen_range(-WANDER_RADIUS, WANDER_RADIUS);
     vec2(
-        rand::gen_range(0.0f32, WORLD_W),
-        rand::gen_range(0.0f32, WORLD_H),
+        (from.x + dx).clamp(0.0, WORLD_W),
+        (from.y + dy).clamp(0.0, WORLD_H),
     )
 }

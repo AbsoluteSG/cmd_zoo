@@ -11,6 +11,8 @@ use crate::game::player::{DEFAULT_PLAYER_NAME, Player};
 use crate::game::species::SpeciesId;
 use crate::game::structure_kind;
 use crate::game::visitor::{GiftRecord, VisitorRecord};
+use crate::game::world_chunks::ChunkDelta;
+use crate::game::zoo::{Waypoint, world_seed_from_player};
 use crate::game::{Animal, AnimalState, Habitat, HabitatTheme, Structure, Zoo, species};
 use macroquad::math::vec2;
 use schema::*;
@@ -111,6 +113,28 @@ pub fn snapshot_from_zoo(zoo: &Zoo) -> ZooSnapshot {
                     .collect(),
             })
             .collect(),
+        world_seed: zoo.world_seed,
+        chunk_deltas: zoo
+            .chunk_deltas
+            .iter()
+            .filter(|(_, d)| !d.removed.is_empty() || !d.partial.is_empty())
+            .map(|((cx, cy), d)| ChunkDeltaDto {
+                cx: *cx,
+                cy: *cy,
+                removed: d.removed.clone(),
+                partial: d.partial.iter().map(|(i, c)| [*i as u32, *c]).collect(),
+            })
+            .collect(),
+        waypoints: zoo
+            .waypoints
+            .iter()
+            .map(|w| WaypointDto {
+                id: w.id,
+                name: w.name.clone(),
+                x: w.pos.x,
+                y: w.pos.y,
+            })
+            .collect(),
     }
 }
 
@@ -180,6 +204,14 @@ pub fn parse_snapshot_with_notes(bytes: &[u8]) -> Result<(ZooSnapshot, Migration
             11 => {
                 migrate_v11_to_v12(&mut value);
                 version = 12;
+            }
+            12 => {
+                migrate_v12_to_v13(&mut value);
+                version = 13;
+            }
+            13 => {
+                migrate_v13_to_v14(&mut value);
+                version = 14;
             }
             v => bail!("no migration path from schema version {v}"),
         }
@@ -452,6 +484,34 @@ fn migrate_v11_to_v12(value: &mut Value) {
     }
 }
 
+/// v12 → v13 adds the procedural world: a `world_seed` derived from the player
+/// id (so existing saves get a stable world) and an empty `chunk_deltas` list.
+fn migrate_v12_to_v13(value: &mut Value) {
+    if let Value::Object(map) = value {
+        map.insert("schema_version".into(), Value::from(13u64));
+        let seed = map
+            .get("player")
+            .and_then(|p| p.get("id"))
+            .and_then(|id| id.as_str())
+            .and_then(|s| Uuid::parse_str(s).ok())
+            .map(world_seed_from_player)
+            .unwrap_or(0);
+        map.entry("world_seed".to_string())
+            .or_insert(Value::from(seed));
+        map.entry("chunk_deltas".to_string())
+            .or_insert(Value::Array(Vec::new()));
+    }
+}
+
+/// v13 → v14 adds player-placed fast-travel waypoints (empty for old saves).
+fn migrate_v13_to_v14(value: &mut Value) {
+    if let Value::Object(map) = value {
+        map.insert("schema_version".into(), Value::from(14u64));
+        map.entry("waypoints".to_string())
+            .or_insert(Value::Array(Vec::new()));
+    }
+}
+
 /// v11 introduces isometric grid placement: each habitat gains `tile_x`/`tile_y`.
 /// Pre-v11 saves have no coordinates, so auto-layout the habitats onto the grid
 /// deterministically — row-major, stepping by the 2×2 footprint so nothing
@@ -651,6 +711,31 @@ pub fn zoo_from_snapshot(s: ZooSnapshot) -> Result<LoadedZoo> {
         discovered_recipes,
         nest_count: s.nest_count.clamp(1, crate::game::zoo::MAX_NESTS),
         exotic_skip_window: s.exotic_skip_window,
+        // A 0 seed means a pre-v13 save that slipped through without derivation;
+        // derive a stable seed from the player id so the world is reproducible.
+        world_seed: if s.world_seed == 0 {
+            world_seed_from_player(s.player.id)
+        } else {
+            s.world_seed
+        },
+        chunk_deltas: s
+            .chunk_deltas
+            .into_iter()
+            .map(|d| {
+                (
+                    (d.cx, d.cy),
+                    ChunkDelta {
+                        removed: d.removed,
+                        partial: d.partial.iter().map(|p| (p[0] as u16, p[1])).collect(),
+                    },
+                )
+            })
+            .collect(),
+        waypoints: s
+            .waypoints
+            .into_iter()
+            .map(|w| Waypoint { id: w.id, name: w.name, pos: vec2(w.x, w.y) })
+            .collect(),
         last_saved_at: s.last_saved_at,
     };
 
@@ -688,6 +773,95 @@ mod tests {
         assert_eq!(zoo2.animals.len(), zoo.animals.len());
         assert_eq!(zoo2.structures.len(), zoo.structures.len());
         assert_eq!(zoo2.claimed_gifts, zoo.claimed_gifts);
+    }
+
+    #[test]
+    fn snapshot_roundtrip_preserves_world_seed_and_deltas() {
+        let now = Utc.with_ymd_and_hms(2026, 1, 1, 12, 0, 0).unwrap();
+        let mut zoo = Zoo::new(now);
+        zoo.world_seed = 0xDEAD_BEEF_1234;
+        zoo.chunk_deltas.insert(
+            (12, -7),
+            ChunkDelta { removed: vec![0, 2], partial: vec![(1, 3)] },
+        );
+        // Empty deltas should be dropped, not serialized.
+        zoo.chunk_deltas
+            .insert((99, 99), ChunkDelta::default());
+
+        let snap = snapshot_from_zoo(&zoo);
+        let json = serde_json::to_vec(&snap).unwrap();
+        let zoo2 = zoo_from_snapshot(parse_snapshot(&json).unwrap()).unwrap().zoo;
+
+        assert_eq!(zoo2.world_seed, zoo.world_seed);
+        assert_eq!(zoo2.chunk_deltas.len(), 1, "empty delta should be pruned");
+        let d = zoo2.chunk_deltas.get(&(12, -7)).expect("delta present");
+        assert_eq!(d.removed, vec![0, 2]);
+        assert_eq!(d.partial, vec![(1, 3)]);
+    }
+
+    #[test]
+    fn snapshot_roundtrip_preserves_waypoints() {
+        let now = Utc.with_ymd_and_hms(2026, 1, 1, 12, 0, 0).unwrap();
+        let mut zoo = Zoo::new(now);
+        let id = zoo
+            .add_waypoint("Oasis", macroquad::math::vec2(123_456.0, 654_321.0))
+            .unwrap();
+
+        let snap = snapshot_from_zoo(&zoo);
+        let json = serde_json::to_vec(&snap).unwrap();
+        let zoo2 = zoo_from_snapshot(parse_snapshot(&json).unwrap()).unwrap().zoo;
+
+        assert_eq!(zoo2.waypoints.len(), 1);
+        let w = &zoo2.waypoints[0];
+        assert_eq!(w.id, id);
+        assert_eq!(w.name, "Oasis");
+        assert_eq!(w.pos.x, 123_456.0);
+        assert_eq!(w.pos.y, 654_321.0);
+    }
+
+    #[test]
+    fn v13_save_migrates_to_v14_with_empty_waypoints() {
+        let pid = Uuid::new_v4();
+        let v13 = serde_json::json!({
+            "schema_version": 13,
+            "player": { "id": pid.to_string(), "name": "Alex" },
+            "last_saved_at": "2026-01-01T00:00:00Z",
+            "coins": 100, "food": 0, "dna_helix": 0,
+            "habitats": [], "animals": [], "structures": [],
+            "claimed_gifts": [], "discovered_recipes": [],
+            "nest_count": 1, "exotic_skip_window": null, "visitors": [],
+            "world_seed": 42, "chunk_deltas": []
+        });
+        let bytes = serde_json::to_vec(&v13).unwrap();
+        let snap = parse_snapshot(&bytes).unwrap();
+        assert_eq!(snap.schema_version, SCHEMA_VERSION);
+        assert!(snap.waypoints.is_empty());
+    }
+
+    #[test]
+    fn v12_save_migrates_to_v13_with_seed_from_player() {
+        let pid = Uuid::new_v4();
+        let v12 = serde_json::json!({
+            "schema_version": 12,
+            "player": { "id": pid.to_string(), "name": "Alex" },
+            "last_saved_at": "2026-01-01T00:00:00Z",
+            "coins": 100,
+            "food": 0,
+            "dna_helix": 0,
+            "habitats": [],
+            "animals": [],
+            "structures": [],
+            "claimed_gifts": [],
+            "discovered_recipes": [],
+            "nest_count": 1,
+            "exotic_skip_window": null,
+            "visitors": []
+        });
+        let bytes = serde_json::to_vec(&v12).unwrap();
+        let snap = parse_snapshot(&bytes).unwrap();
+        assert_eq!(snap.schema_version, SCHEMA_VERSION);
+        assert_eq!(snap.world_seed, world_seed_from_player(pid));
+        assert!(snap.chunk_deltas.is_empty());
     }
 
     #[test]

@@ -701,6 +701,9 @@ static CATALOG: Lazy<HashMap<SpeciesId, SpeciesDef>> = Lazy::new(|| {
         coin_species("squirrel", "Squirrel", HabitatTheme::Forest, 0.7, 90, 40, 80, SPRINTER, false),
         coin_species("wolf", "Grey Wolf", HabitatTheme::Forest, 2.2, 420, 420, 260, BALANCED, false),
         coin_species("boar", "Wild Boar", HabitatTheme::Forest, 1.8, 360, 300, 240, TANK, false),
+        coin_species("robin", "Robin", HabitatTheme::Forest, 0.8, 90, 45, 80, SPRINTER, false),
+        coin_species("mole", "Mole", HabitatTheme::Forest, 0.7, 200, 70, 130, TANK, false),
+        coin_species("lynx", "Lynx", HabitatTheme::Forest, 1.9, 300, 340, 240, SPRINTER, false),
         // Arctic
         coin_species("arctic_fox", "Arctic Fox", HabitatTheme::Arctic, 1.4, 240, 220, 200, SPRINTER, false),
         coin_species("seal", "Harbor Seal", HabitatTheme::Arctic, 1.5, 320, 260, 220, BALANCED, false),
@@ -760,6 +763,16 @@ static CATALOG: Lazy<HashMap<SpeciesId, SpeciesDef>> = Lazy::new(|| {
         coin_species("owlfox", "Owlfox", HabitatTheme::Arctic, 3.0, 560, 1100, 300, SPRINTER, true),
         coin_species("tortdeer", "Tortdeer", HabitatTheme::Arctic, 2.2, 1200, 1000, 440, TANK, true),
         coin_species("ghostdeer", "Ghost Deer", HabitatTheme::Forest, 3.2, 720, 1300, 360, BALANCED, true),
+        // Early-game forest hybrids built from the starter species so the
+        // opening hours have rewarding, reachable crossbreeds.
+        coin_species("scamp", "Scamp", HabitatTheme::Forest, 1.6, 360, 360, 180, SPRINTER, true),
+        coin_species("lilyleap", "Lilyleap", HabitatTheme::Forest, 1.8, 300, 320, 170, SPRINTER, true),
+        coin_species("marshmask", "Marsh Mask", HabitatTheme::Forest, 2.0, 420, 420, 200, BALANCED, true),
+        coin_species("embermane", "Embermane", HabitatTheme::Forest, 2.6, 520, 620, 240, BALANCED, true),
+        coin_species("bogmane", "Bog Mane", HabitatTheme::Forest, 2.4, 560, 560, 240, TANK, true),
+        coin_species("pridelet", "Pridelet", HabitatTheme::Forest, 2.2, 460, 480, 210, SPRINTER, true),
+        coin_species("burrowkin", "Burrowkin", HabitatTheme::Forest, 1.5, 520, 360, 200, TANK, true),
+        coin_species("stagstalker", "Stagstalker", HabitatTheme::Forest, 2.8, 600, 700, 260, BALANCED, true),
     ]);
 
     // ─── Unique themed exotics (concept critters; exotic-shop only) ──────────
@@ -928,6 +941,16 @@ static RECIPES: Lazy<HashMap<(SpeciesId, SpeciesId), Vec<PoolEntry>>> = Lazy::ne
         ("snowyOwl", "arctic_fox", "owlfox"),
         ("giantTortoise", "reindeer", "tortdeer"),
         ("albinoDeer", "reindeer", "ghostdeer"),
+        // Early-game forest hybrids from the starter species — reachable quickly
+        // so the opening hours aren't boring.
+        ("fox", "field_mouse", "scamp"),
+        ("field_mouse", "blue_frog", "lilyleap"),
+        ("blue_frog", "fox", "marshmask"),
+        ("fox", "lion", "embermane"),
+        ("blue_frog", "lion", "bogmane"),
+        ("field_mouse", "lion", "pridelet"),
+        ("mole", "field_mouse", "burrowkin"),
+        ("lynx", "albinoDeer", "stagstalker"),
         // Concept hybrids: a themed exotic crossed with something from the roster.
         ("candy_dove", "blue_frog", "gumdrop"),
         ("robot_cat", "field_mouse", "glitchpaw"),

@@ -14,18 +14,18 @@ use std::collections::{HashMap, HashSet};
 use macroquad::math::{Vec2, vec2};
 
 use crate::game::biome::{self, LcgRng};
-use crate::game::wild_animal::{ALERT_RADIUS, WildAnimal};
+use crate::game::wild_animal::WildAnimal;
 
 // ── World & chunk dimensions ──────────────────────────────────────────────────
 
-pub const WORLD_W: f32 = 8192.0;
-pub const WORLD_H: f32 = 8192.0;
+pub const WORLD_W: f32 = 500_000.0;
+pub const WORLD_H: f32 = 500_000.0;
 /// Square chunk edge length in world units.
 pub const CHUNK_SIZE: f32 = 512.0;
 /// Number of chunk columns in the world grid.
-pub const CHUNKS_COLS: i32 = (WORLD_W / CHUNK_SIZE) as i32; // 16
+pub const CHUNKS_COLS: i32 = (WORLD_W / CHUNK_SIZE) as i32; // ~976
 /// Number of chunk rows in the world grid.
-pub const CHUNKS_ROWS: i32 = (WORLD_H / CHUNK_SIZE) as i32; // 16
+pub const CHUNKS_ROWS: i32 = (WORLD_H / CHUNK_SIZE) as i32; // ~976
 
 // ── Streaming radii (Chebyshev / "chessboard king" distance) ─────────────────
 
@@ -114,40 +114,66 @@ const POISSON_MIN_DIST: f32 = 90.0;
 /// Perlin noise feature scale (world units) used for spawn-table noise sampling.
 const NOISE_SCALE: f32 = 950.0;
 
-/// Wild animals won't spawn closer than this to the player's current position.
-const MIN_SPAWN_DIST: f32 = ALERT_RADIUS * 3.0;
-
 // ── Chunk data ────────────────────────────────────────────────────────────────
 
 pub struct ChunkData {
     pub animals: Vec<WildAnimal>,
-    /// True once this chunk has been visited at least once.
-    pub discovered: bool,
+}
+
+/// Player-caused deviations from a chunk's procedural generation. This is the
+/// *only* wild-world state persisted to the save file — everything else is
+/// regenerated deterministically from the world seed. Keyed in `WorldChunks`
+/// by chunk coord; an empty delta is never stored.
+#[derive(Clone, Default, Debug, PartialEq)]
+pub struct ChunkDelta {
+    /// Spawn indices of animals that have been fully captured/removed and must
+    /// not respawn when the chunk regenerates.
+    pub removed: Vec<u16>,
+    /// In-progress partial-catch counts, `(spawn_index, catches)`, restored onto
+    /// regenerated animals so multi-catch progress survives a reload.
+    pub partial: Vec<(u16, u32)>,
 }
 
 // ── WorldChunks ───────────────────────────────────────────────────────────────
 
 pub struct WorldChunks {
-    /// Persistent chunk storage — includes active and cached chunks. Animals
-    /// are always stored under the chunk they are *currently* standing in
-    /// (see `migrate_animals`), never their spawn chunk.
+    /// In-memory chunk storage for chunks near the player only. Chunks beyond
+    /// the cull radius are evicted and regenerated deterministically on re-entry.
+    /// Animals are stored under the chunk they currently stand in (see
+    /// `migrate_animals`), never necessarily their origin chunk.
     pub data: HashMap<(i32, i32), ChunkData>,
     /// The subset of `data` keys currently within the load radius.
     active: HashSet<(i32, i32)>,
-    /// Chunks whose one-time spawn roll has already run. Tracked separately
-    /// from `data` so that migrating an animal *into* a not-yet-visited chunk
-    /// (which creates a `data` entry) doesn't suppress that chunk's own future
-    /// spawn — and so re-entering a chunk never double-spawns.
-    spawned: HashSet<(i32, i32)>,
+    /// Per-world procedural-generation seed. Drives all biome/spawn determinism.
+    world_seed: u64,
+    /// Persisted deltas: captures/partial-catch progress per chunk. Re-applied
+    /// whenever a chunk is (re)generated so captured animals stay gone.
+    deltas: HashMap<(i32, i32), ChunkDelta>,
 }
 
 impl WorldChunks {
-    pub fn new() -> Self {
+    pub fn new(world_seed: u64, deltas: HashMap<(i32, i32), ChunkDelta>) -> Self {
         Self {
             data: HashMap::new(),
             active: HashSet::new(),
-            spawned: HashSet::new(),
+            world_seed,
+            deltas,
         }
+    }
+
+    /// The world's procedural seed (for syncing back into the save snapshot).
+    pub fn world_seed(&self) -> u64 {
+        self.world_seed
+    }
+
+    /// Clone the persisted deltas for serialization into the save snapshot.
+    pub fn export_deltas(&self) -> HashMap<(i32, i32), ChunkDelta> {
+        self.deltas.clone()
+    }
+
+    /// Record a delta mutation for `coord`, creating the entry on demand.
+    fn delta_mut(&mut self, coord: (i32, i32)) -> &mut ChunkDelta {
+        self.deltas.entry(coord).or_default()
     }
 
     // ── Streaming ─────────────────────────────────────────────────────────────
@@ -159,21 +185,27 @@ impl WorldChunks {
         let pc = world_to_chunk(player_pos);
 
         // Re-home moved animals into whatever chunk they now physically occupy.
-        // This must run *before* culling so an animal that has wandered/fled out
-        // of its origin chunk is relocated to its real chunk — guaranteeing it
-        // never disappears merely because its origin chunk drifts off-screen.
+        // This must run *before* eviction so an animal that has wandered/fled out
+        // of its current chunk is relocated to its real chunk — guaranteeing it
+        // never disappears merely because its old chunk drifts off-screen.
         self.migrate_animals();
 
-        // Deactivate chunks outside the cull radius.
-        let prev: Vec<(i32, i32)> = self.active.iter().copied().collect();
-        for coord in prev {
-            if chebyshev(coord, pc) > CULL_RADIUS {
-                self.active.remove(&coord);
-                // ChunkData stays in self.data (cached for instant re-entry).
+        // Evict chunks outside the cull radius entirely (free memory). Captures
+        // are already recorded in `deltas`, so re-entry regenerates the chunk
+        // minus the removed animals.
+        self.data.retain(|coord, _| chebyshev(*coord, pc) <= CULL_RADIUS);
+        self.active.retain(|coord| chebyshev(*coord, pc) <= CULL_RADIUS);
+
+        // Identities already loaded somewhere — so a chunk regenerating doesn't
+        // duplicate an animal that previously migrated into a still-loaded chunk.
+        let mut loaded: HashSet<(i32, i32, u16)> = HashSet::new();
+        for chunk in self.data.values() {
+            for a in &chunk.animals {
+                loaded.insert((a.origin_chunk.0, a.origin_chunk.1, a.spawn_index));
             }
         }
 
-        // Activate / spawn chunks inside the load radius.
+        // Activate + (re)generate chunks inside the load radius.
         for dy in -LOAD_RADIUS..=LOAD_RADIUS {
             for dx in -LOAD_RADIUS..=LOAD_RADIUS {
                 let coord = (pc.0 + dx, pc.1 + dy);
@@ -182,21 +214,46 @@ impl WorldChunks {
 
                 self.active.insert(coord);
 
-                // First spawn-roll for this chunk → place animals, avoiding the
-                // player. Gated by `spawned` (not `data`) so that an animal
-                // migrating *into* a never-visited chunk doesn't suppress its
-                // own future spawn, and re-entry never double-spawns.
-                if !self.spawned.contains(&coord) {
-                    self.spawned.insert(coord);
-                    let animals = spawn_chunk_animals(coord, player_pos);
-                    self.data
-                        .entry(coord)
-                        .or_insert_with(|| ChunkData { animals: Vec::new(), discovered: true })
-                        .animals
-                        .extend(animals);
+                if !self.data.contains_key(&coord) {
+                    let animals = self.regenerate_chunk(coord, &loaded);
+                    for a in &animals {
+                        loaded.insert((a.origin_chunk.0, a.origin_chunk.1, a.spawn_index));
+                    }
+                    self.data.insert(coord, ChunkData { animals });
                 }
             }
         }
+    }
+
+    /// Deterministically regenerate `coord` from the world seed, then apply its
+    /// persisted delta: drop captured spawn indices, restore partial-catch
+    /// counts, and skip any identity already loaded elsewhere (anti-duplication).
+    fn regenerate_chunk(
+        &self,
+        coord: (i32, i32),
+        loaded: &HashSet<(i32, i32, u16)>,
+    ) -> Vec<WildAnimal> {
+        let delta = self.deltas.get(&coord);
+        let mut out = spawn_chunk_animals(coord, self.world_seed);
+        out.retain(|a| {
+            if loaded.contains(&(coord.0, coord.1, a.spawn_index)) {
+                return false;
+            }
+            if let Some(d) = delta {
+                if d.removed.contains(&a.spawn_index) {
+                    return false;
+                }
+            }
+            true
+        });
+        if let Some(d) = delta {
+            for a in &mut out {
+                if let Some((_, c)) = d.partial.iter().find(|(idx, _)| *idx == a.spawn_index) {
+                    a.catches = *c;
+                }
+            }
+        }
+        out
     }
 
     /// Relocate every animal that has moved out of the chunk it is stored under
@@ -219,7 +276,7 @@ impl WorldChunks {
         for (dest, animal) in moved {
             self.data
                 .entry(dest)
-                .or_insert_with(|| ChunkData { animals: Vec::new(), discovered: true })
+                .or_insert_with(|| ChunkData { animals: Vec::new() })
                 .animals
                 .push(animal);
         }
@@ -279,30 +336,48 @@ impl WorldChunks {
     /// compares the count against `species::captures_required` to decide whether
     /// the animal is now fully captured (then calls `remove_animal`).
     pub fn register_catch(&mut self, id: uuid::Uuid) -> Option<(&'static str, u32)> {
-        for coord in &self.active {
+        // Locate the animal and read its persistent identity + new count.
+        let mut found: Option<((i32, i32), u16, &'static str, u32)> = None;
+        for coord in self.active.iter() {
             if let Some(chunk) = self.data.get_mut(coord) {
                 if let Some(animal) = chunk.animals.iter_mut().find(|a| a.id == id) {
                     animal.catches += 1;
-                    return Some((animal.species, animal.catches));
+                    found = Some((animal.origin_chunk, animal.spawn_index, animal.species, animal.catches));
+                    break;
                 }
             }
         }
-        None
+        let (origin, idx, species, count) = found?;
+        // Persist the partial-catch progress so it survives evict/regeneration.
+        let delta = self.delta_mut(origin);
+        match delta.partial.iter_mut().find(|(i, _)| *i == idx) {
+            Some((_, c)) => *c = count,
+            None => delta.partial.push((idx, count)),
+        }
+        Some((species, count))
     }
 
-    /// Remove an animal by UUID across all active chunks.
-    /// Returns its species ID if found, or `None` if not found.
+    /// Remove an animal by UUID across all active chunks, recording its removal
+    /// in the chunk delta so it never respawns. Returns its species ID if found.
     pub fn remove_animal(&mut self, id: uuid::Uuid) -> Option<&'static str> {
-        for coord in &self.active {
+        let mut found: Option<((i32, i32), u16, &'static str)> = None;
+        for coord in self.active.iter() {
             if let Some(chunk) = self.data.get_mut(coord) {
                 if let Some(pos) = chunk.animals.iter().position(|a| a.id == id) {
-                    let species = chunk.animals[pos].species;
-                    chunk.animals.remove(pos);
-                    return Some(species);
+                    let a = chunk.animals.remove(pos);
+                    found = Some((a.origin_chunk, a.spawn_index, a.species));
+                    break;
                 }
             }
         }
-        None
+        let (origin, idx, species) = found?;
+        let delta = self.delta_mut(origin);
+        if !delta.removed.contains(&idx) {
+            delta.removed.push(idx);
+        }
+        // Once removed, partial progress is irrelevant — drop it.
+        delta.partial.retain(|(i, _)| *i != idx);
+        Some(species)
     }
 }
 
@@ -337,14 +412,15 @@ fn chunk_overlaps_rect(coord: (i32, i32), tl: Vec2, br: Vec2) -> bool {
     cx < br.x && cx + CHUNK_SIZE > tl.x && cy < br.y && cy + CHUNK_SIZE > tl.y
 }
 
-/// Spawn wild animals for a newly-discovered chunk using the full biome pipeline:
-///   1. Reject chunks inside the zoo plot (home is animal-free wilderness-wise)
-///   2. Identify biome + noise at chunk centre
-///   3. Roll the per-chunk encounter gate — most chunks come up empty
-///   4. Generate Poisson-disk candidate positions (min separation enforced)
-///   5. Weighted roll per candidate (biome × noise → species or "no spawn")
-///   6. Skip candidates inside the player-safe radius or the zoo exclusion
-fn spawn_chunk_animals(coord: (i32, i32), player_pos: Vec2) -> Vec<WildAnimal> {
+/// Deterministically spawn the wild animals for `coord` from the world seed.
+/// This is a *pure* function of `(coord, world_seed)` — it must not depend on
+/// the player's position or any runtime state, so that the same chunk always
+/// regenerates the same ordered animal list (giving each animal a stable
+/// `spawn_index` for delta tracking).
+///
+/// Pipeline: reject the zoo plot → classify biome + noise at chunk centre →
+/// roll the encounter gate → Poisson-disk candidates → weighted species roll.
+fn spawn_chunk_animals(coord: (i32, i32), world_seed: u64) -> Vec<WildAnimal> {
     let origin = chunk_origin(coord);
     let chunk_centre = origin + vec2(CHUNK_SIZE * 0.5, CHUNK_SIZE * 0.5);
 
@@ -353,13 +429,18 @@ fn spawn_chunk_animals(coord: (i32, i32), player_pos: Vec2) -> Vec<WildAnimal> {
         return Vec::new();
     }
 
-    // Biome classification and noise value at chunk centre.
-    let biome = biome::biome_at(chunk_centre);
-    let noise = biome::noise2d(chunk_centre.x, chunk_centre.y, NOISE_SCALE);
+    // Biome classification and noise value at chunk centre (seed-driven).
+    let biome = biome::biome_at(chunk_centre, world_seed);
+    let noise = biome::noise2d(
+        chunk_centre.x + (world_seed & 0xFFFF) as f32,
+        chunk_centre.y + ((world_seed >> 16) & 0xFFFF) as f32,
+        NOISE_SCALE,
+    );
 
-    // Deterministic seed from chunk coordinates.
-    let seed = (coord.0 as u64)
-        .wrapping_mul(73_856_093)
+    // Deterministic seed from world seed + chunk coordinates.
+    let seed = world_seed
+        .wrapping_mul(0x9E37_79B9_7F4A_7C15)
+        .wrapping_add((coord.0 as u64).wrapping_mul(73_856_093))
         .wrapping_add((coord.1 as u64).wrapping_mul(19_349_663));
     let mut rng = LcgRng::new(seed);
 
@@ -376,19 +457,98 @@ fn spawn_chunk_animals(coord: (i32, i32), player_pos: Vec2) -> Vec<WildAnimal> {
     // Poisson-disk candidates — spatially well-distributed within the chunk.
     let candidates = biome::poisson_disk(origin, CHUNK_SIZE, CHUNK_SIZE, POISSON_MIN_DIST, seed);
 
-    let min_dist_sq = MIN_SPAWN_DIST * MIN_SPAWN_DIST;
     let mut animals = Vec::new();
 
     for pos in candidates {
         if animals.len() >= max_here { break; }
         if in_zoo_exclusion(pos) { continue; }
-        if (pos - player_pos).length_squared() < min_dist_sq { continue; }
 
         // Weighted roll: biome + noise → species or None.
         if let Some((species, mk)) = biome::weighted_spawn(biome, noise, &mut rng) {
-            animals.push(WildAnimal::new(species, pos, mk()));
+            let spawn_index = animals.len() as u16;
+            animals.push(WildAnimal::new(species, pos, mk(), coord, spawn_index));
         }
     }
 
     animals
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Regenerating the same chunk from the same seed must yield an identical
+    /// ordered animal list — this is what makes spawn indices a stable identity.
+    #[test]
+    fn spawn_is_deterministic_per_seed() {
+        let seed = 0x00AB_CDEF;
+        for cy in 40..55 {
+            for cx in 40..55 {
+                let a = spawn_chunk_animals((cx, cy), seed);
+                let b = spawn_chunk_animals((cx, cy), seed);
+                assert_eq!(a.len(), b.len(), "len differs at ({cx},{cy})");
+                for (x, y) in a.iter().zip(b.iter()) {
+                    assert_eq!(x.species, y.species);
+                    assert_eq!(x.spawn_index, y.spawn_index);
+                    assert_eq!(x.origin_chunk, y.origin_chunk);
+                    assert_eq!(x.pos, y.pos);
+                }
+            }
+        }
+    }
+
+    /// Different world seeds must produce different worlds.
+    #[test]
+    fn different_seeds_produce_different_worlds() {
+        let mut differs = false;
+        for cy in 40..70 {
+            for cx in 40..70 {
+                let a = spawn_chunk_animals((cx, cy), 1);
+                let b = spawn_chunk_animals((cx, cy), 2);
+                if a.len() != b.len()
+                    || a.iter().zip(b.iter()).any(|(x, y)| x.species != y.species)
+                {
+                    differs = true;
+                }
+            }
+        }
+        assert!(differs, "two different seeds generated identical worlds");
+    }
+
+    /// A capture recorded as a chunk delta must survive eviction + regeneration:
+    /// the captured animal does not reappear when the chunk reloads.
+    #[test]
+    fn capture_delta_survives_regeneration() {
+        // Find a seed that places at least one animal near a non-zoo position.
+        let pos = vec2(100_000.0, 100_000.0);
+        let mut seed = 0u64;
+        let mut world = None;
+        for s in 1..3000u64 {
+            let mut w = WorldChunks::new(s, HashMap::new());
+            w.update(pos);
+            if !w.active_animals().is_empty() {
+                seed = s;
+                world = Some(w);
+                break;
+            }
+        }
+        let mut w = world.expect("no seed produced a nearby animal");
+
+        let (id, origin, idx) = {
+            let a = w.active_animals()[0];
+            (a.id, a.origin_chunk, a.spawn_index)
+        };
+        assert!(w.remove_animal(id).is_some());
+        let deltas = w.export_deltas();
+        assert!(!deltas.is_empty(), "removal did not record a delta");
+
+        // Fresh world from the same seed + persisted deltas, reload same area.
+        let mut w2 = WorldChunks::new(seed, deltas);
+        w2.update(pos);
+        let reappeared = w2
+            .active_animals()
+            .iter()
+            .any(|a| a.origin_chunk == origin && a.spawn_index == idx);
+        assert!(!reappeared, "captured animal reappeared after regeneration");
+    }
 }

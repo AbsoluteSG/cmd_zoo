@@ -2,7 +2,7 @@
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-pub const SCHEMA_VERSION: u32 = 12;
+pub const SCHEMA_VERSION: u32 = 14;
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct ZooSnapshot {
@@ -32,6 +32,37 @@ pub struct ZooSnapshot {
     /// pre-v12 JSON loadable through the migrator.
     #[serde(default)]
     pub visitors: Vec<VisitorDto>,
+    /// New in v13. Procedural-generation seed for the wild world. `serde(default)`
+    /// keeps pre-v13 JSON loadable; the migrator/restore derive a seed when 0.
+    #[serde(default)]
+    pub world_seed: u64,
+    /// New in v13. Compact per-chunk deltas (captures / partial-catch progress)
+    /// — the only wild-world state persisted; the rest regenerates from the seed.
+    #[serde(default)]
+    pub chunk_deltas: Vec<ChunkDeltaDto>,
+    /// New in v14. Player-placed fast-travel waypoints (home zoo is implicit).
+    #[serde(default)]
+    pub waypoints: Vec<WaypointDto>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct WaypointDto {
+    pub id: Uuid,
+    pub name: String,
+    pub x: f32,
+    pub y: f32,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct ChunkDeltaDto {
+    pub cx: i32,
+    pub cy: i32,
+    /// Spawn indices of animals that were captured/removed.
+    #[serde(default)]
+    pub removed: Vec<u16>,
+    /// Partial-catch progress as `[spawn_index, catches]` pairs.
+    #[serde(default)]
+    pub partial: Vec<[u32; 2]>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]

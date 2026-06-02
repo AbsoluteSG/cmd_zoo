@@ -35,6 +35,7 @@ pub enum Screen {
     Shop,
     Breeding,
     Settings,
+    Waypoints,
 }
 
 /// Full-screen post-process filter applied to the world (UI stays crisp).
@@ -267,6 +268,9 @@ impl GameApp {
         let session = Session::solo(zoo.player.id, spawn);
         let mut camera = default_camera();
         camera.snap_to(spawn, vec2(screen_width(), screen_height()));
+        // Seed the wild world from the save (regenerated on the fly; only the
+        // chunk deltas come from disk).
+        let world = WorldChunks::new(zoo.world_seed, zoo.chunk_deltas.clone());
         Self {
             zoo,
             repo,
@@ -275,7 +279,7 @@ impl GameApp {
             textures: Textures::new(),
             sounds: Sounds::default(),
             critters,
-            world: WorldChunks::new(),
+            world,
             catch_state: CatchState::default(),
             screen: Screen::World,
             menu_t: 0.0,
@@ -539,6 +543,7 @@ impl GameApp {
         let after = self.breeding_pair_count();
         if after < before {
             self.set_status(format!("{} gestation(s) completed", before - after));
+            self.sync_world_to_zoo();
             self.zoo.last_saved_at = now;
             if let Ok(mt) = access.save(&self.zoo) {
                 self.last_modtime = mt;
@@ -571,6 +576,9 @@ impl GameApp {
         }
         if is_key_pressed(KeyCode::Key3) {
             self.toggle_screen(Screen::Settings);
+        }
+        if is_key_pressed(KeyCode::Key4) {
+            self.toggle_screen(Screen::Waypoints);
         }
         if is_key_pressed(KeyCode::Escape) {
             self.set_screen(Screen::World);
@@ -789,6 +797,44 @@ impl GameApp {
         self.breeding_second_pick = None;
     }
 
+    /// Instantly move the local avatar to `pos`: snap the camera, stream the
+    /// destination chunks, and close any open menu. Used by waypoint teleport.
+    pub fn teleport_to(&mut self, pos: Vec2) {
+        {
+            let a = self.session.my_avatar_mut();
+            a.pos = pos;
+            a.vel = vec2(0.0, 0.0);
+        }
+        self.camera
+            .snap_to(pos, vec2(screen_width(), screen_height()));
+        self.world.update(pos);
+        self.set_screen(Screen::World);
+    }
+
+    /// Drop a fast-travel waypoint at the local avatar's current position.
+    pub fn add_waypoint_here(&mut self, now: DateTime<Utc>) {
+        let pos = self.session.my_avatar().pos;
+        let name = self.zoo.next_waypoint_name();
+        match self.zoo.add_waypoint(name.clone(), pos) {
+            Some(_) => {
+                self.save_under_lock(now);
+                // No dedicated icon yet → falls back to the glow token badge.
+                self.push_notification(name, "Waypoint set", NotifIcon::Currency("waypoint"));
+            }
+            None => self.set_status(format!(
+                "Waypoint limit reached ({})",
+                crate::game::zoo::Zoo::MAX_WAYPOINTS
+            )),
+        }
+    }
+
+    /// Remove a waypoint by id and persist.
+    pub fn remove_waypoint(&mut self, id: Uuid, now: DateTime<Utc>) {
+        if self.zoo.remove_waypoint(id) {
+            self.save_under_lock(now);
+        }
+    }
+
     /// Idle animals eligible to breed with `first_pick` (different species and
     /// a valid crossbreed pool). With no first pick, all idle animals.
     pub fn breeding_candidates(&self, first_pick: Option<Uuid>) -> Vec<&Animal> {
@@ -926,8 +972,16 @@ impl GameApp {
         }
     }
 
+    /// Mirror the live wild-world state (seed + accumulated chunk deltas) into
+    /// the zoo so it gets serialized on the next save.
+    fn sync_world_to_zoo(&mut self) {
+        self.zoo.world_seed = self.world.world_seed();
+        self.zoo.chunk_deltas = self.world.export_deltas();
+    }
+
     /// Lock, save, update modtime. Call after any user-driven mutation.
     pub fn save_under_lock(&mut self, now: DateTime<Utc>) {
+        self.sync_world_to_zoo();
         self.zoo.last_saved_at = now;
         let repo = self.repo.clone();
         if let Ok(access) = repo.lock() {

@@ -53,7 +53,7 @@ pub fn draw_scene(app: &mut GameApp, now: DateTime<Utc>) {
             if tile_cx < 0.0 || tile_cx > PLANE_W || tile_cy < 0.0 || tile_cy > PLANE_H {
                 continue;
             }
-            let color = biome::biome_color_at(vec2(tile_cx, tile_cy));
+            let color = biome::biome_color_at(vec2(tile_cx, tile_cy), app.zoo.world_seed);
             let (pos, size) = view::tile_rect(tx, ty, BTILE, &cam);
             // +1 px overlap prevents seams between tiles.
             draw_rectangle(pos.x, pos.y, size.x + 1.0, size.y + 1.0, color);
@@ -62,6 +62,9 @@ pub fn draw_scene(app: &mut GameApp, now: DateTime<Utc>) {
 
     // --- Zoo plot: tinted floor + fence outline marking the home enclosure -
     draw_zoo_plot(&cam);
+
+    // --- Waypoint beacons: glowing beams on the ground ---------------------
+    draw_waypoint_beams(app);
 
     // --- Critters + every session avatar, depth-sorted by screen-Y (feet) -
     // All avatars (host + visitors) join the same painter's-algorithm pass
@@ -269,6 +272,58 @@ fn draw_zoo_plot(cam: &Camera) {
     );
 }
 
+// ── Waypoint beacons ───────────────────────────────────────────────────────────
+
+const BEAM_COLOR: Color = color_u8!(120, 235, 200, 255);
+
+/// Draw a glowing vertical beam at every player waypoint within view.
+fn draw_waypoint_beams(app: &GameApp) {
+    let cam = app.camera;
+    let (tl, br) = view::camera_world_rect(&cam, screen_width(), screen_height());
+    let pulse = (get_time() as f32 * 2.2).sin() * 0.5 + 0.5;
+    let margin = 300.0;
+    for w in &app.zoo.waypoints {
+        if w.pos.x < tl.x - margin || w.pos.x > br.x + margin
+            || w.pos.y < tl.y - margin || w.pos.y > br.y + margin
+        {
+            continue;
+        }
+        draw_beam(view::world_to_screen(w.pos, &cam), cam.zoom, pulse);
+    }
+}
+
+/// A single ground beacon: base glow + a fading vertical column + bright core.
+fn draw_beam(feet: Vec2, zoom: f32, pulse: f32) {
+    let g = BEAM_COLOR;
+
+    // Base glow discs on the ground.
+    let base_rx = (38.0 + pulse * 8.0) * zoom;
+    let base_ry = base_rx * 0.36;
+    draw_ellipse(feet.x, feet.y, base_rx, base_ry, 0.0, Color::new(g.r, g.g, g.b, 0.26));
+    draw_ellipse(feet.x, feet.y, base_rx * 0.55, base_ry * 0.55, 0.0, Color::new(g.r, g.g, g.b, 0.5));
+
+    // Vertical column — stacked segments fading and narrowing upward.
+    let height = (230.0 + pulse * 30.0) * zoom;
+    let width = 18.0 * zoom;
+    const SEGS: usize = 24;
+    for i in 0..SEGS {
+        let t = i as f32 / SEGS as f32; // 0 bottom → 1 top
+        let yb = feet.y - t * height;
+        let seg_h = height / SEGS as f32 + 1.0;
+        let wseg = width * (1.0 - t * 0.55);
+        let a = (1.0 - t) * 0.5 * (0.7 + 0.3 * pulse);
+        draw_rectangle(feet.x - wseg * 0.5, yb - seg_h, wseg, seg_h, Color::new(g.r, g.g, g.b, a));
+    }
+
+    // Bright core line.
+    draw_line(
+        feet.x, feet.y,
+        feet.x, feet.y - height * 0.85,
+        2.0 * zoom,
+        Color::new(1.0, 1.0, 1.0, 0.5 * (0.6 + 0.4 * pulse)),
+    );
+}
+
 // ── Wild animals + catch circle ───────────────────────────────────────────────
 
 /// Draw wild animals visible in the camera frustum and, in catch mode, the
@@ -407,7 +462,7 @@ pub fn draw_hud(app: &mut GameApp) {
     let hint = if app.catch_state.active {
         "C exit catch · hover a wild animal to catch it"
     } else {
-        "1 Shop · 2 Breeding · 3 Settings · WASD move · C catch · scroll zoom"
+        "1 Shop · 2 Breeding · 3 Settings · 4 Waypoints · WASD move · C catch · scroll zoom"
     };
     draw_text(hint, 14.0, 46.0, 18.0, TEXT_DIM);
 

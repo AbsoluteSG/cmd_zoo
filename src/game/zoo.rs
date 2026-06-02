@@ -2,6 +2,7 @@
 use std::fmt;
 
 use chrono::{DateTime, Duration, Utc};
+use macroquad::math::Vec2;
 use uuid::Uuid;
 
 use super::animal::{Animal, AnimalState, MAX_ANIMAL_LEVEL, animal_level_up_cost};
@@ -17,9 +18,28 @@ use super::structure::{
     structure_upgrade_cost,
 };
 use super::structure_kind::{self, StructureKindId};
+use super::world_chunks::ChunkDelta;
 use crate::share::{
     GiftContents, GiftPayload, SharedSnapshotPayload, SnapshotView, SpeciesTallyEntry,
 };
+
+/// Derive a stable per-world procedural seed from the owning player's id, so a
+/// given save always regenerates the same world. New games get a fresh (random)
+/// seed because the player id is itself random; the v12→v13 migration uses the
+/// same derivation to give existing saves a stable world.
+pub fn world_seed_from_player(id: Uuid) -> u64 {
+    let (lo, hi) = id.as_u64_pair();
+    lo ^ hi.rotate_left(32)
+}
+
+/// A player-placed fast-travel marker in the wild world. The home zoo is an
+/// implicit default destination and is *not* stored here.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Waypoint {
+    pub id: Uuid,
+    pub name: String,
+    pub pos: Vec2,
+}
 
 pub struct Zoo {
     /// The local owner of this zoo (host in M2 co-op). Keeping the field name
@@ -52,6 +72,16 @@ pub struct Zoo {
     /// the *next* one (see `exotic_shop::effective_window`); self-expires once
     /// it opens naturally. `None` normally.
     pub exotic_skip_window: Option<i64>,
+    /// Procedural-generation seed for the wild world. The entire 500k×500k map is
+    /// regenerated on the fly from this seed; only `chunk_deltas` is persisted
+    /// beyond it. Added in schema v13.
+    pub world_seed: u64,
+    /// Player-caused deviations from the procedural wild world (captures and
+    /// partial-catch progress), keyed by chunk coord. The only wild-world state
+    /// saved to disk — everything else regenerates from `world_seed`.
+    pub chunk_deltas: HashMap<(i32, i32), ChunkDelta>,
+    /// Player-placed fast-travel waypoints (the home zoo is implicit). Added v14.
+    pub waypoints: Vec<Waypoint>,
     pub last_saved_at: DateTime<Utc>,
 }
 
@@ -98,8 +128,10 @@ impl Zoo {
     pub fn new(now: DateTime<Utc>) -> Self {
         let starter_habitat = Habitat::new(HabitatTheme::Forest);
         let starter_structure = Structure::new("hay_bale", now);
+        let player = Player::new_default();
+        let world_seed = world_seed_from_player(player.id);
         Self {
-            player: Player::new_default(),
+            player,
             visitors: HashMap::new(),
             coins: 100,
             food: 0,
@@ -111,8 +143,37 @@ impl Zoo {
             discovered_recipes: HashSet::new(),
             nest_count: 1,
             exotic_skip_window: None,
+            world_seed,
+            chunk_deltas: HashMap::new(),
+            waypoints: Vec::new(),
             last_saved_at: now,
         }
+    }
+
+    /// Maximum number of player-placed waypoints.
+    pub const MAX_WAYPOINTS: usize = 12;
+
+    /// Add a fast-travel waypoint at `pos`. Returns its id, or `None` if the
+    /// waypoint cap has been reached.
+    pub fn add_waypoint(&mut self, name: impl Into<String>, pos: Vec2) -> Option<Uuid> {
+        if self.waypoints.len() >= Self::MAX_WAYPOINTS {
+            return None;
+        }
+        let id = Uuid::new_v4();
+        self.waypoints.push(Waypoint { id, name: name.into(), pos });
+        Some(id)
+    }
+
+    /// Remove a waypoint by id. Returns true if one was removed.
+    pub fn remove_waypoint(&mut self, id: Uuid) -> bool {
+        let before = self.waypoints.len();
+        self.waypoints.retain(|w| w.id != id);
+        self.waypoints.len() != before
+    }
+
+    /// A default auto-generated waypoint name (`Waypoint N`).
+    pub fn next_waypoint_name(&self) -> String {
+        format!("Waypoint {}", self.waypoints.len() + 1)
     }
 
     /// Pay `SKIP_WAIT_DNA_COST` DNA Helix to open the next exotic-shop window

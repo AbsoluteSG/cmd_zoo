@@ -4,6 +4,7 @@
 //!
 //! All game rules live in `crate::game`; this is glue + presentation.
 
+use std::collections::VecDeque;
 use std::sync::Arc;
 use std::time::SystemTime;
 
@@ -15,14 +16,15 @@ use uuid::Uuid;
 use std::collections::HashMap;
 
 use crate::audio::Sounds;
+use crate::catching::CatchState;
 use crate::game::avatar_system::{self, Behavior};
 use crate::game::{Animal, AnimalState, Zoo, economy, species};
+use crate::game::world_chunks::{WorldChunks, WORLD_W, WORLD_H};
 use crate::input::{AvatarController, ControllerCtx, KeyboardController, RemoteController};
-use crate::net::demo_bot::DemoBot;
-use crate::net::{Session, loopback, protocol::JoinCode};
+use crate::net::Session;
 use crate::persistence::json_file::JsonFileRepository;
 use crate::render::textures::Textures;
-use crate::render::view::{self, Camera, CRITTER_H, PLANE_H, PLANE_W, POP_DURATION, TILT};
+use crate::render::view::{self, Camera, CRITTER_H, POP_DURATION};
 use crate::render::{menus, world};
 
 /// Which screen owns the input/overlay this frame. `World` is the live critter
@@ -101,7 +103,7 @@ impl Critter {
             animal_id,
             species,
             pos,
-            target: random_plane_point(),
+            target: random_zoo_point(),
             speed: 80.0,
             dir: vec2(-1.0, 1.0),
             idle_timer: rand::gen_range(0.0, 2.0),
@@ -122,8 +124,8 @@ impl Critter {
         let to = self.target - self.pos;
         let dist = to.length();
         if dist < 4.0 {
-            // Arrived: pause a moment, then head somewhere new.
-            self.target = random_plane_point();
+            // Arrived: pause a moment, then head somewhere new (within zoo).
+            self.target = random_zoo_point();
             self.idle_timer = rand::gen_range(0.4, 2.5);
             return;
         }
@@ -138,21 +140,49 @@ impl Critter {
     }
 }
 
-/// Build a critter for every animal in the zoo, scattered across the plane.
+/// Build a critter for every animal in the zoo, scattered within the zoo zone.
 fn critters_from_zoo(zoo: &Zoo) -> Vec<Critter> {
     zoo.animals
         .values()
-        .map(|a| Critter::new(a.id, a.species, random_plane_point()))
+        .map(|a| Critter::new(a.id, a.species, random_zoo_point()))
         .collect()
 }
 
-/// A uniformly random point inside the ground plane.
-fn random_plane_point() -> Vec2 {
-    vec2(
-        rand::gen_range(0.0, PLANE_W),
-        rand::gen_range(0.0, PLANE_H),
-    )
+/// A uniformly random point inside the enclosed 9×9 zoo plot, inset slightly
+/// from the fence. Tame critters wander here; wild animals never spawn here.
+fn random_zoo_point() -> Vec2 {
+    let c = crate::game::world_chunks::zoo_center();
+    let half = (crate::game::world_chunks::zoo_half_extent() - 48.0).max(0.0);
+    c + vec2(rand::gen_range(-half, half), rand::gen_range(-half, half))
 }
+
+/// Which texture a notification shows on its left edge.
+#[derive(Clone, Copy)]
+pub enum NotifIcon {
+    /// A currency icon from the icon table ("coin", "dna_helix").
+    Currency(&'static str),
+    /// A species sprite, looked up in the animal table.
+    Animal(&'static str),
+}
+
+/// A transient toast shown on the right edge of the screen when the player
+/// obtains or collects something. Fades in, holds, then fades out.
+pub struct Notification {
+    /// Primary label (e.g. "Coins", an animal's display name).
+    pub title: String,
+    /// Secondary label (e.g. "+250", "Captured!").
+    pub amount: String,
+    pub icon: NotifIcon,
+    /// `get_time()` when the toast was created — drives the fade tween.
+    pub created_at: f64,
+}
+
+/// Total lifetime of a notification toast, in seconds (fade-in + hold + fade-out).
+pub const NOTIF_LIFETIME: f64 = 3.6;
+/// Fade-in duration (seconds).
+pub const NOTIF_FADE_IN: f64 = 0.30;
+/// Fade-out duration (seconds), applied at the end of the lifetime.
+pub const NOTIF_FADE_OUT: f64 = 0.6;
 
 pub struct GameApp {
     pub zoo: Zoo,
@@ -162,6 +192,11 @@ pub struct GameApp {
     pub textures: Textures,
     pub sounds: Sounds,
     pub critters: Vec<Critter>,
+    /// Chunk-streamed wild world.  Owns all wild animal state and manages
+    /// load / cull / cache based on the player's position.
+    pub world: WorldChunks,
+    /// Catch-mode state (C key toggle, fill progress, hover target).
+    pub catch_state: CatchState,
     /// Active overlay screen (World / Shop / Breeding).
     pub screen: Screen,
     /// Menu open/close animation (0 = closed, 1 = open), eased each frame.
@@ -180,6 +215,8 @@ pub struct GameApp {
     pub breeding_second_pick: Option<Uuid>,
     /// Transient status line: (text, set-at via `get_time()`), cleared after 4s.
     pub status: Option<(String, f64)>,
+    /// Persistent error log: red messages shown at the bottom-left, expire after 8s.
+    pub errors: VecDeque<(String, f64)>,
     /// All in-world avatars (host + visitors) and the active net transport.
     /// In M2 single-player this is `Session::solo`; toggling "Open to online"
     /// promotes it to `Host`; joining a friend's zoo replaces it with `Visit`.
@@ -194,11 +231,6 @@ pub struct GameApp {
     /// Ordered behavior chain applied per tick. Add `DashBehavior` etc. by
     /// extending this list — no movement rewrite required.
     behaviors: Vec<Box<dyn Behavior>>,
-    /// Optional in-process demo "visitor" driven by `DemoBot`. Used by the
-    /// Settings → "Local co-op demo" affordance to prove the multi-avatar
-    /// pipeline works end-to-end without Steam. Spawned alongside the host
-    /// transport when the user enables the demo; torn down on disable.
-    demo_bot: Option<DemoBot>,
     /// Seconds since the host last broadcast a full ZooSnapshot. Throttled
     /// to ~`SNAPSHOT_BROADCAST_INTERVAL` so visitors see currency/animal
     /// changes without flooding the wire on every frame.
@@ -206,7 +238,22 @@ pub struct GameApp {
     /// Currently-being-typed join code in the Settings join-friend field.
     /// 6 chars max; uppercase Crockford base32 (matches `JoinCode::random`).
     pub join_code_buffer: String,
+    /// Right-edge toast queue for obtain/collect events. Oldest first.
+    pub notifications: Vec<Notification>,
+    /// Remaining hitstop (seconds): gameplay motion freezes while >0. Triggered
+    /// when a Basher connects a charge with the player.
+    hitstop: f32,
+    /// Remaining camera-shake (seconds), decaying. Drives a per-frame jitter
+    /// added to the camera offset after the follow lerp.
+    camera_shake: f32,
 }
+
+/// Hitstop duration applied when a Basher lands a hit.
+const BASH_HITSTOP: f32 = 0.12;
+/// Camera-shake duration applied when a Basher lands a hit.
+const BASH_SHAKE: f32 = 0.35;
+/// Peak camera-shake amplitude in screen pixels.
+const SHAKE_AMPLITUDE: f32 = 14.0;
 
 /// How often (seconds) the host re-broadcasts a full ZooSnapshot to visitors.
 /// Two seconds is fast enough that purchases feel live without saturating
@@ -216,7 +263,7 @@ const SNAPSHOT_BROADCAST_INTERVAL: f32 = 2.0;
 impl GameApp {
     pub fn new(zoo: Zoo, repo: Arc<JsonFileRepository>, last_modtime: SystemTime) -> Self {
         let critters = critters_from_zoo(&zoo);
-        let spawn = vec2(PLANE_W * 0.5, PLANE_H * 0.5);
+        let spawn = vec2(WORLD_W * 0.5, WORLD_H * 0.5);
         let session = Session::solo(zoo.player.id, spawn);
         let mut camera = default_camera();
         camera.snap_to(spawn, vec2(screen_width(), screen_height()));
@@ -228,6 +275,8 @@ impl GameApp {
             textures: Textures::new(),
             sounds: Sounds::default(),
             critters,
+            world: WorldChunks::new(),
+            catch_state: CatchState::default(),
             screen: Screen::World,
             menu_t: 0.0,
             shown_menu: Screen::World,
@@ -237,13 +286,16 @@ impl GameApp {
             breeding_first_pick: None,
             breeding_second_pick: None,
             status: None,
+            errors: VecDeque::new(),
             session,
             controller: Box::new(KeyboardController::default()),
             remotes: HashMap::new(),
             behaviors: avatar_system::default_behaviors(),
-            demo_bot: None,
             snapshot_broadcast_t: 0.0,
             join_code_buffer: String::new(),
+            notifications: Vec::new(),
+            hitstop: 0.0,
+            camera_shake: 0.0,
         }
     }
 
@@ -325,7 +377,12 @@ impl GameApp {
             Ok(_) => {
                 self.sync_critters();
                 self.save_under_lock(now);
-                self.set_status(format!("claimed gift: {} L{}", gift.species, gift.level));
+                let name = species::get(gift.species).display_name;
+                self.push_notification(
+                    name,
+                    format!("Gift · L{}", gift.level),
+                    NotifIcon::Animal(gift.species),
+                );
                 // Force a snapshot push so visitors see the updated inbox.
                 self.snapshot_broadcast_t = SNAPSHOT_BROADCAST_INTERVAL;
             }
@@ -364,31 +421,36 @@ impl GameApp {
         matches!(self.session.role, crate::net::SessionRole::Host { .. })
     }
 
-    /// Start hosting via the in-process loopback transport + a single demo
-    /// visitor bot. Stand-in for "Open Zoo to Online" until the Steam
-    /// transport lands.
-    pub fn start_local_demo(&mut self) {
-        if self.is_hosting() {
-            return;
+    /// Open the zoo for online visitors via the Steam relay (app ID 480).
+    /// No-ops when already hosting or when the `steam` feature is not compiled in.
+    pub fn start_hosting(&mut self) {
+        if self.is_hosting() { return; }
+        #[cfg(feature = "steam")]
+        {
+            use crate::net::steam::SteamTransport;
+            use crate::net::protocol::JoinCode;
+            let code = JoinCode::random();
+            match SteamTransport::host(code.as_str()) {
+                Ok(t) => {
+                    self.session.become_host(Box::new(t), code);
+                    self.set_status("Zoo open — share your 6-char code with a friend");
+                }
+                Err(e) => {
+                    self.set_status(format!("Steam hosting failed: {e}"));
+                }
+            }
         }
-        let (host_t, visitor_t) = loopback::pair(
-            crate::net::protocol::PeerId(1),
-            crate::net::protocol::PeerId(2),
-        );
-        self.session
-            .become_host(Box::new(host_t), JoinCode::random());
-        self.demo_bot = Some(DemoBot::new(Box::new(visitor_t), "Demo Bot"));
-        self.set_status("local co-op demo: bot joining…");
+        #[cfg(not(feature = "steam"))]
+        {
+            self.set_status("Build with --features steam to host online");
+        }
     }
 
-    /// Tear down local hosting (demo or otherwise) — return to solo.
+    /// Tear down hosting and return to solo.
     pub fn stop_hosting(&mut self) {
-        if let Some(mut bot) = self.demo_bot.take() {
-            bot.shutdown();
-        }
         self.session.end_hosting();
         self.remotes.clear();
-        self.set_status("hosting stopped");
+        self.set_status("Hosting stopped");
     }
 
     /// Reconcile `critters` against `zoo.animals`: add a critter for any new
@@ -402,7 +464,7 @@ impl GameApp {
         for a in self.zoo.animals.values() {
             if !known.contains(&a.id) {
                 self.critters
-                    .push(Critter::new(a.id, a.species, random_plane_point()));
+                    .push(Critter::new(a.id, a.species, random_zoo_point()));
             }
         }
     }
@@ -411,12 +473,43 @@ impl GameApp {
         self.status = Some((text.into(), get_time()));
     }
 
+    /// Queue a right-edge toast for an obtain/collect event.
+    pub fn push_notification(
+        &mut self,
+        title: impl Into<String>,
+        amount: impl Into<String>,
+        icon: NotifIcon,
+    ) {
+        self.notifications.push(Notification {
+            title: title.into(),
+            amount: amount.into(),
+            icon,
+            created_at: get_time(),
+        });
+        // Bound the queue so a flurry of events can't grow it without limit.
+        while self.notifications.len() > 6 {
+            self.notifications.remove(0);
+        }
+    }
+
+    /// Push a red error line to the persistent error log (max 5 visible at once).
+    pub fn log_error(&mut self, text: impl Into<String>) {
+        self.errors.push_back((text.into(), get_time()));
+        while self.errors.len() > 5 {
+            self.errors.pop_front();
+        }
+    }
+
     fn clear_stale_status(&mut self) {
         if let Some((_, at)) = &self.status {
             if get_time() - *at >= 4.0 {
                 self.status = None;
             }
         }
+        let now = get_time();
+        self.errors.retain(|(_, t)| now - *t < 8.0);
+        self.notifications
+            .retain(|n| now - n.created_at < NOTIF_LIFETIME);
     }
 
     /// One simulation step: pick up external writes, advance breeding, persist
@@ -483,6 +576,16 @@ impl GameApp {
             self.set_screen(Screen::World);
         }
 
+        // C toggles catch mode (only when no menu is open).
+        if is_key_pressed(KeyCode::C) && self.menu_t < 0.02 {
+            self.catch_state.toggle();
+            if self.catch_state.active {
+                self.set_status("Catch mode — hover over a wild animal");
+            } else {
+                self.set_status("Catch mode off");
+            }
+        }
+
         // Ease the open/close animation; remember which menu to keep drawing
         // while it tweens closed.
         if self.screen != Screen::World {
@@ -496,6 +599,14 @@ impl GameApp {
 
         let dt = get_frame_time();
         let menu_open = self.menu_t >= 0.02;
+
+        // Hitstop: a brief gameplay freeze after a Basher connects. Motion
+        // (avatars + wild AI + catch progress) pauses while this ticks down;
+        // streaming, net, and rendering keep running.
+        if self.hitstop > 0.0 {
+            self.hitstop -= dt;
+        }
+        let frozen = self.hitstop > 0.0;
 
         if !menu_open {
             // Left-click redeems a critter's accrued income (mouse stays the
@@ -516,11 +627,9 @@ impl GameApp {
             }
         }
 
-        // 0. Tick the in-process demo bot (no-op when None). Done before
-        //    pumping so its messages are visible this frame.
-        if let Some(bot) = self.demo_bot.as_mut() {
-            bot.tick(dt);
-        }
+        // 0. Stream world chunks around the player's current position.
+        let player_pos = self.session.my_avatar().pos;
+        self.world.update(player_pos);
 
         // 1. Pump the net transport (no-op in Solo). Inbound visitor intents
         //    are surfaced keyed by their player_id; push them into the matching
@@ -587,6 +696,11 @@ impl GameApp {
         }
         for (id, intent) in intents {
             if let Some(a) = self.session.avatars.get_mut(&id) {
+                // During hitstop the local avatar is staggered and holds still;
+                // remote avatars keep stepping so the session stays in sync.
+                if frozen && id == local_id {
+                    continue;
+                }
                 avatar_system::step(a, &intent, &world, dt, &self.behaviors);
             }
         }
@@ -615,8 +729,48 @@ impl GameApp {
             8.0,
         );
 
+        // Camera shake: decay and add a per-frame jitter scaled by how much
+        // shake remains, so it tapers off smoothly.
+        if self.camera_shake > 0.0 {
+            self.camera_shake = (self.camera_shake - dt).max(0.0);
+            let mag = SHAKE_AMPLITUDE * (self.camera_shake / BASH_SHAKE);
+            self.camera.offset += vec2(
+                rand::gen_range(-mag, mag),
+                rand::gen_range(-mag, mag),
+            );
+        }
+
         for c in &mut self.critters {
             c.update(dt);
+        }
+
+        // ── Wild animal AI + catch resolution ─────────────────────────────
+        // Skipped during hitstop so the bash freeze actually reads as a pause.
+        if !frozen {
+            let cursor_world = view::screen_to_world(mouse, &self.camera);
+            let avatar_pos = self.session.my_avatar().pos;
+            let bashed =
+                self.world
+                    .update_animal_ai(dt, cursor_world, avatar_pos, self.catch_state.active);
+
+            // A connecting Basher staggers the player and resets the catch timer.
+            if bashed {
+                self.hitstop = BASH_HITSTOP;
+                self.camera_shake = BASH_SHAKE;
+                self.catch_state.fill = 0.0;
+                self.sounds.play("poke_lion_sfx");
+            }
+
+            // Collect active animals into owned refs, run catch, then drop the
+            // borrow on self.world before calling resolve_catch (which mutates it).
+            // Fill speed scales with avatar→animal distance, so pass the live pos.
+            let caught_id: Option<uuid::Uuid> = {
+                let active = self.world.active_animals();
+                self.catch_state.update(mouse, avatar_pos, &active, &self.camera, dt)
+            };
+            if let Some(id) = caught_id {
+                self.resolve_catch(id, now);
+            }
         }
     }
 
@@ -709,17 +863,65 @@ impl GameApp {
             self.sounds.play("income_sfx");
             self.critters[idx].pop = POP_DURATION;
             self.save_under_lock(now);
-            let msg = match (res.coins, res.dna) {
-                (c, 0) => format!("+{c} coins"),
-                (0, d) => format!("+{d} DNA"),
-                (c, d) => format!("+{c} coins  +{d} DNA"),
-            };
-            self.set_status(msg);
+            if res.coins > 0 {
+                self.push_notification(
+                    "Coins",
+                    format!("+{}", res.coins),
+                    NotifIcon::Currency("coin"),
+                );
+            }
+            if res.dna > 0 {
+                self.push_notification(
+                    "DNA Helix",
+                    format!("+{}", res.dna),
+                    NotifIcon::Currency("dna_helix"),
+                );
+            }
         } else {
             // Poked a critter that isn't ready → per-species poke sound.
             self.sounds.play(&format!("poke_{species}_sfx"));
             if !at_cap {
                 self.set_status("not full yet");
+            }
+        }
+    }
+
+    /// Called when the catch circle completes for a wild animal.
+    /// Removes it from the world chunk, adds a tame L1 copy to the zoo.
+    fn resolve_catch(&mut self, id: uuid::Uuid, now: DateTime<Utc>) {
+        // Record the catch on the animal instance; rarer species must be caught
+        // multiple times before they're actually captured.
+        let Some((species, count)) = self.world.register_catch(id) else { return };
+        let name = species::get(species).display_name;
+        let required = species::captures_required(species);
+
+        // Not enough catches yet → the animal stays in the world. Reset the
+        // fill so the player has to fill the ring again for the next catch.
+        if count < required {
+            self.catch_state.fill = 0.0;
+            self.catch_state.target = None;
+            self.sounds.play("income_sfx");
+            self.set_status(format!(
+                "Caught {}! Needs {} more to capture ({}/{})",
+                name,
+                required - count,
+                count,
+                required
+            ));
+            return;
+        }
+
+        // Threshold met → remove it from the world and tame it into the zoo.
+        self.world.remove_animal(id);
+        match self.zoo.spawn_animal_freeform(species, 1, now) {
+            Ok(_) => {
+                self.sounds.play("income_sfx");
+                self.sync_critters();
+                self.save_under_lock(now);
+                self.push_notification(name, "Captured!", NotifIcon::Animal(species));
+            }
+            Err(e) => {
+                self.set_status(format!("Capture failed: {e}"));
             }
         }
     }
@@ -936,10 +1138,8 @@ fn blit(tex: &Texture2D, x: f32, y: f32, w: f32, h: f32, alpha: f32) {
     );
 }
 
-/// A camera that fits the whole ground plane on screen, centered, at startup.
+/// Default camera: zoom 0.7, centred — `snap_to` will reposition on the
+/// player spawn immediately after construction.
 fn default_camera() -> Camera {
-    let zoom = ((screen_width() * 0.9) / PLANE_W).clamp(0.3, 1.5);
-    let plane_screen = vec2(PLANE_W, PLANE_H * TILT) * zoom;
-    let offset = vec2(screen_width() * 0.5, screen_height() * 0.5) - plane_screen * 0.5;
-    Camera { offset, zoom }
+    Camera { offset: vec2(0.0, 0.0), zoom: 0.7 }
 }

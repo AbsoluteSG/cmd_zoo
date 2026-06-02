@@ -21,10 +21,10 @@ pub const DEFAULT_TILE_W: f32 = 128.0;
 /// as a camera tilted roughly 55° down (Don't Starve / Cult of the Lamb feel).
 pub const TILT: f32 = 0.6;
 
-/// Size of the freeform ground plane in flat world units (x = horizontal,
-/// y = depth before tilt). Entities roam continuously within `[0,W]×[0,H]`.
-pub const PLANE_W: f32 = 2048.0;
-pub const PLANE_H: f32 = 2048.0;
+/// Size of the freeform ground plane — canonical values live in
+/// `game::world_chunks`; these aliases let render code keep its old names.
+pub const PLANE_W: f32 = crate::game::world_chunks::WORLD_W;
+pub const PLANE_H: f32 = crate::game::world_chunks::WORLD_H;
 
 /// Base on-screen height (px, pre-zoom) of a critter sprite. Shared by the
 /// renderer and the click hit-test so they stay in sync.
@@ -47,6 +47,21 @@ pub fn pop_scale(pop: f32) -> f32 {
 /// compressed by `TILT`, then scaled by zoom and shifted by the camera pan.
 pub fn world_to_screen(world: Vec2, cam: &Camera) -> Vec2 {
     vec2(world.x, world.y * TILT) * cam.zoom + cam.offset
+}
+
+/// Inverse of [`world_to_screen`]: screen position → continuous world-space
+/// position.  Used to convert the mouse cursor into world coordinates for AI.
+pub fn screen_to_world(screen: Vec2, cam: &Camera) -> Vec2 {
+    let local = (screen - cam.offset) / cam.zoom;
+    vec2(local.x, local.y / TILT)
+}
+
+/// World-space axis-aligned bounding box visible through the camera.
+/// Returns `(top_left, bottom_right)` — used for chunk frustum culling.
+pub fn camera_world_rect(cam: &Camera, screen_w: f32, screen_h: f32) -> (Vec2, Vec2) {
+    let tl = screen_to_world(vec2(0.0, 0.0), cam);
+    let br = screen_to_world(vec2(screen_w, screen_h), cam);
+    (tl, br)
 }
 
 /// On-screen (pre-zoom) height of one tile row for a given tile width.

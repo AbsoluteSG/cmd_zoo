@@ -122,22 +122,14 @@ fn draw_settings(app: &mut GameApp, now: DateTime<Utc>, ctx: Ctx) {
         y += 40.0;
     }
 
-    // ── Online (M2 stub: loopback demo until Steam transport lands) ──────
+    // ── Online (Steam relay, app ID 480) ────────────────────────────────
     y += 8.0;
     label(&ctx, px + 26.0, y, "Online", 18.0, ACCENT);
     y += 18.0;
     let hosting = app.is_hosting();
-    let toggle_label = if hosting {
-        "Stop hosting"
-    } else {
-        "Open zoo (local demo)"
-    };
+    let toggle_label = if hosting { "Stop hosting" } else { "Open Zoo (Steam)" };
     if button(&ctx, px + 26.0, y, pw - 52.0, 30.0, toggle_label, true) {
-        if hosting {
-            app.stop_hosting();
-        } else {
-            app.start_local_demo();
-        }
+        if hosting { app.stop_hosting(); } else { app.start_hosting(); }
     }
     y += 36.0;
     if hosting {
@@ -160,7 +152,7 @@ fn draw_settings(app: &mut GameApp, now: DateTime<Utc>, ctx: Ctx) {
             &ctx,
             px + 26.0,
             y + 14.0,
-            "(local demo spawns an in-process visitor.)",
+            "Requires Steam (app 480 — Spacewar test key).",
             14.0,
             TEXT_DIM,
         );
@@ -327,7 +319,11 @@ fn draw_shop(app: &mut GameApp, now: DateTime<Utc>, ctx: Ctx) {
                 Ok(_) => {
                     app.sync_critters();
                     app.save_under_lock(now);
-                    app.set_status(format!("bought {}", species::get(*id).display_name));
+                    app.push_notification(
+                        species::get(*id).display_name,
+                        "Purchased",
+                        crate::app::NotifIcon::Animal(*id),
+                    );
                 }
                 Err(e) => app.set_status(format!("{e}")),
             }
@@ -394,7 +390,11 @@ fn buy_exotic(app: &mut GameApp, sp: SpeciesId, price: Price, now: DateTime<Utc>
     if app.zoo.spawn_animal_freeform(sp, 1, now).is_ok() {
         app.sync_critters();
         app.save_under_lock(now);
-        app.set_status(format!("bought {}", species::get(sp).display_name));
+        app.push_notification(
+            species::get(sp).display_name,
+            "Purchased",
+            crate::app::NotifIcon::Animal(sp),
+        );
     }
 }
 
@@ -489,11 +489,12 @@ fn draw_breeding(app: &mut GameApp, now: DateTime<Utc>, ctx: Ctx) {
                         app.sync_critters();
                         app.save_under_lock(now);
                         let name = species::get(c.offspring_species).display_name;
-                        app.set_status(if c.is_hybrid_drop {
-                            format!("{name}!  +1 DNA")
-                        } else {
-                            format!("a {name} hatched")
-                        });
+                        let amount = if c.is_hybrid_drop { "Hybrid! +1 DNA" } else { "Hatched" };
+                        app.push_notification(
+                            name,
+                            amount,
+                            crate::app::NotifIcon::Animal(c.offspring_species),
+                        );
                     }
                     Err(e) => app.set_status(format!("{e}")),
                 }

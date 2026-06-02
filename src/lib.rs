@@ -6,6 +6,7 @@
 
 pub mod app;
 pub mod audio;
+pub mod catching;
 pub mod game;
 pub mod input;
 pub mod net;

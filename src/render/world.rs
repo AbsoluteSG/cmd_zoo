@@ -9,6 +9,7 @@ use crate::catching;
 use crate::game::avatar::{Facing, PlayerAvatar};
 use crate::game::biome;
 use crate::game::species::{self, IncomeKind};
+use super::ui;
 use super::view::{self, Camera, CRITTER_H, PLANE_H, PLANE_W};
 
 const BG: Color = color_u8!(14, 15, 18, 255);
@@ -111,6 +112,10 @@ pub fn draw_scene(app: &mut GameApp, now: DateTime<Utc>) {
             }
         }
     }
+
+    // Pixel particle bursts (income, captures, hits, births) — pure primitives,
+    // so they're safe in this render-target pass and project in world space.
+    app.particles.draw(&cam);
 }
 
 /// Draw the local player avatar in the same projection as critters: feet on
@@ -386,54 +391,88 @@ fn draw_ring_arc(cx: f32, cy: f32, inner_r: f32, outer_r: f32, fill: f32, color:
 
 // ── HUD ───────────────────────────────────────────────────────────────────────
 
-/// Height of the top letterbox panel the HUD text rests on.
-const TOPBAR_H: f32 = 56.0;
+/// Fade-out window (seconds) applied to status/error pills at the end of their
+/// life, matching the lifetimes enforced in `GameApp::clear_stale_status`.
+const TOAST_FADE: f64 = 0.6;
+const STATUS_LIFE: f64 = 4.0;
+const ERROR_LIFE: f64 = 8.0;
 
-/// HUD text overlay (coins, hints, status, error log). Draw on the screen,
-/// never into a render target.
+/// HUD overlay: floating currency chips, hint line, status/error toasts.
+/// Draw on the screen, never into a render target.
 pub fn draw_hud(app: &mut GameApp) {
-    // Letterbox panel behind the top HUD text so it stays legible over any
-    // background. A faint lower edge gives it a defined border.
-    draw_rectangle(0.0, 0.0, screen_width(), TOPBAR_H, color_u8!(0, 0, 0, 200));
-    draw_rectangle(0.0, TOPBAR_H, screen_width(), 1.0, color_u8!(255, 255, 255, 30));
+    // ── Top-left: floating currency chips (icon + value) ─────────────────
+    let mut x = 14.0;
+    let chip_y = 12.0;
+    let coins = format!("{}", app.zoo.coins);
+    let food = format!("{}", app.zoo.food);
+    let dna = format!("{}", app.zoo.dna_helix);
+    x += ui::currency_chip(&mut app.textures, x, chip_y, "coin", &coins, ui::COIN_GOLD) + 8.0;
+    x += ui::currency_chip(&mut app.textures, x, chip_y, "food", &food, ui::FOOD_GREEN) + 8.0;
+    ui::currency_chip(&mut app.textures, x, chip_y, "dna_helix", &dna, ui::DNA_PINK);
 
-    draw_text(
-        &format!(
-            "coins {}   food {}   DNA {}",
-            app.zoo.coins, app.zoo.food, app.zoo.dna_helix
-        ),
-        14.0, 24.0, 20.0, TEXT,
-    );
+    // Hint line below the chips, with a soft drop shadow so it stays legible
+    // over the world (the old letterbox bar is gone).
     let hint = if app.catch_state.active {
         "C exit catch · hover a wild animal to catch it"
     } else {
         "1 Shop · 2 Breeding · 3 Settings · WASD move · C catch · scroll zoom"
     };
-    draw_text(hint, 14.0, 46.0, 18.0, TEXT_DIM);
+    text_shadow(hint, 16.0, 62.0, 18.0, TEXT_DIM);
 
     if app.catch_state.active {
-        draw_text(
+        text_shadow(
             "CATCH MODE",
-            screen_width() * 0.5 - 48.0, 28.0, 22.0,
+            screen_width() * 0.5 - 48.0, 30.0, 22.0,
             color_u8!(180, 255, 80, 230),
         );
     }
 
-    // ── Bottom-left stack: errors (red) then status (amber) ──────────────
+    // ── Bottom-left stack: errors (red) then status (amber), as pills ────
+    let now = get_time();
     let mut bottom_y = screen_height() - 14.0;
 
-    if let Some((msg, _)) = &app.status {
-        draw_text(msg, 14.0, bottom_y, 19.0, color_u8!(211, 165, 92, 255));
-        bottom_y -= 22.0;
+    if let Some((msg, at)) = &app.status {
+        let alpha = ((STATUS_LIFE - (now - *at)) / TOAST_FADE).clamp(0.0, 1.0) as f32;
+        bottom_y = toast(msg, bottom_y, ui::STATUS_AMBER, alpha);
     }
 
     // Error log — most recent at the bottom, older lines above.
-    for (msg, _) in app.errors.iter().rev() {
-        draw_text(msg, 14.0, bottom_y, 18.0, color_u8!(255, 80, 80, 230));
-        bottom_y -= 21.0;
+    for (msg, at) in app.errors.iter().rev() {
+        let alpha = ((ERROR_LIFE - (now - *at)) / TOAST_FADE).clamp(0.0, 1.0) as f32;
+        bottom_y = toast(msg, bottom_y, ui::ERROR_RED, alpha);
     }
 
     draw_notifications(app);
+}
+
+/// Draw `text` twice — a dark offset copy then the coloured text — so small
+/// labels stay readable over the varied world background.
+fn text_shadow(text: &str, x: f32, y: f32, size: f32, color: Color) {
+    draw_text(text, x + 1.0, y + 1.0, size, color_u8!(0, 0, 0, 170));
+    draw_text(text, x, y, size, color);
+}
+
+/// Draw one bottom-left toast pill (rounded backing + text) at `bottom_y`,
+/// returning the new stacking baseline above it. Fades with `alpha`.
+fn toast(msg: &str, bottom_y: f32, color: Color, alpha: f32) -> f32 {
+    if alpha <= 0.0 {
+        return bottom_y;
+    }
+    const FS: f32 = 18.0;
+    const PAD: f32 = 12.0;
+    const H: f32 = 30.0;
+    let dim = measure_text(msg, None, FS as u16, 1.0);
+    let w = dim.width + PAD * 2.0;
+    let y = bottom_y - H;
+    ui::pill(14.0, y, w, H, alpha);
+    draw_text(
+        msg,
+        14.0 + PAD,
+        y + H * 0.5 + dim.offset_y * 0.35,
+        FS,
+        ui::fade(color, alpha),
+    );
+    y - 8.0
 }
 
 // ── Right-edge notifications ────────────────────────────────────────────────────
@@ -441,6 +480,8 @@ pub fn draw_hud(app: &mut GameApp) {
 const NOTIF_W: f32 = 250.0;
 const NOTIF_H: f32 = 58.0;
 const NOTIF_GAP: f32 = 10.0;
+/// Top of the notification stack — clears the floating currency-chip row.
+const NOTIF_TOP: f32 = 52.0;
 
 /// Draw the obtain/collect toast stack on the right edge: newest at top, each
 /// fading in from the right, holding, then fading out.
@@ -455,7 +496,7 @@ fn draw_notifications(app: &mut GameApp) {
         .map(|n| (n.title.clone(), n.amount.clone(), n.icon, n.created_at))
         .collect();
 
-    let mut y = TOPBAR_H + 16.0;
+    let mut y = NOTIF_TOP + 16.0;
     // Newest on top.
     for (title, amount, icon, created_at) in toasts.into_iter().rev() {
         let age = now - created_at;

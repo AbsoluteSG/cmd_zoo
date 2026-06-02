@@ -3,6 +3,8 @@
 //! translation — all game rules live in `crate::game`.
 
 pub mod menus;
+pub mod particles;
 pub mod textures;
+pub mod ui;
 pub mod view;
 pub mod world;

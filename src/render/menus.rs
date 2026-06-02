@@ -10,15 +10,11 @@ use crate::app::{GameApp, PostEffect, Screen};
 use crate::game::exotic_shop::{self, Price};
 use crate::game::species::{self, IncomeKind, SpeciesId};
 use crate::game::zoo::{MAX_NESTS, nest_purchase_cost};
+use crate::render::ui::{self, ACCENT, PANEL, PANEL_EDGE, TEXT, TEXT_DIM, ease_out_back, fade};
 
-const PANEL: Color = color_u8!(24, 27, 33, 250);
-const PANEL_EDGE: Color = color_u8!(64, 72, 86, 255);
 const BTN: Color = color_u8!(46, 52, 64, 255);
 const BTN_HOVER: Color = color_u8!(70, 80, 98, 255);
 const BTN_DISABLED: Color = color_u8!(30, 34, 41, 255);
-const ACCENT: Color = color_u8!(123, 207, 167, 255);
-const TEXT: Color = color_u8!(231, 233, 236, 255);
-const TEXT_DIM: Color = color_u8!(150, 156, 166, 255);
 
 /// Per-frame draw context carrying the scale/fade transform + cursor state.
 #[derive(Clone, Copy)]
@@ -173,7 +169,7 @@ fn draw_settings(app: &mut GameApp, now: DateTime<Utc>, ctx: Ctx) {
     // Draw the input field as a panel-like rect.
     let p = ctx.pt(field_x, y);
     let s = vec2(field_w, field_h) * ctx.scale;
-    rrect(p.x, p.y, s.x, s.y, 6.0 * ctx.scale, fade(BTN, ctx.alpha));
+    ui::rrect(p.x, p.y, s.x, s.y, 6.0 * ctx.scale, fade(BTN, ctx.alpha));
     let shown = if app.join_code_buffer.is_empty() {
         "______".to_string()
     } else {
@@ -561,8 +557,8 @@ fn panel(ctx: &Ctx, x: f32, y: f32, w: f32, h: f32) {
     let p = ctx.pt(x, y);
     let s = vec2(w, h) * ctx.scale;
     let r = 16.0 * ctx.scale;
-    rrect(p.x, p.y, s.x, s.y, r, fade(PANEL, ctx.alpha));
-    rrect_outline(p.x, p.y, s.x, s.y, r, fade(PANEL_EDGE, ctx.alpha));
+    ui::rrect(p.x, p.y, s.x, s.y, r, fade(PANEL, ctx.alpha));
+    ui::rrect_outline(p.x, p.y, s.x, s.y, r, fade(PANEL_EDGE, ctx.alpha));
 }
 
 fn title(ctx: &Ctx, x: f32, y: f32, text: &str) {
@@ -599,7 +595,7 @@ fn button(ctx: &Ctx, x: f32, y: f32, w: f32, h: f32, text: &str, enabled: bool) 
     } else {
         BTN
     };
-    rrect(p.x, p.y, s.x, s.y, 7.0 * ctx.scale, fade(bg, ctx.alpha));
+    ui::rrect(p.x, p.y, s.x, s.y, 7.0 * ctx.scale, fade(bg, ctx.alpha));
     let fs = 17.0 * ctx.scale;
     let dim = measure_text(text, None, fs as u16, 1.0);
     let tc = if enabled { TEXT } else { TEXT_DIM };
@@ -611,37 +607,6 @@ fn button(ctx: &Ctx, x: f32, y: f32, w: f32, h: f32, text: &str, enabled: bool) 
         fade(tc, ctx.alpha),
     );
     over && ctx.click
-}
-
-/// Filled rounded rectangle (edges + corner discs).
-fn rrect(x: f32, y: f32, w: f32, h: f32, r: f32, color: Color) {
-    let r = r.min(w * 0.5).min(h * 0.5).max(0.0);
-    draw_rectangle(x + r, y, w - 2.0 * r, h, color);
-    draw_rectangle(x, y + r, w, h - 2.0 * r, color);
-    draw_circle(x + r, y + r, r, color);
-    draw_circle(x + w - r, y + r, r, color);
-    draw_circle(x + r, y + h - r, r, color);
-    draw_circle(x + w - r, y + h - r, r, color);
-}
-
-fn rrect_outline(x: f32, y: f32, w: f32, h: f32, r: f32, color: Color) {
-    let r = r.min(w * 0.5).min(h * 0.5).max(0.0);
-    draw_line(x + r, y, x + w - r, y, 1.5, color);
-    draw_line(x + r, y + h, x + w - r, y + h, 1.5, color);
-    draw_line(x, y + r, x, y + h - r, 1.5, color);
-    draw_line(x + w, y + r, x + w, y + h - r, 1.5, color);
-}
-
-fn fade(c: Color, a: f32) -> Color {
-    Color::new(c.r, c.g, c.b, c.a * a)
-}
-
-/// easeOutBack — overshoots slightly before settling, for a subtle pop.
-fn ease_out_back(t: f32) -> f32 {
-    let c1 = 1.70158;
-    let c3 = c1 + 1.0;
-    let u = t - 1.0;
-    1.0 + c3 * u * u * u + c1 * u * u
 }
 
 fn fmt_secs(secs: i64) -> String {

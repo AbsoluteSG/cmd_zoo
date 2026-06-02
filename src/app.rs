@@ -23,6 +23,7 @@ use crate::game::world_chunks::{WorldChunks, WORLD_W, WORLD_H};
 use crate::input::{AvatarController, ControllerCtx, KeyboardController, RemoteController};
 use crate::net::Session;
 use crate::persistence::json_file::JsonFileRepository;
+use crate::render::particles::Particles;
 use crate::render::textures::Textures;
 use crate::render::view::{self, Camera, CRITTER_H, POP_DURATION};
 use crate::render::{menus, world};
@@ -246,6 +247,9 @@ pub struct GameApp {
     /// Remaining camera-shake (seconds), decaying. Drives a per-frame jitter
     /// added to the camera offset after the follow lerp.
     camera_shake: f32,
+    /// Pooled, texture-free pixel particles for game-feel bursts (income,
+    /// captures, hits, births). Drawn in the world scene layer.
+    pub particles: Particles,
 }
 
 /// Hitstop duration applied when a Basher lands a hit.
@@ -296,6 +300,7 @@ impl GameApp {
             notifications: Vec::new(),
             hitstop: 0.0,
             camera_shake: 0.0,
+            particles: Particles::new(),
         }
     }
 
@@ -539,6 +544,13 @@ impl GameApp {
         let after = self.breeding_pair_count();
         if after < before {
             self.set_status(format!("{} gestation(s) completed", before - after));
+            // Birth sparkle in the home zoo — one burst per completed pair,
+            // scattered a little so they don't stack on the exact centre.
+            let c = crate::game::world_chunks::zoo_center();
+            for _ in 0..(before - after) {
+                let jitter = vec2(rand::gen_range(-64.0, 64.0), rand::gen_range(-64.0, 64.0));
+                self.particles.birth(c + jitter);
+            }
             self.zoo.last_saved_at = now;
             if let Ok(mt) = access.save(&self.zoo) {
                 self.last_modtime = mt;
@@ -599,6 +611,10 @@ impl GameApp {
 
         let dt = get_frame_time();
         let menu_open = self.menu_t >= 0.02;
+
+        // Advance cosmetic particles every frame — they keep animating behind
+        // menus and through hitstop, like the wandering critters do.
+        self.particles.update(dt);
 
         // Hitstop: a brief gameplay freeze after a Basher connects. Motion
         // (avatars + wild AI + catch progress) pauses while this ticks down;
@@ -758,6 +774,8 @@ impl GameApp {
                 self.hitstop = BASH_HITSTOP;
                 self.camera_shake = BASH_SHAKE;
                 self.catch_state.fill = 0.0;
+                // Radial impact debris at the player's feet.
+                self.particles.impact(avatar_pos, Vec2::ZERO);
                 self.sounds.play("poke_lion_sfx");
             }
 
@@ -857,13 +875,15 @@ impl GameApp {
             .get(&id)
             .map(|a| a.is_at_cap(now))
             .unwrap_or(false);
+        let pos = self.critters[idx].pos;
         let res = self.zoo.collect_animal(id, now);
         if res.total() > 0 {
-            // Collected income → income sound + scale-pop.
+            // Collected income → income sound + scale-pop + pixel burst.
             self.sounds.play("income_sfx");
             self.critters[idx].pop = POP_DURATION;
             self.save_under_lock(now);
             if res.coins > 0 {
+                self.particles.coins(pos);
                 self.push_notification(
                     "Coins",
                     format!("+{}", res.coins),
@@ -871,6 +891,7 @@ impl GameApp {
                 );
             }
             if res.dna > 0 {
+                self.particles.dna(pos);
                 self.push_notification(
                     "DNA Helix",
                     format!("+{}", res.dna),
@@ -912,10 +933,20 @@ impl GameApp {
         }
 
         // Threshold met → remove it from the world and tame it into the zoo.
+        // Grab its world position first so the capture burst fires where it was.
+        let catch_pos = self
+            .world
+            .active_animals()
+            .into_iter()
+            .find(|a| a.id == id)
+            .map(|a| a.pos);
         self.world.remove_animal(id);
         match self.zoo.spawn_animal_freeform(species, 1, now) {
             Ok(_) => {
                 self.sounds.play("income_sfx");
+                if let Some(pos) = catch_pos {
+                    self.particles.capture(pos);
+                }
                 self.sync_critters();
                 self.save_under_lock(now);
                 self.push_notification(name, "Captured!", NotifIcon::Animal(species));

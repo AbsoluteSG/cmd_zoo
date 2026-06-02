@@ -116,6 +116,33 @@ pub fn draw_scene(app: &mut GameApp, now: DateTime<Utc>) {
     // Pixel particle bursts (income, captures, hits, births) — pure primitives,
     // so they're safe in this render-target pass and project in world space.
     app.particles.draw(&cam);
+
+    // Throw-impact danger zones: a faint outer boundary ring marks the hit
+    // radius; a filled red disc shrinks with the fuse to telegraph time-to-land.
+    for z in &app.danger_zones {
+        let c = view::world_to_screen(z.center, &cam);
+        let r_out = z.radius * cam.zoom;
+        let frac = (z.remaining / z.fuse).clamp(0.0, 1.0);
+        draw_circle(c.x, c.y, r_out * frac, color_u8!(220, 40, 40, 70));
+        draw_circle_lines(c.x, c.y, r_out, 2.5, color_u8!(255, 60, 60, 200));
+    }
+}
+
+/// Screen-space red vignette overlay for a venom hit. `intensity` (0–1) scales
+/// the alpha. Cheap approximation: a few inset translucent-red border bands,
+/// strongest at the screen edge and fading inward. Pure primitives, drawn on
+/// the screen (never into a render target).
+pub fn draw_red_vignette(intensity: f32) {
+    let (w, h) = (screen_width(), screen_height());
+    const BANDS: usize = 6;
+    let reach = w.min(h) * 0.28;
+    for i in 0..BANDS {
+        let t = i as f32 / BANDS as f32; // 0 at the edge → inward
+        let inset = t * reach;
+        let alpha = (1.0 - t) * 0.5 * intensity.clamp(0.0, 1.0);
+        let col = Color::new(0.75, 0.05, 0.08, alpha);
+        draw_rectangle_lines(inset, inset, w - inset * 2.0, h - inset * 2.0, 60.0, col);
+    }
 }
 
 /// Draw the local player avatar in the same projection as critters: feet on

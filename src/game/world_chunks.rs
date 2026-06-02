@@ -14,7 +14,7 @@ use std::collections::{HashMap, HashSet};
 use macroquad::math::{Vec2, vec2};
 
 use crate::game::biome::{self, LcgRng};
-use crate::game::wild_animal::{ALERT_RADIUS, WildAnimal};
+use crate::game::wild_animal::{AiHit, ALERT_RADIUS, WildAnimal};
 
 // ── World & chunk dimensions ──────────────────────────────────────────────────
 
@@ -227,27 +227,28 @@ impl WorldChunks {
 
     // ── AI tick ───────────────────────────────────────────────────────────────
 
-    /// Advance wild-animal AI for every animal in an active chunk.
-    /// Returns `true` if any Basher connected a charge with the player this
-    /// frame (so the caller can trigger hitstop / camera shake).
+    /// Advance wild-animal AI for every animal in an active chunk. Returns the
+    /// aggression events landed this frame (Basher charges, Venomous lunges,
+    /// Thrower releases) so the caller can trigger hitstop / shake / effects.
+    /// Empty on the vast majority of frames.
     pub fn update_animal_ai(
         &mut self,
         dt: f32,
         cursor_world: Vec2,
         player_pos: Vec2,
         catch_mode: bool,
-    ) -> bool {
-        let mut bashed = false;
+    ) -> Vec<AiHit> {
+        let mut hits = Vec::new();
         for coord in &self.active {
             if let Some(chunk) = self.data.get_mut(coord) {
                 for animal in &mut chunk.animals {
-                    if animal.update(dt, cursor_world, player_pos, catch_mode) {
-                        bashed = true;
+                    if let Some(hit) = animal.update(dt, cursor_world, player_pos, catch_mode) {
+                        hits.push(hit);
                     }
                 }
             }
         }
-        bashed
+        hits
     }
 
     // ── Queries ───────────────────────────────────────────────────────────────

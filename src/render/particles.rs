@@ -191,6 +191,22 @@ impl Particles {
         const SOFT: Color = color_u8!(255, 240, 200, 255);
         self.emit(pos, 18, SOFT, (30.0, 90.0), vec2(0.0, -1.0), 1.0, -40.0, (0.8, 1.4), (2.0, 3.5));
     }
+
+    /// Brown/grey debris kicked up where a thrown object lands.
+    pub fn dust(&mut self, pos: Vec2) {
+        const DIRT: Color = color_u8!(150, 122, 92, 255);
+        const GREY: Color = color_u8!(120, 120, 120, 255);
+        self.emit(pos, 16, DIRT, (90.0, 220.0), Vec2::ZERO, 0.0, 220.0, (0.3, 0.6), (2.0, 4.0));
+        self.emit(pos, 8, GREY, (60.0, 150.0), vec2(0.0, -1.0), 1.0, 180.0, (0.3, 0.55), (1.5, 3.0));
+    }
+
+    /// Purple-green toxic puff rising from a Venomous lunge hit.
+    pub fn venom(&mut self, pos: Vec2) {
+        const PURPLE: Color = color_u8!(170, 90, 210, 255);
+        const TOXIC: Color = color_u8!(120, 220, 110, 255);
+        self.emit(pos, 16, PURPLE, (40.0, 130.0), vec2(0.0, -1.0), 1.2, -30.0, (0.6, 1.1), (2.5, 4.5));
+        self.emit(pos, 10, TOXIC, (30.0, 100.0), vec2(0.0, -1.0), 1.2, -20.0, (0.6, 1.0), (2.0, 3.5));
+    }
 }
 
 #[cfg(test)]

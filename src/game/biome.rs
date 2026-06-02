@@ -277,6 +277,7 @@ const SPAWN_TABLE: &[SpawnEntry] = &[
     SpawnEntry { species: "snowyOwl",       mk_moveset: Moveset::vanisher,  biome: HabitatTheme::Forest,   noise_min: 0.35, noise_max: 0.80, weight: 14 },
     SpawnEntry { species: "fox",            mk_moveset: Moveset::zigzagger, biome: HabitatTheme::Forest,   noise_min: 0.55, noise_max: 1.00, weight: 18 },
     SpawnEntry { species: "lion",           mk_moveset: Moveset::aggressor, biome: HabitatTheme::Forest,   noise_min: 0.70, noise_max: 1.00, weight: 8  },
+    SpawnEntry { species: "treeFrog",       mk_moveset: Moveset::venomous,  biome: HabitatTheme::Forest,   noise_min: 0.45, noise_max: 1.00, weight: 12 },
     // ── Arctic ────────────────────────────────────────────────────────────
     SpawnEntry { species: "penguin",        mk_moveset: Moveset::circler,   biome: HabitatTheme::Arctic,   noise_min: 0.00, noise_max: 0.55, weight: 30 },
     SpawnEntry { species: "snowyOwl",       mk_moveset: Moveset::vanisher,  biome: HabitatTheme::Arctic,   noise_min: 0.20, noise_max: 0.70, weight: 22 },
@@ -297,6 +298,7 @@ const SPAWN_TABLE: &[SpawnEntry] = &[
     SpawnEntry { species: "treeFrog",       mk_moveset: Moveset::circler,   biome: HabitatTheme::Wetland,  noise_min: 0.30, noise_max: 0.75, weight: 18 },
     SpawnEntry { species: "snowyOwl",       mk_moveset: Moveset::vanisher,  biome: HabitatTheme::Wetland,  noise_min: 0.45, noise_max: 0.90, weight: 14 },
     SpawnEntry { species: "fox",            mk_moveset: Moveset::burster,   biome: HabitatTheme::Wetland,  noise_min: 0.60, noise_max: 1.00, weight: 10 },
+    SpawnEntry { species: "treeFrog",       mk_moveset: Moveset::venomous,  biome: HabitatTheme::Wetland,  noise_min: 0.40, noise_max: 1.00, weight: 14 },
     // ── Jungle ────────────────────────────────────────────────────────────
     SpawnEntry { species: "goldenToucan",   mk_moveset: Moveset::panicker,  biome: HabitatTheme::Jungle,   noise_min: 0.00, noise_max: 0.50, weight: 24 },
     SpawnEntry { species: "monkey",         mk_moveset: Moveset::panicker,  biome: HabitatTheme::Jungle,   noise_min: 0.00, noise_max: 0.50, weight: 20 },
@@ -305,6 +307,7 @@ const SPAWN_TABLE: &[SpawnEntry] = &[
     SpawnEntry { species: "monkey",         mk_moveset: Moveset::aggressor, biome: HabitatTheme::Jungle,   noise_min: 0.60, noise_max: 1.00, weight: 16 },
     SpawnEntry { species: "lion",           mk_moveset: Moveset::aggressor, biome: HabitatTheme::Jungle,   noise_min: 0.68, noise_max: 1.00, weight: 10 },
     SpawnEntry { species: "monkey",         mk_moveset: Moveset::basher,    biome: HabitatTheme::Jungle,   noise_min: 0.55, noise_max: 1.00, weight: 12 },
+    SpawnEntry { species: "monkey",         mk_moveset: Moveset::thrower,   biome: HabitatTheme::Jungle,   noise_min: 0.40, noise_max: 1.00, weight: 14 },
     // ── Ocean ─────────────────────────────────────────────────────────────
     SpawnEntry { species: "penguin",        mk_moveset: Moveset::circler,   biome: HabitatTheme::Ocean,    noise_min: 0.00, noise_max: 0.55, weight: 28 },
     SpawnEntry { species: "blue_frog",      mk_moveset: Moveset::panicker,  biome: HabitatTheme::Ocean,    noise_min: 0.00, noise_max: 0.50, weight: 14 },

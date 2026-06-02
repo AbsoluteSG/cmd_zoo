@@ -19,6 +19,7 @@ use crate::audio::Sounds;
 use crate::catching::CatchState;
 use crate::game::avatar_system::{self, Behavior};
 use crate::game::{Animal, AnimalState, Zoo, economy, species};
+use crate::game::wild_animal::AiHit;
 use crate::game::world_chunks::{WorldChunks, WORLD_W, WORLD_H};
 use crate::input::{AvatarController, ControllerCtx, KeyboardController, RemoteController};
 use crate::net::Session;
@@ -185,6 +186,20 @@ pub const NOTIF_FADE_IN: f64 = 0.30;
 /// Fade-out duration (seconds), applied at the end of the lifetime.
 pub const NOTIF_FADE_OUT: f64 = 0.6;
 
+/// A timed throw-impact telegraph dropped by a Thrower: a shrinking red circle
+/// on the ground that staggers + knocks back the player if they're still inside
+/// it when it lands.
+pub struct DangerZone {
+    /// World-space impact centre (the player's position at throw time).
+    pub center: Vec2,
+    /// Total fuse time (seconds) — drives the shrink animation.
+    pub fuse: f32,
+    /// Seconds remaining until impact.
+    pub remaining: f32,
+    /// World-units impact radius.
+    pub radius: f32,
+}
+
 pub struct GameApp {
     pub zoo: Zoo,
     pub repo: Arc<JsonFileRepository>,
@@ -250,12 +265,28 @@ pub struct GameApp {
     /// Pooled, texture-free pixel particles for game-feel bursts (income,
     /// captures, hits, births). Drawn in the world scene layer.
     pub particles: Particles,
+    /// Active throw-impact telegraphs from Throwers, drawn + resolved each frame.
+    pub danger_zones: Vec<DangerZone>,
+    /// Remaining venom screen-effect time (seconds): red vignette + brief blur.
+    pub venom_fx: f32,
 }
 
 /// Hitstop duration applied when a Basher lands a hit.
 const BASH_HITSTOP: f32 = 0.12;
 /// Camera-shake duration applied when a Basher lands a hit.
 const BASH_SHAKE: f32 = 0.35;
+
+/// Fuse (seconds) on a Thrower's object before it lands.
+const THROW_FUSE: f32 = 1.1;
+/// Impact radius (world units) of a thrown object — stand outside this to dodge.
+const THROW_RADIUS: f32 = 95.0;
+/// Camera-shake duration applied when a throw connects.
+const THROW_SHAKE: f32 = 0.3;
+/// Random-vector knockback impulse (world units/s) added to the avatar on a
+/// throw hit; the avatar's accel-damped motion bleeds it off over ~0.4s.
+const KNOCKBACK_SPEED: f32 = 520.0;
+/// Duration (seconds) of the venom screen effect (red vignette + brief blur).
+const VENOM_FX_DURATION: f32 = 0.55;
 /// Peak camera-shake amplitude in screen pixels.
 const SHAKE_AMPLITUDE: f32 = 14.0;
 
@@ -301,6 +332,8 @@ impl GameApp {
             hitstop: 0.0,
             camera_shake: 0.0,
             particles: Particles::new(),
+            danger_zones: Vec::new(),
+            venom_fx: 0.0,
         }
     }
 
@@ -765,18 +798,43 @@ impl GameApp {
         if !frozen {
             let cursor_world = view::screen_to_world(mouse, &self.camera);
             let avatar_pos = self.session.my_avatar().pos;
-            let bashed =
+            let hits =
                 self.world
                     .update_animal_ai(dt, cursor_world, avatar_pos, self.catch_state.active);
 
-            // A connecting Basher staggers the player and resets the catch timer.
-            if bashed {
-                self.hitstop = BASH_HITSTOP;
-                self.camera_shake = BASH_SHAKE;
-                self.catch_state.fill = 0.0;
-                // Radial impact debris at the player's feet.
-                self.particles.impact(avatar_pos, Vec2::ZERO);
-                self.sounds.play("poke_lion_sfx");
+            for hit in hits {
+                match hit {
+                    // A connecting Basher staggers the player and resets the timer.
+                    AiHit::Bash => {
+                        self.hitstop = BASH_HITSTOP;
+                        self.camera_shake = BASH_SHAKE;
+                        self.catch_state.fill = 0.0;
+                        self.particles.impact(avatar_pos, Vec2::ZERO);
+                        self.sounds.play("poke_lion_sfx");
+                    }
+                    // A Venomous lunge poisons: hitstop + red vignette + blur.
+                    AiHit::Venom(pos) => {
+                        self.hitstop = BASH_HITSTOP;
+                        self.venom_fx = VENOM_FX_DURATION;
+                        self.camera_shake = BASH_SHAKE * 0.6;
+                        self.catch_state.fill = 0.0;
+                        self.particles.venom(pos);
+                        self.sounds.play("poke_lion_sfx");
+                    }
+                    // A Thrower release drops a timed danger zone (resolved below).
+                    AiHit::Throw(target) => {
+                        self.danger_zones.push(DangerZone {
+                            center: target,
+                            fuse: THROW_FUSE,
+                            remaining: THROW_FUSE,
+                            radius: THROW_RADIUS,
+                        });
+                        // Bound the queue so a swarm can't grow it without limit.
+                        while self.danger_zones.len() > 16 {
+                            self.danger_zones.remove(0);
+                        }
+                    }
+                }
             }
 
             // Collect active animals into owned refs, run catch, then drop the
@@ -789,6 +847,52 @@ impl GameApp {
             if let Some(id) = caught_id {
                 self.resolve_catch(id, now);
             }
+        }
+
+        // Venom screen-effect timer (red vignette + blur) decays independently
+        // of hitstop so the flash plays out smoothly after the freeze ends.
+        if self.venom_fx > 0.0 {
+            self.venom_fx = (self.venom_fx - dt).max(0.0);
+        }
+
+        // Thrown-object zones tick + resolve every frame — even during a venom
+        // hitstop — so a telegraphed throw always lands on schedule.
+        self.update_danger_zones(dt);
+    }
+
+    /// Tick each active throw-impact zone; on landing, kick up dust and, if the
+    /// avatar is inside the radius, stagger them (shake + catch reset + a random
+    /// knockback impulse).
+    fn update_danger_zones(&mut self, dt: f32) {
+        if self.danger_zones.is_empty() {
+            return;
+        }
+        let avatar_pos = self.session.my_avatar().pos;
+        let mut landed_hit = false;
+        let mut i = 0;
+        while i < self.danger_zones.len() {
+            self.danger_zones[i].remaining -= dt;
+            if self.danger_zones[i].remaining <= 0.0 {
+                let z = self.danger_zones.remove(i);
+                self.particles.dust(z.center);
+                if (avatar_pos - z.center).length() < z.radius {
+                    landed_hit = true;
+                }
+            } else {
+                i += 1;
+            }
+        }
+        if landed_hit {
+            self.camera_shake = THROW_SHAKE;
+            self.catch_state.fill = 0.0;
+            // Random-vector knockback added straight to the avatar velocity.
+            let ang = rand::gen_range(0.0f32, std::f32::consts::TAU);
+            let knock = vec2(ang.cos(), ang.sin()) * KNOCKBACK_SPEED;
+            let id = self.session.local_player_id;
+            if let Some(a) = self.session.avatars.get_mut(&id) {
+                a.vel += knock;
+            }
+            self.sounds.play("poke_lion_sfx");
         }
     }
 
@@ -971,15 +1075,16 @@ impl GameApp {
     pub fn draw(&mut self, now: DateTime<Utc>) {
         let menu = self.menu_t > 0.001;
         let effect_on = self.effect != PostEffect::None;
+        let venom = self.venom_fx > 0.0;
 
-        if menu || effect_on {
+        if menu || effect_on || venom {
             // Render the scene (no text!) into the offscreen target, then
             // composite it to the screen. Text — HUD and menus — is drawn
             // afterward on the default framebuffer so the font atlas is safe.
             let rt = self.render_scene_to_target(now);
             clear_background(color_u8!(14, 15, 18, 255));
             if menu {
-                self.composite_blur(&rt);
+                self.composite_blur(&rt, 1.0);
                 draw_rectangle(
                     0.0,
                     0.0,
@@ -987,6 +1092,11 @@ impl GameApp {
                     screen_height(),
                     Color::new(0.0, 0.0, 0.0, 0.5 * self.menu_t),
                 );
+            } else if venom {
+                // Venom hit: blur that tapers off + a fading red vignette.
+                let intensity = (self.venom_fx / VENOM_FX_DURATION).clamp(0.0, 1.0);
+                self.composite_blur(&rt, intensity);
+                world::draw_red_vignette(intensity);
             } else {
                 self.composite_effect(&rt);
             }
@@ -1023,16 +1133,18 @@ impl GameApp {
     }
 
     /// Cheap multi-tap blur (one opaque center pass + 8 soft offset passes).
-    fn composite_blur(&self, rt: &RenderTarget) {
+    /// `intensity` (0–1) scales the offset-pass strength so callers can fade
+    /// the blur in/out; 1.0 is the full menu blur.
+    fn composite_blur(&self, rt: &RenderTarget, intensity: f32) {
         let (w, h) = (screen_width(), screen_height());
-        let r = 2.5;
+        let r = 2.5 * intensity.clamp(0.0, 1.0);
         blit(&rt.texture, 0.0, 0.0, w, h, 1.0);
         for (dx, dy) in [
             (-r, -r), (0.0, -r), (r, -r),
             (-r, 0.0), (r, 0.0),
             (-r, r), (0.0, r), (r, r),
         ] {
-            blit(&rt.texture, dx, dy, w, h, 0.45);
+            blit(&rt.texture, dx, dy, w, h, 0.45 * intensity.clamp(0.0, 1.0));
         }
     }
 

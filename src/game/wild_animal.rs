@@ -43,6 +43,49 @@ const BASH_HIT_RECOVERY: f32 = 1.0;
 /// Recovery seconds after a whiffed charge — longer, the window to catch it.
 const BASH_MISS_RECOVERY: f32 = 2.5;
 
+// ── Thrower tuning ───────────────────────────────────────────────────────────────
+
+/// Speed (fraction of flee speed) a Thrower backs away from the player while
+/// it lobs objects — slow enough that the cursor can stay on it.
+const THROWER_RETREAT_MULT: f32 = 0.45;
+/// Seconds between throws once a Thrower is engaged (re-rolled each throw).
+const THROW_COOLDOWN_MIN: f32 = 1.4;
+const THROW_COOLDOWN_MAX: f32 = 2.2;
+
+// ── Venomous tuning ──────────────────────────────────────────────────────────────
+
+/// World-units within which a Venomous stalks the player (even outside catch
+/// mode); beyond this it wanders calmly.
+const VENOM_STALK_RADIUS: f32 = 700.0;
+/// Slow creep speed while closing the distance.
+const VENOM_STALK_SPEED: f32 = WANDER_SPEED * 1.3;
+/// Distance at which a stalking Venomous commits to a lunge.
+const VENOM_LUNGE_TRIGGER: f32 = 170.0;
+/// Lunge dash speed.
+const VENOM_LUNGE_SPEED: f32 = FLEE_SPEED * 2.2;
+/// Distance from the player at which a lunge counts as a hit.
+const VENOM_HIT_DIST: f32 = 50.0;
+/// Max seconds a single lunge runs before it's declared a miss.
+const VENOM_LUNGE_TIMEOUT: f32 = 0.5;
+/// Recovery seconds after a connecting lunge.
+const VENOM_HIT_RECOVERY: f32 = 1.2;
+/// Recovery seconds after a whiffed lunge.
+const VENOM_MISS_RECOVERY: f32 = 1.8;
+
+/// An aggression event surfaced by `WildAnimal::update` for the app layer to
+/// turn into juice (hitstop, shake, screen effects, particles).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum AiHit {
+    /// A Basher connected a charge with the player.
+    Bash,
+    /// A Venomous landed a lunge — carries the animal's world position so the
+    /// caller can spawn the venom puff where it struck.
+    Venom(Vec2),
+    /// A Thrower released an object aimed at this world position (the player's
+    /// location at throw time). Resolves into a timed danger zone.
+    Throw(Vec2),
+}
+
 // ── Moveset ───────────────────────────────────────────────────────────────────
 
 /// Evasion behaviour used when the animal detects the player in catch mode.
@@ -115,6 +158,28 @@ pub enum Moveset {
         /// True while a charge is in progress.
         charging: bool,
     },
+
+    /// Backs slowly away while lobbing objects at the player's position. Each
+    /// throw drops a timed danger zone (handled by the app); standing in it
+    /// when it lands staggers and knocks back the player.
+    Thrower {
+        /// Seconds until the next throw while engaged. Re-rolled per throw.
+        cooldown: f32,
+    },
+
+    /// Stalks the player slowly even outside catch mode, then lunges at close
+    /// range. A connecting lunge poisons the player (hitstop + red vignette +
+    /// brief blur); then the animal recovers, opening the catch window.
+    Venomous {
+        /// True while a lunge dash is in progress.
+        lunging: bool,
+        /// Seconds elapsed in the current lunge (miss after `VENOM_LUNGE_TIMEOUT`).
+        lunge_time: f32,
+        /// Recovery countdown — while >0 the animal holds still (catch window).
+        recovery: f32,
+        /// Locked-in lunge direction, aimed at the player when the lunge began.
+        lunge_dir: Vec2,
+    },
 }
 
 impl Moveset {
@@ -146,6 +211,19 @@ impl Moveset {
             charge_time: 0.0,
             charge_dir: vec2(1.0, 0.0),
             charging: false,
+        }
+    }
+    pub fn thrower() -> Self {
+        Self::Thrower {
+            cooldown: rand::gen_range(0.8f32, 1.5),
+        }
+    }
+    pub fn venomous() -> Self {
+        Self::Venomous {
+            lunging: false,
+            lunge_time: 0.0,
+            recovery: 0.0,
+            lunge_dir: vec2(1.0, 0.0),
         }
     }
 }
@@ -198,15 +276,16 @@ impl WildAnimal {
     /// local avatar's world position — only meaningful when `catch_mode` is
     /// true, ignored otherwise.
     ///
-    /// Returns `true` on the frame a Basher connects a charge with the player,
-    /// so the caller can apply hitstop / camera shake and reset the catch timer.
+    /// Returns `Some(AiHit)` on the frame this animal lands an aggressive action
+    /// (Basher charge, Venomous lunge, or Thrower release), so the caller can
+    /// apply hitstop / camera shake / screen effects and reset the catch timer.
     pub fn update(
         &mut self,
         dt: f32,
         cursor_world: Vec2,
         player_pos: Vec2,
         catch_mode: bool,
-    ) -> bool {
+    ) -> Option<AiHit> {
         let to_cursor = cursor_world - self.pos;
         let dist_to_cursor = to_cursor.length();
 
@@ -221,10 +300,16 @@ impl WildAnimal {
             }
         }
 
-        // Bashers run a bespoke charge/recovery loop and integrate their own
-        // motion (toward the player, not away), so handle them separately.
+        // Aggressive movesets integrate their own motion (toward the player,
+        // not away) and may emit a hit event, so handle them separately.
         if matches!(self.moveset, Moveset::Basher { .. }) {
-            return self.update_basher(dt, player_pos, catch_mode);
+            return self.update_basher(dt, player_pos, catch_mode).then_some(AiHit::Bash);
+        }
+        if matches!(self.moveset, Moveset::Thrower { .. }) {
+            return self.update_thrower(dt, player_pos, catch_mode);
+        }
+        if matches!(self.moveset, Moveset::Venomous { .. }) {
+            return self.update_venomous(dt, player_pos);
         }
 
         // ── Vanisher teleport (handled separately to avoid borrow conflicts) ─
@@ -249,7 +334,7 @@ impl WildAnimal {
         self.pos.y = self.pos.y.clamp(0.0, WORLD_H);
         // Wild animals are barred from the home zoo plot, even mid-chase.
         self.pos = resolve_zoo_collision(self.pos);
-        false
+        None
     }
 
     /// Basher state machine: charge the player when engaged, stagger them on a
@@ -315,6 +400,111 @@ impl WildAnimal {
         hit
     }
 
+    /// Thrower state machine: while engaged, slowly back away from the player
+    /// and lob an object on a cooldown. Returns `Some(AiHit::Throw(player_pos))`
+    /// on the frame a throw is released; the app turns it into a danger zone.
+    fn update_thrower(&mut self, dt: f32, player_pos: Vec2, catch_mode: bool) -> Option<AiHit> {
+        let to_player = player_pos - self.pos;
+        let dist = to_player.length();
+        let engaged = catch_mode && self.is_fleeing;
+
+        let mut threw = false;
+        if let Moveset::Thrower { cooldown } = &mut self.moveset
+            && engaged
+        {
+            *cooldown -= dt;
+            if *cooldown <= 0.0 {
+                *cooldown = rand::gen_range(THROW_COOLDOWN_MIN, THROW_COOLDOWN_MAX);
+                threw = true;
+            }
+        }
+
+        let target_vel = if engaged {
+            // Back slowly away from the player so the cursor can stay on it.
+            let away = if dist > 0.1 { -to_player / dist } else { vec2(1.0, 0.0) };
+            away * (FLEE_SPEED * THROWER_RETREAT_MULT)
+        } else {
+            self.wander_velocity(dt)
+        };
+
+        let t = (750.0 * dt).min(1.0);
+        self.vel = self.vel + (target_vel - self.vel) * t;
+        self.pos += self.vel * dt;
+        self.pos.x = self.pos.x.clamp(0.0, WORLD_W);
+        self.pos.y = self.pos.y.clamp(0.0, WORLD_H);
+        self.pos = resolve_zoo_collision(self.pos);
+
+        threw.then_some(AiHit::Throw(player_pos))
+    }
+
+    /// Venomous state machine: stalk the player slowly whenever they're within
+    /// `VENOM_STALK_RADIUS` (independent of catch mode), lunge at close range,
+    /// then recover. Returns `Some(AiHit::Venom(pos))` the frame a lunge lands.
+    fn update_venomous(&mut self, dt: f32, player_pos: Vec2) -> Option<AiHit> {
+        let to_player = player_pos - self.pos;
+        let dist = to_player.length();
+        let in_range = dist < VENOM_STALK_RADIUS;
+        let dir = if dist > 0.1 { to_player / dist } else { vec2(1.0, 0.0) };
+
+        let mut hit = false;
+        let mut recovering = false;
+        let mut lunging_now = false;
+        let mut lunge_velocity = vec2(0.0, 0.0);
+
+        if let Moveset::Venomous { lunging, lunge_time, recovery, lunge_dir } = &mut self.moveset {
+            if *recovery > 0.0 {
+                // Winded — hold still and tick down. This is the catch window.
+                *recovery -= dt;
+                *lunging = false;
+                recovering = true;
+            } else if in_range {
+                if *lunging {
+                    *lunge_time += dt;
+                    if dist < VENOM_HIT_DIST {
+                        hit = true;
+                        *recovery = VENOM_HIT_RECOVERY;
+                        *lunging = false;
+                    } else if *lunge_time > VENOM_LUNGE_TIMEOUT {
+                        *recovery = VENOM_MISS_RECOVERY;
+                        *lunging = false;
+                    } else {
+                        lunging_now = true;
+                        lunge_velocity = *lunge_dir * VENOM_LUNGE_SPEED;
+                    }
+                } else if dist < VENOM_LUNGE_TRIGGER {
+                    // Commit to a lunge, locking aim at the player.
+                    *lunging = true;
+                    *lunge_time = 0.0;
+                    *lunge_dir = dir;
+                    lunging_now = true;
+                    lunge_velocity = dir * VENOM_LUNGE_SPEED;
+                }
+            } else {
+                *lunging = false;
+            }
+        }
+
+        let target_vel = if recovering {
+            vec2(0.0, 0.0)
+        } else if lunging_now {
+            lunge_velocity
+        } else if in_range {
+            // Creep toward the player.
+            dir * VENOM_STALK_SPEED
+        } else {
+            self.wander_velocity(dt)
+        };
+
+        let t = (750.0 * dt).min(1.0);
+        self.vel = self.vel + (target_vel - self.vel) * t;
+        self.pos += self.vel * dt;
+        self.pos.x = self.pos.x.clamp(0.0, WORLD_W);
+        self.pos.y = self.pos.y.clamp(0.0, WORLD_H);
+        self.pos = resolve_zoo_collision(self.pos);
+
+        hit.then_some(AiHit::Venom(self.pos))
+    }
+
     /// How fast (progress / second, range 0–1) the capture circle fills.
     /// Slower movers also have slower fill so no moveset is trivially easy.
     pub fn fill_speed(&self) -> f32 {
@@ -325,6 +515,8 @@ impl WildAnimal {
             Moveset::Burster { .. }  => 0.33,
             Moveset::Circler { .. }  => 0.36,
             Moveset::Basher { .. }   => 0.30,
+            Moveset::Thrower { .. }  => 0.30,
+            Moveset::Venomous { .. } => 0.30,
             _                        => 0.42,
         }
     }
@@ -466,8 +658,11 @@ impl WildAnimal {
                 safe_normalize(away + jitter) * (FLEE_SPEED * speed_mult)
             }
 
-            // Bashers never reach here — they integrate in `update_basher`.
-            Moveset::Basher { .. } => vec2(0.0, 0.0),
+            // These integrate their own motion in dedicated update fns and
+            // never reach the generic flee path.
+            Moveset::Basher { .. } | Moveset::Thrower { .. } | Moveset::Venomous { .. } => {
+                vec2(0.0, 0.0)
+            }
         }
     }
 
@@ -523,4 +718,84 @@ pub fn random_plane_point() -> Vec2 {
         rand::gen_range(0.0f32, WORLD_W),
         rand::gen_range(0.0f32, WORLD_H),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const DT: f32 = 1.0 / 60.0;
+
+    #[test]
+    fn thrower_lobs_on_cooldown_and_backs_away() {
+        // Animal at (1000,1000); player off to +x so "away" is -x. Cursor sits
+        // on the animal so it stays engaged (catch mode on).
+        let start = vec2(1000.0, 1000.0);
+        let player = vec2(2000.0, 1000.0);
+        let mut a = WildAnimal::new("monkey", start, Moveset::thrower());
+
+        let mut throws = 0;
+        let mut consecutive = 0;
+        let mut max_consecutive = 0;
+        for _ in 0..300 {
+            match a.update(DT, start, player, true) {
+                Some(AiHit::Throw(_)) => {
+                    throws += 1;
+                    consecutive += 1;
+                    max_consecutive = max_consecutive.max(consecutive);
+                }
+                _ => consecutive = 0,
+            }
+        }
+        assert!(throws >= 2, "engaged Thrower should lob multiple times, got {throws}");
+        assert_eq!(max_consecutive, 1, "throws must be spaced by a cooldown, not every frame");
+        assert!(a.pos.x < start.x, "Thrower should back away from the player (-x), got {}", a.pos.x);
+    }
+
+    #[test]
+    fn thrower_idle_when_not_engaged() {
+        let start = vec2(1000.0, 1000.0);
+        let player = vec2(2000.0, 1000.0);
+        let mut a = WildAnimal::new("monkey", start, Moveset::thrower());
+        // catch_mode off → never engaged → never throws.
+        for _ in 0..300 {
+            assert!(a.update(DT, start, player, false).is_none());
+        }
+    }
+
+    #[test]
+    fn venomous_stalks_toward_player_outside_catch_mode() {
+        let start = vec2(1000.0, 1000.0);
+        let player = vec2(1400.0, 1000.0); // dist 400: in stalk range, beyond lunge trigger
+        let mut a = WildAnimal::new("treeFrog", start, Moveset::venomous());
+        for _ in 0..30 {
+            // catch_mode false — Venomous stalks regardless.
+            a.update(DT, vec2(0.0, 0.0), player, false);
+        }
+        assert!(a.pos.x > start.x, "Venomous should creep toward the player (+x), got {}", a.pos.x);
+    }
+
+    #[test]
+    fn venomous_lunge_lands_then_recovers() {
+        let player = vec2(1000.0, 1000.0);
+        // Place it just inside the lunge trigger so it commits immediately.
+        let start = vec2(1000.0, 1160.0);
+        let mut a = WildAnimal::new("treeFrog", start, Moveset::venomous());
+
+        let mut hit_frame = None;
+        for f in 0..60 {
+            if let Some(AiHit::Venom(_)) = a.update(DT, vec2(0.0, 0.0), player, false) {
+                hit_frame = Some(f);
+                break;
+            }
+        }
+        assert!(hit_frame.is_some(), "lunge should connect within timeout");
+
+        // After a hit the animal recovers (holds still, emits nothing).
+        let rest = a.pos;
+        for _ in 0..3 {
+            assert!(a.update(DT, vec2(0.0, 0.0), player, false).is_none());
+        }
+        assert!((a.pos - rest).length() < 5.0, "should hold still during recovery");
+    }
 }

@@ -6,8 +6,10 @@ use macroquad::prelude::*;
 
 use crate::app::GameApp;
 use crate::catching;
-use crate::game::avatar::{Facing, PlayerAvatar};
+use crate::game::avatar::PlayerAvatar;
+use uuid::Uuid;
 use crate::game::biome;
+use crate::game::rank;
 use crate::game::species::{self, IncomeKind};
 use super::ui;
 use super::view::{self, Camera, CRITTER_H, PLANE_H, PLANE_W};
@@ -30,7 +32,7 @@ const FOOT_SINK: f32 = 0.16;
 /// must NEVER be drawn into a render target (it corrupts the font atlas).
 pub fn draw(app: &mut GameApp, now: DateTime<Utc>) {
     draw_scene(app, now);
-    draw_hud(app);
+    draw_hud(app, now);
 }
 
 /// The world scene — ground + critters. No text (render-target safe).
@@ -54,7 +56,7 @@ pub fn draw_scene(app: &mut GameApp, now: DateTime<Utc>) {
             if tile_cx < 0.0 || tile_cx > PLANE_W || tile_cy < 0.0 || tile_cy > PLANE_H {
                 continue;
             }
-            let color = biome::biome_color_at(vec2(tile_cx, tile_cy), app.zoo.world_seed);
+            let color = biome::biome_tile_color(vec2(tile_cx, tile_cy), app.zoo.world_seed);
             let (pos, size) = view::tile_rect(tx, ty, BTILE, &cam);
             // +1 px overlap prevents seams between tiles.
             draw_rectangle(pos.x, pos.y, size.x + 1.0, size.y + 1.0, color);
@@ -63,6 +65,10 @@ pub fn draw_scene(app: &mut GameApp, now: DateTime<Utc>) {
 
     // --- Zoo plot: tinted floor + fence outline marking the home enclosure -
     draw_zoo_plot(&cam);
+
+    // --- Breeding nests on the ground inside the plot ----------------------
+    draw_nests(app, now);
+    draw_food_structures(app, now);
 
     // --- Waypoint beacons: glowing beams on the ground ---------------------
     draw_waypoint_beams(app);
@@ -103,14 +109,12 @@ pub fn draw_scene(app: &mut GameApp, now: DateTime<Utc>) {
                 let (icon_id, fallback) = income_icon(sp);
                 let icon = app.textures.icon(icon_id);
                 let scale = view::pop_scale(pop);
-                draw_critter(pos, dir, tex.as_ref(), icon.as_ref(), fallback, at_cap, scale, &cam);
+                draw_critter(pos, dir, tex.as_ref(), icon.as_ref(), fallback, at_cap, scale, WHITE, &cam);
             }
             Item::Avatar(id) => {
-                // Placeholder art: reuse the cursor icon until a real avatar
-                // sprite lands; falls back to a stick figure if unavailable.
-                let tex = app.textures.icon("cursor");
+                // Procedural toon-ball avatar (no sprite asset needed).
                 if let Some(a) = app.session.avatars.get(&id) {
-                    draw_avatar(a, tex.as_ref(), &cam);
+                    draw_avatar(a, &cam);
                 }
             }
         }
@@ -131,6 +135,91 @@ pub fn draw_scene(app: &mut GameApp, now: DateTime<Utc>) {
     }
 }
 
+/// Biome-preview debug view: paints only the biome colour field across the
+/// (far zoomed-out) visible area as coarse tiles — no critters, plot,
+/// structures, beams, or HUD chrome. Recorded for clean biome-layout
+/// showcases. The world-space tile size scales with zoom so the tile count
+/// stays bounded no matter how far the camera pulls out.
+pub fn draw_biome_debug(app: &GameApp) {
+    clear_background(BG);
+    let cam = app.camera;
+    let seed = app.zoo.world_seed;
+
+    // Aim for ~6 screen px per tile; clamps keep both the on-screen resolution
+    // and the total tile count reasonable across the full zoom range.
+    let btile = (6.0 / cam.zoom).clamp(128.0, 20_000.0);
+
+    let (tl, br) = view::camera_world_rect(&cam, screen_width(), screen_height());
+    let tx0 = (tl.x / btile).floor() as i32;
+    let tx1 = (br.x / btile).ceil()  as i32;
+    let ty0 = (tl.y / btile).floor() as i32;
+    let ty1 = (br.y / btile).ceil()  as i32;
+    for ty in ty0..=ty1 {
+        for tx in tx0..=tx1 {
+            let cx = (tx as f32 + 0.5) * btile;
+            let cy = (ty as f32 + 0.5) * btile;
+            if cx < 0.0 || cx > PLANE_W || cy < 0.0 || cy > PLANE_H {
+                continue;
+            }
+            let color = biome::biome_tile_color(vec2(cx, cy), seed);
+            let (pos, size) = view::tile_rect(tx, ty, btile, &cam);
+            // +1 px overlap prevents seams between tiles.
+            draw_rectangle(pos.x, pos.y, size.x + 1.0, size.y + 1.0, color);
+        }
+    }
+
+    // Per-chunk flag markers: a small dot at each flagged chunk centre, tinted
+    // by its headline flag. Only drawn when zoomed in enough that the chunk
+    // count stays bounded (flags are rare, but iterating every chunk at full
+    // zoom-out would be millions of lookups).
+    {
+        use crate::game::world_chunks::CHUNK_SIZE;
+        let cx0 = (tl.x / CHUNK_SIZE).floor() as i32;
+        let cx1 = (br.x / CHUNK_SIZE).ceil()  as i32;
+        let cy0 = (tl.y / CHUNK_SIZE).floor() as i32;
+        let cy1 = (br.y / CHUNK_SIZE).ceil()  as i32;
+        let chunk_count = (cx1 - cx0 + 1) as i64 * (cy1 - cy0 + 1) as i64;
+        if chunk_count <= 40_000 {
+            for cy in cy0..=cy1 {
+                for cx in cx0..=cx1 {
+                    let f = app.world.chunk_flags((cx, cy));
+                    if f.is_empty() {
+                        continue;
+                    }
+                    // Headline colour: pick the rarest set flag for contrast.
+                    let col = if f.meteor_site {
+                        color_u8!(255, 120, 60, 255)
+                    } else if f.exotic_merchant {
+                        color_u8!(255, 215, 90, 255)
+                    } else if f.ancient_ruins {
+                        color_u8!(200, 180, 255, 255)
+                    } else if f.albino_surge {
+                        color_u8!(240, 240, 255, 255)
+                    } else if f.dna_rich {
+                        color_u8!(196, 120, 220, 255)
+                    } else if f.dense_pack {
+                        color_u8!(255, 90, 90, 255)
+                    } else {
+                        color_u8!(120, 235, 200, 255) // biome_agnostic_spawns
+                    };
+                    let world_c = vec2((cx as f32 + 0.5) * CHUNK_SIZE, (cy as f32 + 0.5) * CHUNK_SIZE);
+                    let p = view::world_to_screen(world_c, &cam);
+                    draw_circle(p.x, p.y, 3.0, col);
+                }
+            }
+        }
+    }
+
+    // Minimal HUD — drawn straight on the screen (no render target here, so
+    // text is safe).
+    let info = format!("BIOME DEBUG    seed {seed:#018x}    zoom {:.4}", cam.zoom);
+    text_shadow(&info, 16.0, 28.0, 20.0, TEXT);
+    text_shadow(
+        "R reseed · wheel zoom · WASD pan · F3 exit",
+        16.0, 52.0, 18.0, TEXT_DIM,
+    );
+}
+
 /// Screen-space red vignette overlay for a venom hit. `intensity` (0–1) scales
 /// the alpha. Cheap approximation: a few inset translucent-red border bands,
 /// strongest at the screen edge and fading inward. Pure primitives, drawn on
@@ -148,44 +237,150 @@ pub fn draw_red_vignette(intensity: f32) {
     }
 }
 
-/// Draw the local player avatar in the same projection as critters: feet on
-/// the ground point, sprite billboard upright, soft drop shadow underneath.
-fn draw_avatar(avatar: &PlayerAvatar, tex: Option<&Texture2D>, cam: &Camera) {
-    let feet = view::world_to_screen(avatar.pos, cam);
-    let base_h = CRITTER_H * cam.zoom;
-    let sink = base_h * FOOT_SINK;
-    let bottom = feet.y + sink;
-    let top = bottom - base_h;
-    draw_ellipse(feet.x, feet.y, base_h * 0.30, base_h * 0.10, 0.0, SHADOW);
+// ── Procedural toon-ball avatar ────────────────────────────────────────────────
+//
+// The player is a stylised cel-shaded sphere drawn purely from primitives (no
+// sprite). The 3-D illusion comes from stacking concentric, slightly-offset
+// ellipses for the quantised toon bands (deep-shadow → shadow → midtone →
+// highlight) plus a small soft specular dot, a dark outline, and momentum-driven
+// bob / squash-stretch / lean read from the avatar's smoothed `viz` state.
 
-    match tex {
-        Some(t) => {
-            let aspect = if t.height() > 0.0 {
-                t.width() / t.height()
-            } else {
-                1.0
-            };
-            let w = base_h * aspect;
-            draw_texture_ex(
-                t,
-                feet.x - w * 0.5,
-                top,
-                WHITE,
-                DrawTextureParams {
-                    dest_size: Some(vec2(w, base_h)),
-                    flip_x: matches!(avatar.facing, Facing::E),
-                    ..Default::default()
-                },
-            );
-        }
-        None => {
-            // Two-color stick figure so the avatar is always visible.
-            let body = color_u8!(90, 130, 220, 255);
-            let head = color_u8!(245, 220, 190, 255);
-            draw_rectangle(feet.x - base_h * 0.16, top + base_h * 0.35, base_h * 0.32, base_h * 0.55, body);
-            draw_circle(feet.x, top + base_h * 0.20, base_h * 0.18, head);
-        }
+/// Outline + spec endpoints. The body tones are derived per-player from a base
+/// hue so each player reads as a distinct soft-rendered marble.
+const BALL_OUTLINE: Color = color_u8!(14, 16, 30, 255);
+const BALL_SPEC: Color = color_u8!(250, 253, 255, 255);
+
+/// Rotate a screen-space vector by `ang` radians (screen y points down).
+fn rot(v: Vec2, ang: f32) -> Vec2 {
+    let (s, c) = ang.sin_cos();
+    vec2(v.x * c - v.y * s, v.x * s + v.y * c)
+}
+
+/// Linear blend between two colours.
+fn mix(a: Color, b: Color, t: f32) -> Color {
+    Color::new(
+        a.r + (b.r - a.r) * t,
+        a.g + (b.g - a.g) * t,
+        a.b + (b.b - a.b) * t,
+        a.a + (b.a - a.a) * t,
+    )
+}
+
+/// Scale a colour's RGB toward black (multiplicative shade).
+fn scale_rgb(c: Color, m: f32) -> Color {
+    Color::new((c.r * m).min(1.0), (c.g * m).min(1.0), (c.b * m).min(1.0), c.a)
+}
+
+/// Deterministic, pleasant base colour for a player, hashed from their UUID so
+/// every client paints the same player the same hue with no extra sync. A nil
+/// id (single-player avatar) maps to a calm blue marble.
+fn player_color(id: Uuid) -> Color {
+    if id.is_nil() {
+        return macroquad::color::hsl_to_rgb(0.58, 0.62, 0.58);
     }
+    // FNV-1a over the id bytes → stable hue.
+    let mut h: u32 = 2166136261;
+    for &x in id.as_bytes() {
+        h = (h ^ x as u32).wrapping_mul(16777619);
+    }
+    macroquad::color::hsl_to_rgb((h % 360) as f32 / 360.0, 0.60, 0.58)
+}
+
+/// Draw one soft-rendered ball at screen `center`, radius `r`, with squash
+/// factors `(sx, sy)`, `lean` (radians), an `outline` ring width, a screen-space
+/// `light` direction the shading shifts toward, and a per-player `base` colour.
+/// `alpha` fades the whole thing (used for dash after-images).
+///
+/// The body is built from many finely-stepped translucent ellipses that ramp
+/// from a shaded edge to a bright core nudged toward the light, so the colour
+/// blends smoothly into a soft round-render — no hard cel bands or "cone".
+#[allow(clippy::too_many_arguments)]
+fn draw_toon_ball(center: Vec2, r: f32, sx: f32, sy: f32, lean: f32, outline: f32, light: Vec2, base: Color, alpha: f32) {
+    let l = light.normalize_or(vec2(0.0, -1.0));
+    let deg = lean.to_degrees();
+
+    // Tone ramp derived from the base hue: deep shade → base → bright tint.
+    let deep = scale_rgb(base, 0.42);
+    let high = mix(base, WHITE, 0.55);
+
+    let ell = |cx: f32, cy: f32, rx: f32, ry: f32, col: Color, a: f32| {
+        draw_ellipse(cx, cy, rx, ry, deg, ui::fade(col, alpha * a));
+    };
+
+    // Outline: a dark ellipse slightly larger than the body, behind the shading.
+    ell(center.x, center.y, (r + outline) * sx, (r + outline) * sy, BALL_OUTLINE, 1.0);
+
+    // Soft directional gradient: edge (full size, shaded) → small bright core
+    // eased toward the light. Many steps make the falloff smooth.
+    let steps = 22;
+    for i in 0..steps {
+        let t = i as f32 / (steps - 1) as f32; // 0 edge → 1 core
+        let scale = 1.0 - 0.60 * t;
+        let off = 0.42 * t * t; // ease the core toward the light
+        let o = rot(l * (off * r), lean);
+        ell(center.x + o.x * sx, center.y + o.y * sy, r * scale * sx, r * scale * sy, mix(deep, high, t), 1.0);
+    }
+
+    // Reflected rim light: a faint lighter pool hugging the shaded side opposite
+    // the light — the ambient bounce that sells a round, soft-rendered look.
+    let ro = rot(l * (-0.66 * r), lean);
+    ell(center.x + ro.x * sx, center.y + ro.y * sy, r * 0.52 * sx, r * 0.44 * sy, mix(base, high, 0.55), 0.16);
+
+    // Highlight "eye": a soft glow + glint that slides in straight lines along
+    // the input vector (no orbiting around the rim, no body-lean rotation) so it
+    // reads like a pupil looking where the player moves. The offset is linear in
+    // the light direction and stays near the centre so it never rides the edge.
+    let look = l * (0.30 * r);
+    let hc = vec2(center.x + look.x * sx, center.y + look.y * sy);
+    let blob = |dx: f32, dy: f32, rx: f32, ry: f32, col: Color, a: f32| {
+        ell(hc.x + dx * r * sx, hc.y + dy * r * sy, r * rx * sx, r * ry * sy, col, a);
+    };
+    blob(0.0, 0.0, 0.30, 0.30, high, 0.52);
+    // Tight glossy glint at the pupil centre.
+    blob(0.0, 0.0, 0.15, 0.15, BALL_SPEC, 0.9);
+}
+
+/// Draw the player avatar as a procedural toon-shaded ball with a planted drop
+/// shadow, momentum bob, squash/stretch and lean. Works for the local player
+/// and every session avatar (each carries its own smoothed `viz` state).
+fn draw_avatar(avatar: &PlayerAvatar, cam: &Camera) {
+    let base_h = CRITTER_H * cam.zoom;
+    let r = base_h * 0.30;
+    let outline = (2.5 * cam.zoom).max(1.5);
+    let viz = &avatar.viz;
+    let base = player_color(avatar.player_id);
+
+    // Dash after-images: faded cool ghosts of the ball at past positions.
+    for img in &avatar.afterimages {
+        let frac = (img.life / img.max_life).clamp(0.0, 1.0);
+        let g = view::world_to_screen(img.pos, cam);
+        let gc = vec2(g.x, g.y - r * 0.95);
+        draw_toon_ball(gc, r, 1.0, 1.0, viz.lean, outline, viz.light_dir, base, 0.45 * frac);
+    }
+
+    let feet = view::world_to_screen(avatar.pos, cam);
+
+    // Bob: a brisk walk bounce blended with slow idle breathing.
+    let bob = viz.bob_phase.sin();
+    let breathe = viz.breathe_phase.sin();
+    let walk_amp = 3.5 * cam.zoom * viz.bob_amp;
+    let idle_amp = 0.9 * cam.zoom * (1.0 - viz.bob_amp);
+    let bob_off = -(bob * walk_amp) - (breathe * idle_amp);
+
+    // Squash/stretch (volume-preserving): stretch tall at the top of the bounce,
+    // squash flat at the bottom. Very subtle.
+    let s = bob * (0.06 * viz.bob_amp) + breathe * (0.02 * (1.0 - viz.bob_amp));
+    let sy = 1.0 + s;
+    let sx = 1.0 / sy;
+
+    // Drop shadow stays planted at the feet, shrinking as the ball rises.
+    let lift = (bob * 0.5 + 0.5) * viz.bob_amp;
+    let sh = 1.0 - 0.18 * lift;
+    draw_ellipse(feet.x, feet.y, r * 0.85 * sh, r * 0.30 * sh, 0.0, SHADOW);
+
+    // Body centre sits just above the shadow, plus the bob offset.
+    let center = vec2(feet.x, feet.y - r * 0.95 + bob_off);
+    draw_toon_ball(center, r, sx, sy, viz.lean, outline, viz.light_dir, base, 1.0);
 }
 
 /// The income-currency icon id + a fallback color for `species`.
@@ -196,6 +391,7 @@ fn income_icon(species: &str) -> (&'static str, Color) {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn draw_critter(
     pos: Vec2,
     dir: Vec2,
@@ -204,6 +400,7 @@ fn draw_critter(
     fallback: Color,
     at_cap: bool,
     scale: f32,
+    tint: Color,
     cam: &Camera,
 ) {
     // Feet land on the projected ground position; the sprite stands up from it.
@@ -227,7 +424,7 @@ fn draw_critter(
                 t,
                 feet.x - w * 0.5,
                 top,
-                WHITE,
+                tint,
                 DrawTextureParams {
                     dest_size: Some(vec2(w, sprite_h)),
                     flip_x,
@@ -237,7 +434,12 @@ fn draw_critter(
             top
         }
         None => {
-            draw_circle(feet.x, bottom - sprite_h * 0.4, sprite_h * 0.3, color_u8!(90, 150, 210, 255));
+            draw_circle(
+                feet.x,
+                bottom - sprite_h * 0.4,
+                sprite_h * 0.3,
+                ui::fade(color_u8!(90, 150, 210, 255), tint.a),
+            );
             bottom - sprite_h
         }
     };
@@ -277,6 +479,61 @@ fn draw_income_icon(cx: f32, sprite_top: f32, icon: Option<&Texture2D>, fallback
     }
 }
 
+/// Spotlight deposit view: dim the whole screen with a black gradient and
+/// redraw the player's following animals bright on top. The hovered one pops
+/// and gets a glowing pad so it reads as selectable. Clicking is resolved in
+/// `GameApp::try_deposit_select`; Escape exits.
+pub fn draw_deposit_overlay(app: &mut GameApp) {
+    let cam = app.camera;
+    let (w, h) = (screen_width(), screen_height());
+
+    // Solid black scrim at high opacity — the lit followers sit on top of it.
+    draw_rectangle(0.0, 0.0, w, h, color_u8!(0, 0, 0, 240));
+
+    let hovered = app.deposit_hovered();
+    // Species already in the nest (when one slot is filled): valid second picks
+    // must crossbreed with it; the rest get dimmed.
+    let partner = app.deposit_partner_species();
+
+    // Instruction banner.
+    let msg = "Click an animal to deposit  ·  Esc to cancel";
+    let dim = measure_text(msg, None, 24, 1.0);
+    text_shadow(msg, (w - dim.width) * 0.5, 64.0, 24.0, TEXT);
+
+    // Snapshot the followers' render data first so the texture lookups below
+    // (which take `&mut self`) don't clash with borrowing the critter list.
+    let shots: Vec<(uuid::Uuid, &'static str, Vec2, Vec2)> = app
+        .following
+        .iter()
+        .filter_map(|fid| {
+            app.critters
+                .iter()
+                .find(|c| c.animal_id == *fid)
+                .map(|c| (*fid, c.species, c.pos, c.dir))
+        })
+        .collect();
+
+    // Redraw each follower on top of the scrim; pop + glow the hovered one and
+    // dim any that can't crossbreed with the already-deposited partner.
+    for (fid, sp, pos, dir) in shots {
+        let valid = partner.map_or(true, |p| species::crossbreed_pool(p, sp).is_some());
+        let is_hover = valid && Some(fid) == hovered;
+        if is_hover {
+            let feet = view::world_to_screen(pos, &cam);
+            let base = CRITTER_H * cam.zoom;
+            let pulse = (get_time() as f32 * 5.0).sin() * 0.5 + 0.5;
+            draw_ellipse(feet.x, feet.y, base * (0.44 + 0.06 * pulse), base * 0.17, 0.0,
+                color_u8!(255, 210, 90, 110));
+        }
+        let tex = app.textures.animal(sp);
+        let (icon_id, fallback) = income_icon(sp);
+        let icon = app.textures.icon(icon_id);
+        let scale = if is_hover { 1.22 } else { 1.0 };
+        let tint = if valid { WHITE } else { color_u8!(255, 255, 255, 70) };
+        draw_critter(pos, dir, tex.as_ref(), icon.as_ref(), fallback, false, scale, tint, &cam);
+    }
+}
+
 // ── Zoo plot (home enclosure) ─────────────────────────────────────────────────
 
 /// Draw the enclosed 9×9 home zoo: a subtle floor tint plus a fence outline so
@@ -302,6 +559,131 @@ fn draw_zoo_plot(cam: &Camera) {
         (thick * 0.5).max(1.0),
         color_u8!(160, 120, 78, 200),
     );
+}
+
+/// Draw all five breeding-nest pads as woven bowls on the ground. Owned nests
+/// are tinted by status; still-locked pads render dim with a padlock, and the
+/// next purchasable one shows its coin/DNA price. A reach prompt appears when
+/// the avatar is close.
+fn draw_nests(app: &GameApp, now: DateTime<Utc>) {
+    use crate::game::zoo::{MAX_NESTS, NestCost, NestStatus, Zoo, nest_unlock_cost};
+    let cam = app.camera;
+    let apos = app.session.my_avatar().pos;
+    let owned = app.zoo.nest_count as usize;
+    for i in 0..MAX_NESTS as usize {
+        let world = Zoo::nest_pos(i);
+        let p = view::world_to_screen(world, &cam);
+        let rx = 34.0 * cam.zoom;
+        let ry = 20.0 * cam.zoom;
+        let unlocked = i < owned;
+        let near = (world - apos).length() <= crate::app::INTERACT_RANGE;
+
+        // Shadow + woven bowl (dim while locked).
+        let (rim, bowl) = if unlocked {
+            (color_u8!(120, 86, 54, 255), color_u8!(86, 60, 38, 255))
+        } else {
+            (color_u8!(70, 64, 58, 200), color_u8!(48, 44, 40, 200))
+        };
+        draw_ellipse(p.x, p.y + ry * 0.35, rx * 1.05, ry, 0.0, color_u8!(0, 0, 0, 60));
+        draw_ellipse(p.x, p.y, rx, ry, 0.0, rim);
+        draw_ellipse(p.x, p.y - ry * 0.18, rx * 0.78, ry * 0.7, 0.0, bowl);
+
+        if unlocked {
+            let status = app.zoo.nest_status(app.zoo.nests[i].id, now);
+            let pip = match status {
+                NestStatus::ReadyToCollect => Some(color_u8!(123, 207, 167, 255)),
+                NestStatus::ReadyToBreed => Some(color_u8!(255, 210, 90, 255)),
+                NestStatus::Breeding(_) => Some(color_u8!(196, 120, 220, 255)),
+                _ => None,
+            };
+            if let Some(col) = pip {
+                let pulse = (get_time() as f32 * 3.0).sin() * 0.5 + 0.5;
+                draw_circle(p.x, p.y - ry * 0.2, (5.0 + pulse * 2.0) * cam.zoom, col);
+            }
+            if near {
+                text_shadow("[E] Nest", p.x - 30.0, p.y - ry - 8.0, 18.0, TEXT);
+            }
+        } else {
+            // Padlock dot.
+            draw_circle(p.x, p.y - ry * 0.2, 4.0 * cam.zoom, color_u8!(180, 180, 188, 220));
+            // Only the next-in-sequence pad is purchasable; show its price.
+            if i == owned {
+                let price = match nest_unlock_cost(owned as u8) {
+                    Some(NestCost::Coins(c)) => format!("{c} coins"),
+                    Some(NestCost::Dna(d)) => format!("{d} DNA"),
+                    None => String::new(),
+                };
+                let lbl = if near { format!("[E] Unlock · {price}") } else { format!("Locked · {price}") };
+                let col = if near { COIN_GOLD } else { TEXT_DIM };
+                let w = measure_text(&lbl, None, 18, 1.0).width;
+                text_shadow(&lbl, p.x - w * 0.5, p.y - ry - 8.0, 18.0, col);
+            } else {
+                text_shadow("Locked", p.x - 24.0, p.y - ry - 8.0, 16.0, TEXT_DIM);
+            }
+        }
+    }
+}
+
+/// Draw the five food-structure pads along the bottom edge as squat silos.
+/// Owned ones show a level pip + an "almost full" glow; locked ones render dim
+/// with a padlock, and the next purchasable shows its coin price. Mirrors
+/// [`draw_nests`].
+fn draw_food_structures(app: &GameApp, now: DateTime<Utc>) {
+    use crate::game::structure::{MAX_FOOD_STRUCTURES, food_structure_unlock_cost};
+    use crate::game::zoo::Zoo;
+    let cam = app.camera;
+    let apos = app.session.my_avatar().pos;
+    let owned = app.zoo.structures.len();
+    for i in 0..MAX_FOOD_STRUCTURES {
+        let world = Zoo::food_structure_pos(i);
+        let p = view::world_to_screen(world, &cam);
+        let half_w = 26.0 * cam.zoom;
+        let h = 40.0 * cam.zoom;
+        let unlocked = i < owned;
+        let near = (world - apos).length() <= crate::app::INTERACT_RANGE;
+
+        // Shadow + silo body (a rounded bin), dim while locked.
+        let body = if unlocked {
+            color_u8!(150, 130, 78, 255)
+        } else {
+            color_u8!(64, 60, 52, 200)
+        };
+        draw_ellipse(p.x, p.y, half_w * 1.1, 9.0 * cam.zoom, 0.0, color_u8!(0, 0, 0, 60));
+        draw_rectangle(p.x - half_w, p.y - h, half_w * 2.0, h, body);
+        draw_ellipse(p.x, p.y - h, half_w, 8.0 * cam.zoom, 0.0,
+            if unlocked { color_u8!(180, 158, 96, 255) } else { color_u8!(80, 74, 64, 200) });
+
+        if unlocked {
+            let s = &app.zoo.structures[i];
+            // Fill glow when near cap.
+            let stored = s.stored_at(now);
+            let cap = s.food_cap().max(1);
+            if stored * 100 / cap >= 80 {
+                let pulse = (get_time() as f32 * 3.0).sin() * 0.5 + 0.5;
+                draw_circle(p.x, p.y - h - 6.0 * cam.zoom, (4.0 + pulse * 2.0) * cam.zoom,
+                    color_u8!(150, 210, 120, 255));
+            }
+            let lbl = format!("Lv {}", s.level);
+            let w = measure_text(&lbl, None, 16, 1.0).width;
+            text_shadow(&lbl, p.x - w * 0.5, p.y - h - 14.0, 16.0, TEXT);
+            if near {
+                text_shadow("[E] Food", p.x - 32.0, p.y - h - 32.0, 18.0, TEXT);
+            }
+        } else {
+            draw_circle(p.x, p.y - h * 0.5, 4.0 * cam.zoom, color_u8!(180, 180, 188, 220));
+            if i == owned {
+                let price = food_structure_unlock_cost(owned)
+                    .map(|c| format!("{c} coins"))
+                    .unwrap_or_default();
+                let lbl = if near { format!("[E] Build · {price}") } else { format!("Locked · {price}") };
+                let col = if near { COIN_GOLD } else { TEXT_DIM };
+                let w = measure_text(&lbl, None, 18, 1.0).width;
+                text_shadow(&lbl, p.x - w * 0.5, p.y - h - 14.0, 18.0, col);
+            } else {
+                text_shadow("Locked", p.x - 24.0, p.y - h - 14.0, 16.0, TEXT_DIM);
+            }
+        }
+    }
 }
 
 // ── Waypoint beacons ───────────────────────────────────────────────────────────
@@ -481,7 +863,7 @@ const ERROR_LIFE: f64 = 8.0;
 
 /// HUD overlay: floating currency chips, hint line, status/error toasts.
 /// Draw on the screen, never into a render target.
-pub fn draw_hud(app: &mut GameApp) {
+pub fn draw_hud(app: &mut GameApp, now_utc: DateTime<Utc>) {
     // ── Top-left: floating currency chips (icon + value) ─────────────────
     let mut x = 14.0;
     let chip_y = 12.0;
@@ -497,7 +879,7 @@ pub fn draw_hud(app: &mut GameApp) {
     let hint = if app.catch_state.active {
         "C exit catch · hover a wild animal to catch it"
     } else {
-        "1 Shop · 2 Breeding · 3 Settings · 4 Waypoints · WASD move · C catch · scroll zoom"
+        "WASD move · Shift sprint · Space dash · E inspect / nest · C catch · 1 Shop 3 Settings 4 Waypoints"
     };
     text_shadow(hint, 16.0, 62.0, 18.0, TEXT_DIM);
 
@@ -525,6 +907,215 @@ pub fn draw_hud(app: &mut GameApp) {
     }
 
     draw_notifications(app);
+    draw_inspect_panel(app, now_utc);
+}
+
+/// Inspect-panel accent colour for a Rank stage. Regular falls back to the
+/// neutral panel colour; the rest read as silver / gold / platinum / diamond /
+/// ruby / neon.
+fn rank_color(stage: u8) -> Color {
+    match stage {
+        0 => ui::PANEL_EDGE,
+        1 => color_u8!(176, 180, 190, 255),
+        2 => color_u8!(224, 178, 74, 255),
+        3 => color_u8!(160, 206, 210, 255),
+        4 => color_u8!(120, 200, 240, 255),
+        5 => color_u8!(220, 74, 92, 255),
+        _ => color_u8!(196, 84, 230, 255),
+    }
+}
+
+/// Lerp from `a` toward `b` by `t` (0..1), preserving `a`'s alpha.
+fn blend(a: Color, b: Color, t: f32) -> Color {
+    Color::new(
+        a.r + (b.r - a.r) * t,
+        a.g + (b.g - a.g) * t,
+        a.b + (b.b - a.b) * t,
+        a.a,
+    )
+}
+
+/// A self-contained inspect-panel button: draws + returns whether clicked.
+fn inspect_button(x: f32, y: f32, w: f32, h: f32, label: &str, enabled: bool) -> bool {
+    let (mx, my) = mouse_position();
+    let hover = enabled && mx >= x && mx <= x + w && my >= y && my <= y + h;
+    let bg = if !enabled {
+        color_u8!(30, 34, 41, 255)
+    } else if hover {
+        color_u8!(70, 80, 98, 255)
+    } else {
+        color_u8!(46, 52, 64, 255)
+    };
+    ui::rrect(x, y, w, h, 8.0, bg);
+    let ld = measure_text(label, None, 18, 1.0);
+    draw_text(
+        label,
+        x + (w - ld.width) * 0.5,
+        y + h * 0.5 + ld.offset_y * 0.35,
+        18.0,
+        if enabled { ui::TEXT } else { ui::TEXT_DIM },
+    );
+    hover && is_mouse_button_pressed(MouseButton::Left)
+}
+
+/// Slide-in side panel showing the details of the inspected owned animal.
+fn draw_inspect_panel(app: &mut GameApp, now: DateTime<Utc>) {
+    let Some(ins) = &app.inspect else { return };
+    let animal_id = ins.animal_id;
+    let Some(animal) = app.zoo.animals.get(&animal_id) else { return };
+    let def = species::get(animal.species);
+
+    // Gather the display values up front (releases the borrow on app.zoo).
+    let name = def.display_name.to_string();
+    let species_id = animal.species;
+    let level = animal.level;
+    let stage = animal.stage;
+    let theme = def.theme.name().to_string();
+    let rate = animal.rate_per_sec();
+    let cap = animal.storage_cap();
+    let stored = animal.stored_at(now);
+    let at_cap = animal.is_at_cap(now);
+    let breeding = matches!(animal.state, crate::game::AnimalState::Breeding { .. });
+    let from_right = ins.from_right;
+    let t = ui::ease_out_back(ins.t.clamp(0.0, 1.0));
+
+    // Rank progress + cost figures.
+    let dupes = app.zoo.species_dupes.get(species_id).copied().unwrap_or(0);
+    let rank_label = match rank::next_threshold(stage) {
+        Some(next) => format!("{} ({}/{})", rank::rank_name(stage), dupes, next),
+        None => format!("{} (max)", rank::rank_name(stage)),
+    };
+    let feed_cost = crate::game::animal::animal_level_up_cost(def.purchase_cost, level);
+    let max_level = level >= crate::game::animal::MAX_ANIMAL_LEVEL;
+    let in_nest = app.zoo.animal_in_any_nest(animal_id);
+    let can_feed = !breeding && !max_level && app.zoo.food >= feed_cost;
+    let can_sell = !breeding && !in_nest;
+
+    let pw = 320.0;
+    let ph = 470.0;
+    let margin = 20.0;
+    let y = (screen_height() - ph) * 0.5;
+    let shown_x = if from_right { screen_width() - pw - margin } else { margin };
+    let hidden_x = if from_right { screen_width() + 10.0 } else { -pw - 10.0 };
+    let x = hidden_x + (shown_x - hidden_x) * t;
+
+    // Panel recolored toward the Rank accent (Regular stays neutral).
+    let accent = rank_color(stage);
+    let bg = if stage == 0 { ui::PANEL } else { blend(ui::PANEL, accent, 0.18) };
+    let edge = if stage == 0 { ui::PANEL_EDGE } else { accent };
+    ui::rrect(x, y, pw, ph, 14.0, bg);
+    ui::rrect_outline(x, y, pw, ph, 14.0, edge);
+
+    let pad = 20.0;
+    // Sprite thumbnail (or fallback disc) top-centre.
+    let thumb = 96.0;
+    let cx = x + pw * 0.5;
+    let thumb_top = y + 18.0;
+    if let Some(tx) = app.textures.animal(species_id) {
+        let aspect = if tx.height() > 0.0 { tx.width() / tx.height() } else { 1.0 };
+        let w = thumb * aspect;
+        draw_texture_ex(
+            &tx,
+            cx - w * 0.5,
+            thumb_top,
+            WHITE,
+            DrawTextureParams { dest_size: Some(vec2(w, thumb)), ..Default::default() },
+        );
+    } else {
+        draw_circle(cx, thumb_top + thumb * 0.5, thumb * 0.4, color_u8!(120, 150, 200, 255));
+    }
+
+    // Title.
+    let title_y = thumb_top + thumb + 26.0;
+    let td = measure_text(&name, None, 24, 1.0);
+    draw_text(&name, cx - td.width * 0.5, title_y, 24.0, ui::TEXT);
+
+    // Detail rows: label (dim, left) + value (right-aligned).
+    let mut ry = title_y + 30.0;
+    let rows = [
+        ("Rank".to_string(), rank_label),
+        ("Level".to_string(), format!("{level} / {}", crate::game::animal::MAX_ANIMAL_LEVEL)),
+        ("Habitat".to_string(), theme),
+        ("Income".to_string(), format!("{rate:.2}/s")),
+        ("Storage".to_string(), format!("{stored} / {cap}")),
+        (
+            "Status".to_string(),
+            if breeding { "Breeding".to_string() }
+            else if at_cap { "Ready to collect".to_string() }
+            else { "Filling…".to_string() },
+        ),
+    ];
+    for (label, value) in &rows {
+        draw_text(label, x + pad, ry, 18.0, ui::TEXT_DIM);
+        let vd = measure_text(value, None, 18, 1.0);
+        let vcolor = if label == "Rank" && stage > 0 {
+            accent
+        } else if label == "Status" && *value == "Ready to collect" {
+            ui::ACCENT
+        } else {
+            ui::TEXT
+        };
+        draw_text(value, x + pw - pad - vd.width, ry, 18.0, vcolor);
+        ry += 26.0;
+    }
+
+    // Action buttons stacked above the footer: Follow / Feed / Sell.
+    let already_following = app.following.contains(&animal_id);
+    let bw = pw - pad * 2.0;
+    let bh = 32.0;
+    let bx = x + pad;
+    let follow_by = y + ph - 16.0 - 8.0 - bh * 3.0 - 8.0 * 2.0;
+    let feed_by = follow_by + bh + 8.0;
+    let sell_by = feed_by + bh + 8.0;
+
+    let follow_label = if in_nest {
+        "In a nest"
+    } else if already_following {
+        "Stop following"
+    } else {
+        "Follow"
+    };
+    let feed_label = if max_level {
+        "Feed (max level)".to_string()
+    } else {
+        format!("Feed · {feed_cost} food")
+    };
+
+    let do_follow = inspect_button(bx, follow_by, bw, bh, follow_label, !breeding && !in_nest);
+    let do_feed = inspect_button(bx, feed_by, bw, bh, &feed_label, can_feed);
+    let do_sell = inspect_button(bx, sell_by, bw, bh, "Sell", can_sell);
+
+    // Footer hint.
+    draw_text("E / Esc to close", x + pad, y + ph - 16.0, 15.0, ui::TEXT_DIM);
+
+    if do_follow {
+        if already_following {
+            app.stop_following(animal_id);
+            app.inspect = None;
+            app.set_status("stopped following");
+        } else {
+            app.start_following(animal_id);
+        }
+    } else if do_feed {
+        match app.zoo.level_up_animal(animal_id, now) {
+            Ok(l) => {
+                app.save_under_lock(now);
+                app.set_status(format!("fed — now level {l}"));
+            }
+            Err(e) => app.set_status(format!("{e}")),
+        }
+    } else if do_sell {
+        match app.zoo.sell_animal(animal_id, now) {
+            Ok(coins) => {
+                app.stop_following(animal_id);
+                app.inspect = None;
+                app.sync_critters();
+                app.save_under_lock(now);
+                app.set_status(format!("sold for {coins} coins"));
+            }
+            Err(e) => app.set_status(format!("{e}")),
+        }
+    }
 }
 
 /// Draw `text` twice — a dark offset copy then the coloured text — so small

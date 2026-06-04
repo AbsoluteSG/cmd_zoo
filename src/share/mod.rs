@@ -208,7 +208,7 @@ mod tests {
             sender_name: "Alex".into(),
             created_at: ts(),
             contents: GiftContents::Animal {
-                species_id: "fox".into(),
+                species_id: "red_fox".into(),
                 level: 3,
             },
         });

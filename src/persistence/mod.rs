@@ -135,6 +135,14 @@ pub fn snapshot_from_zoo(zoo: &Zoo) -> ZooSnapshot {
                 y: w.pos.y,
             })
             .collect(),
+        species_dupes: zoo
+            .species_dupes
+            .iter()
+            .map(|(s, c)| SpeciesDupeDto {
+                species: s.to_string(),
+                count: *c,
+            })
+            .collect(),
     }
 }
 
@@ -212,6 +220,10 @@ pub fn parse_snapshot_with_notes(bytes: &[u8]) -> Result<(ZooSnapshot, Migration
             13 => {
                 migrate_v13_to_v14(&mut value);
                 version = 14;
+            }
+            14 => {
+                migrate_v14_to_v15(&mut value);
+                version = 15;
             }
             v => bail!("no migration path from schema version {v}"),
         }
@@ -512,6 +524,17 @@ fn migrate_v13_to_v14(value: &mut Value) {
     }
 }
 
+/// v15 introduces one-of-each ownership + per-species Rank. Old saves get an
+/// empty `species_dupes`; the loader collapses any existing duplicate animals
+/// into Rank progress at restore time.
+fn migrate_v14_to_v15(value: &mut Value) {
+    if let Value::Object(map) = value {
+        map.insert("schema_version".into(), Value::from(15u64));
+        map.entry("species_dupes".to_string())
+            .or_insert(Value::Array(Vec::new()));
+    }
+}
+
 /// v11 introduces isometric grid placement: each habitat gains `tile_x`/`tile_y`.
 /// Pre-v11 saves have no coordinates, so auto-layout the habitats onto the grid
 /// deterministically — row-major, stepping by the 2×2 footprint so nothing
@@ -579,13 +602,30 @@ pub fn zoo_from_snapshot(s: ZooSnapshot) -> Result<LoadedZoo> {
         })
         .collect::<Result<Vec<_>>>()?;
 
+    // Lifetime per-species duplicate counts (drives Rank). Unknown ids dropped.
+    let mut species_dupes: HashMap<SpeciesId, u32> = HashMap::new();
+    for d in s.species_dupes {
+        if let Some(def) = species::try_get(&d.species) {
+            *species_dupes.entry(def.id).or_insert(0) += d.count;
+        }
+    }
+
     let mut animals: HashMap<Uuid, Animal> = HashMap::new();
+    let mut owned_species: HashSet<SpeciesId> = HashSet::new();
     let mut dropped_species: std::collections::HashMap<String, usize> = Default::default();
+    let mut collapsed = 0usize;
     for a in s.animals {
         let Some(def) = species::try_get(&a.species) else {
             *dropped_species.entry(a.species.clone()).or_default() += 1;
             continue;
         };
+        // One-of-each: a second copy of an owned species becomes a duplicate
+        // (Rank progress) rather than a second map entry.
+        if owned_species.contains(&def.id) {
+            *species_dupes.entry(def.id).or_insert(0) += 1;
+            collapsed += 1;
+            continue;
+        }
         let state = match a.state {
             AnimalStateDto::Idle => AnimalState::Idle,
             AnimalStateDto::Breeding {
@@ -596,16 +636,29 @@ pub fn zoo_from_snapshot(s: ZooSnapshot) -> Result<LoadedZoo> {
                 ends_at,
             },
         };
+        owned_species.insert(def.id);
         animals.insert(
             a.id,
             Animal {
                 id: a.id,
                 species: def.id,
                 level: a.level,
+                stage: 0, // set below from species_dupes
                 last_collected_at: a.last_collected_at,
                 state,
             },
         );
+    }
+    // Project the final duplicate counts onto each surviving animal's Rank.
+    for a in animals.values_mut() {
+        a.stage = crate::game::rank::rank_for_dupes(
+            species_dupes.get(a.species).copied().unwrap_or(0),
+        );
+    }
+    if collapsed > 0 {
+        warnings.push(format!(
+            "merged {collapsed} duplicate animal(s) into species Rank progress"
+        ));
     }
     for (species_id, n) in dropped_species {
         warnings.push(format!(
@@ -706,10 +759,16 @@ pub fn zoo_from_snapshot(s: ZooSnapshot) -> Result<LoadedZoo> {
         dna_helix: s.dna_helix,
         habitats,
         animals,
+        species_dupes,
         structures,
         claimed_gifts: s.claimed_gifts.into_iter().collect::<HashSet<_>>(),
         discovered_recipes,
-        nest_count: s.nest_count.clamp(1, crate::game::zoo::MAX_NESTS),
+        nest_count: s.nest_count.min(crate::game::zoo::MAX_NESTS),
+        // Physical nests aren't persisted yet; recreate one per owned nest and
+        // let `relink_breeding_nests` re-seat in-progress pairs below.
+        nests: (0..s.nest_count.min(crate::game::zoo::MAX_NESTS))
+            .map(|_| crate::game::zoo::Nest::new())
+            .collect(),
         exotic_skip_window: s.exotic_skip_window,
         // A 0 seed means a pre-v13 save that slipped through without derivation;
         // derive a stable seed from the player id so the world is reproducible.
@@ -738,6 +797,8 @@ pub fn zoo_from_snapshot(s: ZooSnapshot) -> Result<LoadedZoo> {
             .collect(),
         last_saved_at: s.last_saved_at,
     };
+    let mut zoo = zoo;
+    zoo.relink_breeding_nests();
 
     Ok(LoadedZoo { zoo, warnings })
 }
@@ -773,6 +834,47 @@ mod tests {
         assert_eq!(zoo2.animals.len(), zoo.animals.len());
         assert_eq!(zoo2.structures.len(), zoo.structures.len());
         assert_eq!(zoo2.claimed_gifts, zoo.claimed_gifts);
+    }
+
+    #[test]
+    fn species_dupes_round_trip_and_restore_rank() {
+        let now = Utc.with_ymd_and_hms(2026, 1, 1, 12, 0, 0).unwrap();
+        let mut zoo = Zoo::new(now);
+        let id = zoo.spawn_animal_freeform("field_mouse", 1, now).unwrap();
+        for _ in 0..10 {
+            zoo.spawn_animal_freeform("field_mouse", 1, now).unwrap();
+        }
+        assert_eq!(zoo.animals[&id].stage, 1); // Silver
+
+        let json = serde_json::to_vec(&snapshot_from_zoo(&zoo)).unwrap();
+        let zoo2 = zoo_from_snapshot(parse_snapshot(&json).unwrap()).unwrap().zoo;
+        assert_eq!(*zoo2.species_dupes.get("field_mouse").unwrap(), 10);
+        // Rank is re-derived onto the surviving animal on load.
+        let a = zoo2.animals.values().find(|a| a.species == "field_mouse").unwrap();
+        assert_eq!(a.stage, 1);
+    }
+
+    #[test]
+    fn loading_collapses_legacy_duplicate_animals_into_rank() {
+        let now = Utc.with_ymd_and_hms(2026, 1, 1, 12, 0, 0).unwrap();
+        // Hand-build a v15 snapshot with three same-species animals (as a
+        // pre-one-of-each save would have) and confirm collapse.
+        let mut snap = snapshot_from_zoo(&Zoo::new(now));
+        for _ in 0..3 {
+            snap.animals.push(crate::persistence::schema::AnimalDto {
+                id: Uuid::new_v4(),
+                species: "field_mouse".to_string(),
+                level: 1,
+                last_collected_at: now,
+                state: crate::persistence::schema::AnimalStateDto::Idle,
+            });
+        }
+        let loaded = zoo_from_snapshot(snap).unwrap();
+        let zoo = loaded.zoo;
+        assert_eq!(zoo.animals.len(), 1, "duplicates collapse to one");
+        // Two extras become duplicate Rank progress.
+        assert_eq!(*zoo.species_dupes.get("field_mouse").unwrap(), 2);
+        assert!(loaded.warnings.iter().any(|w| w.contains("merged")));
     }
 
     #[test]

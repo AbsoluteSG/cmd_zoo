@@ -11,6 +11,7 @@ impl ActionFlags {
     pub const NONE: ActionFlags = ActionFlags(0);
     pub const INTERACT: ActionFlags = ActionFlags(1 << 0);
     pub const DASH: ActionFlags = ActionFlags(1 << 1);
+    pub const SPRINT: ActionFlags = ActionFlags(1 << 2);
 
     pub fn contains(self, other: ActionFlags) -> bool {
         (self.0 & other.0) == other.0 && other.0 != 0

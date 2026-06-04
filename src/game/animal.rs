@@ -1,9 +1,10 @@
 ﻿use chrono::{DateTime, Utc};
 use uuid::Uuid;
 
+use super::rank;
 use super::species::{self, SpeciesId};
 
-pub const MAX_ANIMAL_LEVEL: u8 = 10;
+pub const MAX_ANIMAL_LEVEL: u8 = 30;
 
 #[derive(Clone, Debug)]
 pub enum AnimalState {
@@ -24,6 +25,9 @@ pub struct Animal {
     pub id: Uuid,
     pub species: SpeciesId,
     pub level: u8,
+    /// Rank stage (0 = Regular). A cached projection of the owner's
+    /// `species_dupes[species]`; boosts income + storage via `rank_multiplier`.
+    pub stage: u8,
     pub last_collected_at: DateTime<Utc>,
     pub state: AnimalState,
 }
@@ -34,6 +38,7 @@ impl Animal {
             id: Uuid::new_v4(),
             species,
             level: 1,
+            stage: 0,
             last_collected_at: now,
             state: AnimalState::Idle,
         }
@@ -43,7 +48,9 @@ impl Animal {
         match self.state {
             AnimalState::Idle => {
                 let def = species::get(self.species);
-                def.base_rate_per_sec * level_rate_multiplier(def.level_rate_bonus, self.level)
+                def.base_rate_per_sec
+                    * level_rate_multiplier(def.level_rate_bonus, self.level)
+                    * rank::rank_multiplier(self.stage)
             }
             AnimalState::Breeding { .. } => 0.0,
         }
@@ -52,7 +59,7 @@ impl Animal {
     pub fn storage_cap(&self) -> u64 {
         let def = species::get(self.species);
         let mult = level_cap_multiplier(def.level_cap_bonus, self.level);
-        ((def.base_storage_cap as f64) * mult).floor() as u64
+        ((def.base_storage_cap as f64) * mult * rank::rank_multiplier(self.stage)).floor() as u64
     }
 
     pub fn stored_at(&self, now: DateTime<Utc>) -> u64 {
@@ -86,9 +93,17 @@ pub fn level_cap_multiplier(bonus: f64, level: u8) -> f64 {
     1.0 + bonus * (level.saturating_sub(1) as f64)
 }
 
-/// Coins to advance from `current_level` to `current_level + 1`.
+/// Food to advance from `current_level` to `current_level + 1` (spent via the
+/// inspect-panel Feed button). Grows linearly with the current level.
 pub fn animal_level_up_cost(base_purchase_cost: u64, current_level: u8) -> u64 {
     base_purchase_cost.saturating_mul(current_level as u64).saturating_mul(2)
+}
+
+/// Coins gained from selling an animal. Scales with level only (rank is *not*
+/// reflected in the payout — it persists on the species instead). Roughly half
+/// the level-weighted purchase value.
+pub fn animal_sell_value(base_purchase_cost: u64, level: u8) -> u64 {
+    (base_purchase_cost.saturating_mul(level as u64) / 2).max(base_purchase_cost / 2)
 }
 
 #[cfg(test)]
@@ -148,7 +163,7 @@ mod tests {
         // L2: rate = 1.5 * (1+0.8) = 2.7/s; cap = 240 * (1+0.4) = 336.
         // L3: rate = 1.5 * 2.6 = 3.9/s; cap = 240 * 1.8 = 432.
         let base = Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap();
-        let mut a = Animal::new("fox", base);
+        let mut a = Animal::new("red_fox", base);
         a.level = 2;
         assert!((a.rate_per_sec() - 2.7).abs() < 1e-9);
         assert_eq!(a.storage_cap(), 336);

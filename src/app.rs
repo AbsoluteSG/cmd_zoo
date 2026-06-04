@@ -18,7 +18,7 @@ use std::collections::HashMap;
 use crate::audio::Sounds;
 use crate::catching::CatchState;
 use crate::game::avatar_system::{self, Behavior};
-use crate::game::{Animal, AnimalState, Zoo, economy, species};
+use crate::game::{Zoo, economy, species};
 use crate::game::wild_animal::AiHit;
 use crate::game::world_chunks::{WorldChunks, WORLD_W, WORLD_H};
 use crate::input::{AvatarController, ControllerCtx, KeyboardController, RemoteController};
@@ -35,9 +35,20 @@ use crate::render::{menus, world};
 pub enum Screen {
     World,
     Shop,
-    Breeding,
     Settings,
     Waypoints,
+    /// Physical breeding-nest panel; the target nest is in `GameApp::active_nest`.
+    Nest,
+    /// Food-structure panel; the target structure is in `GameApp::active_structure`.
+    Structure,
+}
+
+/// An interactive ground pad reachable with E: a breeding nest (top row) or a
+/// food structure (bottom row), identified by its slot index.
+#[derive(Clone, Copy)]
+enum Pad {
+    Nest(usize),
+    Structure(usize),
 }
 
 /// Full-screen post-process filter applied to the world (UI stays crisp).
@@ -98,6 +109,9 @@ pub struct Critter {
     pub idle_timer: f32,
     /// Seconds remaining of the redeem scale-pop animation. >0 = popping.
     pub pop: f32,
+    /// Carried velocity, used only while being dragged on the follow "chain"
+    /// so the pull reads as weighty momentum rather than rigid tracking.
+    pub vel: Vec2,
 }
 
 impl Critter {
@@ -111,6 +125,7 @@ impl Critter {
             dir: vec2(-1.0, 1.0),
             idle_timer: rand::gen_range(0.0, 2.0),
             pop: 0.0,
+            vel: vec2(0.0, 0.0),
         }
     }
 
@@ -140,6 +155,54 @@ impl Critter {
         let dir = to / dist;
         self.dir = dir;
         self.pos += dir * self.speed * dt;
+    }
+
+    /// Steer straight toward `dest` (used while parked at a nest). Stops cleanly
+    /// once close to avoid jitter.
+    fn move_toward(&mut self, dest: Vec2, dt: f32) {
+        if self.pop > 0.0 {
+            self.pop = (self.pop - dt).max(0.0);
+        }
+        let to = dest - self.pos;
+        let dist = to.length();
+        if dist < 4.0 {
+            return;
+        }
+        let dir = to / dist;
+        self.dir = dir;
+        self.pos += dir * (self.speed * 1.2).min(dist / dt) * dt;
+    }
+
+    /// Get dragged toward `anchor` as if on an elastic chain. There's slack
+    /// (no pull when close), the pull ramps up the more taut the chain gets,
+    /// and carried momentum + damping make it feel like hauling weight rather
+    /// than a sprite locked to the avatar.
+    fn follow_pull(&mut self, anchor: Vec2, dt: f32) {
+        if self.pop > 0.0 {
+            self.pop = (self.pop - dt).max(0.0);
+        }
+        const SLACK: f32 = 38.0; // chain rest length — no pull within this
+        const STIFFNESS: f32 = 11.0; // accel per unit of tautness
+        const MAX_TAUT: f32 = 240.0; // clamp so a big yank doesn't explode
+        const MAX_SPEED: f32 = 360.0;
+
+        let to = anchor - self.pos;
+        let dist = to.length();
+        if dist > SLACK {
+            let dir = to / dist;
+            let taut = (dist - SLACK).min(MAX_TAUT);
+            self.vel += dir * (taut * STIFFNESS) * dt;
+            self.dir = dir;
+        }
+        // Velocity damping: settles the bob when you stop, keeps it from
+        // orbiting the anchor. Frame-rate independent.
+        let damp = (-7.0 * dt).exp();
+        self.vel *= damp;
+        let speed = self.vel.length();
+        if speed > MAX_SPEED {
+            self.vel *= MAX_SPEED / speed;
+        }
+        self.pos += self.vel * dt;
     }
 }
 
@@ -201,6 +264,22 @@ pub struct DangerZone {
     pub radius: f32,
 }
 
+/// Open inspect-panel state: which owned animal is being inspected, which side
+/// the panel slides in from, and the slide-in progress.
+pub struct InspectState {
+    pub animal_id: Uuid,
+    /// True → panel slides from the right edge (player is on the left), else left.
+    pub from_right: bool,
+    /// Slide-in progress 0→1, eased each frame.
+    pub t: f32,
+}
+
+/// World-units reach within which pressing E inspects the nearest owned animal.
+pub const INTERACT_RANGE: f32 = 170.0;
+
+/// Most animals that can trail the avatar on the follow chain at once.
+pub const MAX_FOLLOWERS: usize = 10;
+
 pub struct GameApp {
     pub zoo: Zoo,
     pub repo: Arc<JsonFileRepository>,
@@ -227,9 +306,6 @@ pub struct GameApp {
     pub effect: PostEffect,
     /// Post-process material (built once); None if shader compilation failed.
     post: Option<Material>,
-    /// Breeding pair staging (animal ids), used by the Breeding menu.
-    pub breeding_first_pick: Option<Uuid>,
-    pub breeding_second_pick: Option<Uuid>,
     /// Transient status line: (text, set-at via `get_time()`), cleared after 4s.
     pub status: Option<(String, f64)>,
     /// Persistent error log: red messages shown at the bottom-left, expire after 8s.
@@ -270,7 +346,32 @@ pub struct GameApp {
     pub danger_zones: Vec<DangerZone>,
     /// Remaining venom screen-effect time (seconds): red vignette + brief blur.
     pub venom_fx: f32,
+    /// Active animal-inspect side panel, if any. The inspected critter is frozen
+    /// in place while this is open.
+    pub inspect: Option<InspectState>,
+    /// Owned animals currently following the avatar (toggled from the inspect
+    /// panel's Follow button). Order is the chain order — the first trails the
+    /// avatar, each subsequent one trails the animal ahead of it. Capped at
+    /// [`MAX_FOLLOWERS`]. An animal leaves the chain once deposited or released.
+    pub following: Vec<Uuid>,
+    /// Nest whose panel (`Screen::Nest`) is open, if any.
+    pub active_nest: Option<Uuid>,
+    /// When `Some(nest_id)`, the spotlight deposit view is active: the world is
+    /// dimmed and the player clicks one of their following animals to drop it
+    /// into that nest. Escape exits.
+    pub depositing: Option<Uuid>,
+    /// Food structure whose panel (`Screen::Structure`) is open, if any.
+    pub active_structure: Option<Uuid>,
+    /// Biome-preview debug mode: free-fly camera that paints only the biome
+    /// colour field (no critters, plot, structures, or HUD chrome) and allows
+    /// zooming far past the gameplay limit. Toggled with F3. Used to record
+    /// clean biome-layout showcases.
+    pub debug_biome: bool,
 }
+
+/// Far-out zoom floor allowed only in biome-debug mode, so the whole 500k
+/// world can fit on screen (the gameplay floor is 0.3).
+const DEBUG_ZOOM_MIN: f32 = 0.0012;
 
 /// Hitstop duration applied when a Basher lands a hit.
 const BASH_HITSTOP: f32 = 0.12;
@@ -322,8 +423,6 @@ impl GameApp {
             scene_rt: None,
             effect: PostEffect::None,
             post: build_post_material(),
-            breeding_first_pick: None,
-            breeding_second_pick: None,
             status: None,
             errors: VecDeque::new(),
             session,
@@ -338,6 +437,12 @@ impl GameApp {
             particles: Particles::new(),
             danger_zones: Vec::new(),
             venom_fx: 0.0,
+            inspect: None,
+            following: Vec::new(),
+            active_nest: None,
+            depositing: None,
+            active_structure: None,
+            debug_biome: false,
         }
     }
 
@@ -576,19 +681,23 @@ impl GameApp {
                 self.set_status(first.clone());
             }
         }
-        let before = self.breeding_pair_count();
         economy::advance(&mut self.zoo, now);
-        let after = self.breeding_pair_count();
-        if after < before {
-            self.set_status(format!("{} gestation(s) completed", before - after));
+
+        // Auto-complete any nests whose gestation finished: parents are released
+        // and an offspring is left in the nest for the player to collect.
+        let hatched = self.zoo.advance_nests(now);
+        if !hatched.is_empty() {
+            self.sync_critters();
             self.sync_world_to_zoo();
-            // Birth sparkle in the home zoo — one burst per completed pair,
-            // scattered a little so they don't stack on the exact centre.
-            let c = crate::game::world_chunks::zoo_center();
-            for _ in 0..(before - after) {
-                let jitter = vec2(rand::gen_range(-64.0, 64.0), rand::gen_range(-64.0, 64.0));
-                self.particles.birth(c + jitter);
+            for (idx, _species) in &hatched {
+                // Birth sparkle at the nest where it hatched.
+                self.particles.birth(crate::game::zoo::Zoo::nest_pos(*idx));
             }
+            self.set_status(if hatched.len() == 1 {
+                "An egg hatched — collect it from the nest!".to_string()
+            } else {
+                format!("{} eggs hatched — collect them!", hatched.len())
+            });
             self.zoo.last_saved_at = now;
             if let Ok(mt) = access.save(&self.zoo) {
                 self.last_modtime = mt;
@@ -596,41 +705,83 @@ impl GameApp {
         }
     }
 
-    fn breeding_pair_count(&self) -> usize {
-        use crate::game::AnimalState;
-        self.zoo
-            .animals
-            .values()
-            .filter(|a| matches!(a.state, AnimalState::Breeding { .. }))
-            .count()
-            / 2
-    }
 
     /// Menu toggles + (when no menu is open) camera input + click-to-redeem,
     /// plus critter wandering (which continues behind menus).
     pub fn handle_input(&mut self, now: DateTime<Utc>) {
+        // F3 toggles the biome-preview debug mode (free-fly, biomes only).
+        if is_key_pressed(KeyCode::F3) {
+            self.debug_biome = !self.debug_biome;
+            if self.debug_biome {
+                self.set_status("Biome debug — R reseed · wheel zoom · WASD pan · F3 exit");
+            } else {
+                // Restore a gameplay zoom and recenter on the avatar.
+                self.camera.zoom = self.camera.zoom.max(0.3);
+                let p = self.session.my_avatar().pos;
+                self.camera.snap_to(p, vec2(screen_width(), screen_height()));
+                self.set_status("Biome debug off");
+            }
+        }
+        if self.debug_biome {
+            self.handle_debug_input();
+            return;
+        }
+
         let mp = mouse_position();
         let mouse = vec2(mp.0, mp.1);
 
-        // Menu toggles: 1 = Shop, 2 = Breeding, Esc = close.
-        if is_key_pressed(KeyCode::Key1) {
+        // Spotlight deposit view is fully modal: only hover/click-to-select an
+        // animal and Escape work; everything else is suppressed.
+        let deposit_mode = self.depositing.is_some();
+        if deposit_mode {
+            if is_key_pressed(KeyCode::Escape) {
+                self.depositing = None;
+            } else if is_mouse_button_pressed(MouseButton::Left) {
+                self.try_deposit_select(now);
+            }
+        }
+
+        // Menu toggles: 1 = Shop, Esc = close. Breeding lives in physical nests.
+        if !deposit_mode && is_key_pressed(KeyCode::Key1) {
             self.toggle_screen(Screen::Shop);
         }
-        if is_key_pressed(KeyCode::Key2) {
-            self.toggle_screen(Screen::Breeding);
-        }
-        if is_key_pressed(KeyCode::Key3) {
+        if !deposit_mode && is_key_pressed(KeyCode::Key3) {
             self.toggle_screen(Screen::Settings);
         }
-        if is_key_pressed(KeyCode::Key4) {
+        if !deposit_mode && is_key_pressed(KeyCode::Key4) {
             self.toggle_screen(Screen::Waypoints);
         }
-        if is_key_pressed(KeyCode::Escape) {
+        if !deposit_mode && is_key_pressed(KeyCode::Escape) {
             self.set_screen(Screen::World);
+            self.inspect = None;
+        }
+
+        // E opens the nearest pad's panel (breeding nest along the top, food
+        // structure along the bottom), otherwise inspects the nearest owned
+        // animal (only when no menu is open).
+        if !deposit_mode && is_key_pressed(KeyCode::E) && self.menu_t < 0.02 {
+            let pad = if self.inspect.is_none() { self.nearest_pad() } else { None };
+            match pad {
+                Some(Pad::Nest(i)) if i < self.zoo.nest_count as usize => {
+                    self.active_nest = Some(self.zoo.nests[i].id);
+                    self.set_screen(Screen::Nest);
+                }
+                Some(Pad::Nest(i)) if i == self.zoo.nest_count as usize => self.try_buy_nest(now),
+                Some(Pad::Nest(_)) => self.set_status("unlock the nearer nests first"),
+                Some(Pad::Structure(i)) if i < self.zoo.structures.len() => {
+                    self.active_structure = Some(self.zoo.structures[i].id);
+                    self.set_screen(Screen::Structure);
+                }
+                Some(Pad::Structure(i)) if i == self.zoo.structures.len() => {
+                    self.try_buy_food_structure(now)
+                }
+                Some(Pad::Structure(_)) => self.set_status("unlock the nearer ones first"),
+                None => self.toggle_inspect(),
+            }
         }
 
         // C toggles catch mode (only when no menu is open).
-        if is_key_pressed(KeyCode::C) && self.menu_t < 0.02 {
+        if !deposit_mode && is_key_pressed(KeyCode::C) && self.menu_t < 0.02 {
             self.catch_state.toggle();
             if self.catch_state.active {
                 self.set_status("Catch mode — hover over a wild animal");
@@ -651,11 +802,23 @@ impl GameApp {
         }
 
         let dt = get_frame_time();
-        let menu_open = self.menu_t >= 0.02;
+        // Treat the deposit spotlight like an open menu: it freezes avatar
+        // movement, click-to-redeem, and zoom.
+        let menu_open = self.menu_t >= 0.02 || deposit_mode;
 
         // Advance cosmetic particles every frame — they keep animating behind
         // menus and through hitstop, like the wandering critters do.
         self.particles.update(dt);
+
+        // Inspect panel: close if its animal is gone; otherwise ease the slide-in.
+        if let Some(ins) = &self.inspect {
+            if !self.zoo.animals.contains_key(&ins.animal_id) {
+                self.inspect = None;
+            }
+        }
+        if let Some(ins) = &mut self.inspect {
+            ins.t += (1.0 - ins.t) * (dt * 14.0).min(1.0);
+        }
 
         // Hitstop: a brief gameplay freeze after a Basher connects. Motion
         // (avatars + wild AI + catch progress) pauses while this ticks down;
@@ -762,6 +925,18 @@ impl GameApp {
             }
         }
 
+        // Sprint dust: trail behind the local avatar while sprinting and moving
+        // (but not mid-dash, which has its own after-image trail).
+        if !frozen
+            && local_intent.actions.contains(crate::input::ActionFlags::SPRINT)
+            && local_intent.move_dir.length_squared() > 1e-4
+        {
+            let me = self.session.my_avatar();
+            if !me.is_dashing() && me.vel.length_squared() > 100.0 {
+                self.particles.sprint_trail(me.pos);
+            }
+        }
+
         // 5. Host: broadcast new poses each frame, full snapshot on cadence.
         if matches!(self.session.role, crate::net::SessionRole::Host { .. }) {
             self.session.broadcast_avatars();
@@ -797,8 +972,39 @@ impl GameApp {
             );
         }
 
+        // Critters wander, except: the inspected one is frozen in place, nested
+        // ones are parked at their nest, and followers trail in a chain.
+        let locked_id = self.inspect.as_ref().map(|i| i.animal_id);
+        let parked = self.zoo.nested_animal_positions();
+        let avatar_pos = self.session.my_avatar().pos;
+        // First pass: everything that isn't currently following the avatar.
         for c in &mut self.critters {
-            c.update(dt);
+            if Some(c.animal_id) == locked_id || self.following.contains(&c.animal_id) {
+                continue;
+            }
+            if let Some(&dest) = parked.get(&c.animal_id) {
+                c.move_toward(dest, dt);
+            } else {
+                c.update(dt);
+            }
+        }
+        // Chain pass: each follower is dragged on an elastic leash anchored to
+        // the one ahead of it (the head trails the avatar), so the line lags
+        // and whips around with real momentum rather than tracking rigidly.
+        // Paused during deposit mode, where followers are held in a laid-out row.
+        let mut anchor = avatar_pos;
+        for fid in if self.depositing.is_some() { Vec::new() } else { self.following.clone() } {
+            if Some(fid) == locked_id {
+                // Frozen for inspection; keep the chain anchored at its spot.
+                if let Some(c) = self.critters.iter().find(|c| c.animal_id == fid) {
+                    anchor = c.pos;
+                }
+                continue;
+            }
+            if let Some(c) = self.critters.iter_mut().find(|c| c.animal_id == fid) {
+                c.follow_pull(anchor, dt);
+                anchor = c.pos;
+            }
         }
 
         // ── Wild animal AI + catch resolution ─────────────────────────────
@@ -904,6 +1110,45 @@ impl GameApp {
         }
     }
 
+    /// Biome-preview debug controls: free pan (WASD/arrows), cursor-centric
+    /// zoom with an extended far-out floor, and R to reroll the world seed
+    /// (regenerating the biome map + wild world). Suppresses all normal
+    /// gameplay input while active.
+    fn handle_debug_input(&mut self) {
+        let dt = get_frame_time();
+
+        // R rerolls the world seed → a brand-new biome layout.
+        if is_key_pressed(KeyCode::R) {
+            let new_seed = ((rand::rand() as u64) << 32) | rand::rand() as u64;
+            self.zoo.world_seed = new_seed;
+            self.world = WorldChunks::new(new_seed, HashMap::new());
+            self.zoo.chunk_deltas.clear();
+            self.set_status(format!("reseeded · {new_seed:#018x}"));
+        }
+
+        // Free pan: shift the screen-space camera offset (no avatar follow).
+        let mut pan = vec2(0.0, 0.0);
+        if is_key_down(KeyCode::A) || is_key_down(KeyCode::Left)  { pan.x += 1.0; }
+        if is_key_down(KeyCode::D) || is_key_down(KeyCode::Right) { pan.x -= 1.0; }
+        if is_key_down(KeyCode::W) || is_key_down(KeyCode::Up)    { pan.y += 1.0; }
+        if is_key_down(KeyCode::S) || is_key_down(KeyCode::Down)  { pan.y -= 1.0; }
+        self.camera.offset += pan * (900.0 * dt);
+
+        // Cursor-centric zoom, allowed to pull far past the gameplay floor.
+        let (_, wheel_y) = mouse_wheel();
+        if wheel_y != 0.0 {
+            let mp = mouse_position();
+            let mouse = vec2(mp.0, mp.1);
+            let old = self.camera.zoom;
+            let factor = if wheel_y > 0.0 { 1.1 } else { 1.0 / 1.1 };
+            let new = (old * factor).clamp(DEBUG_ZOOM_MIN, 3.0);
+            if new != old {
+                self.camera.offset = mouse - (mouse - self.camera.offset) * (new / old);
+                self.camera.zoom = new;
+            }
+        }
+    }
+
     fn toggle_screen(&mut self, screen: Screen) {
         self.set_screen(if self.screen == screen {
             Screen::World
@@ -912,11 +1157,9 @@ impl GameApp {
         });
     }
 
-    /// Switch overlay screens, clearing transient breeding staging.
+    /// Switch overlay screens.
     pub fn set_screen(&mut self, screen: Screen) {
         self.screen = screen;
-        self.breeding_first_pick = None;
-        self.breeding_second_pick = None;
     }
 
     /// Instantly move the local avatar to `pos`: snap the camera, stream the
@@ -931,6 +1174,230 @@ impl GameApp {
             .snap_to(pos, vec2(screen_width(), screen_height()));
         self.world.update(pos);
         self.set_screen(Screen::World);
+    }
+
+    /// Toggle the animal-inspect panel. If open, close it; otherwise find the
+    /// nearest owned animal within `INTERACT_RANGE` and open a panel for it,
+    /// freezing that critter in place. The panel slides in from the screen edge
+    /// opposite the player.
+    fn toggle_inspect(&mut self) {
+        if self.inspect.is_some() {
+            self.inspect = None;
+            return;
+        }
+        let apos = self.session.my_avatar().pos;
+        let mut best: Option<(f32, Uuid)> = None;
+        for c in &self.critters {
+            let d = (c.pos - apos).length_squared();
+            if d <= INTERACT_RANGE * INTERACT_RANGE
+                && best.map_or(true, |(bd, _)| d < bd)
+            {
+                best = Some((d, c.animal_id));
+            }
+        }
+        match best {
+            Some((_, id)) => {
+                let screen = view::world_to_screen(apos, &self.camera);
+                // Player on the left half → panel from the right, and vice versa.
+                let from_right = screen.x < screen_width() * 0.5;
+                self.inspect = Some(InspectState { animal_id: id, from_right, t: 0.0 });
+            }
+            None => self.set_status("Nothing to inspect nearby"),
+        }
+    }
+
+    /// Slot index (0..`MAX_NESTS`) of the nearest nest pad — owned or still
+    /// locked — within `INTERACT_RANGE` of the local avatar.
+    pub fn nearest_nest_slot(&self) -> Option<usize> {
+        let apos = self.session.my_avatar().pos;
+        let mut best: Option<(f32, usize)> = None;
+        for i in 0..crate::game::zoo::MAX_NESTS as usize {
+            let d = (Zoo::nest_pos(i) - apos).length_squared();
+            if d <= INTERACT_RANGE * INTERACT_RANGE && best.map_or(true, |(bd, _)| d < bd) {
+                best = Some((d, i));
+            }
+        }
+        best.map(|(_, i)| i)
+    }
+
+    /// Try to unlock the next locked nest, paying its coin/DNA cost.
+    pub fn try_buy_nest(&mut self, now: DateTime<Utc>) {
+        match self.zoo.buy_nest() {
+            Ok(n) => {
+                self.save_under_lock(now);
+                self.set_status(format!("unlocked nest {n}"));
+            }
+            Err(e) => self.set_status(format!("{e}")),
+        }
+    }
+
+    /// Slot index (0..`MAX_FOOD_STRUCTURES`) of the nearest food-structure pad —
+    /// owned or locked — within `INTERACT_RANGE` of the local avatar.
+    pub fn nearest_structure_slot(&self) -> Option<usize> {
+        let apos = self.session.my_avatar().pos;
+        let mut best: Option<(f32, usize)> = None;
+        for i in 0..crate::game::structure::MAX_FOOD_STRUCTURES {
+            let d = (Zoo::food_structure_pos(i) - apos).length_squared();
+            if d <= INTERACT_RANGE * INTERACT_RANGE && best.map_or(true, |(bd, _)| d < bd) {
+                best = Some((d, i));
+            }
+        }
+        best.map(|(_, i)| i)
+    }
+
+    /// The nearest interactive pad (breeding nest or food structure) within
+    /// reach, whichever is closest.
+    fn nearest_pad(&self) -> Option<Pad> {
+        let apos = self.session.my_avatar().pos;
+        let nest = self
+            .nearest_nest_slot()
+            .map(|i| ((Zoo::nest_pos(i) - apos).length_squared(), Pad::Nest(i)));
+        let structure = self
+            .nearest_structure_slot()
+            .map(|i| ((Zoo::food_structure_pos(i) - apos).length_squared(), Pad::Structure(i)));
+        match (nest, structure) {
+            (Some((dn, pn)), Some((ds, ps))) => Some(if dn <= ds { pn } else { ps }),
+            (Some((_, p)), None) | (None, Some((_, p))) => Some(p),
+            (None, None) => None,
+        }
+    }
+
+    /// Try to unlock the next locked food structure, paying its coin cost.
+    pub fn try_buy_food_structure(&mut self, now: DateTime<Utc>) {
+        match self.zoo.buy_food_structure(now) {
+            Ok(n) => {
+                self.save_under_lock(now);
+                self.set_status(format!("built food structure {n}"));
+            }
+            Err(e) => self.set_status(format!("{e}")),
+        }
+    }
+
+    /// Add `animal_id` to the follow chain (from the inspect panel). Refused if
+    /// it's already nested or the chain is full ([`MAX_FOLLOWERS`]).
+    pub fn start_following(&mut self, animal_id: Uuid) {
+        if self.zoo.animal_in_any_nest(animal_id) {
+            self.set_status("that animal is already in a nest");
+            return;
+        }
+        if self.following.contains(&animal_id) {
+            return;
+        }
+        if self.following.len() >= MAX_FOLLOWERS {
+            self.set_status(format!("can't follow more than {MAX_FOLLOWERS} at once"));
+            return;
+        }
+        self.following.push(animal_id);
+        self.inspect = None;
+        self.set_status("following you — press E at a nest to deposit");
+    }
+
+    /// Remove `animal_id` from the follow chain, if present.
+    pub fn stop_following(&mut self, animal_id: Uuid) {
+        self.following.retain(|id| *id != animal_id);
+    }
+
+    /// Enter the spotlight deposit view for `nest_id`: dim the world and let the
+    /// player click one of their following animals to drop it in. Closes any
+    /// open menu instantly, and spreads the chain out into a horizontal row so
+    /// the animals don't overlap (the chain physics is paused while depositing).
+    pub fn enter_deposit_mode(&mut self, nest_id: Uuid) {
+        self.depositing = Some(nest_id);
+        self.set_screen(Screen::World);
+        self.menu_t = 0.0;
+        self.lay_out_followers();
+    }
+
+    /// Place each following animal in an evenly spaced horizontal row centered
+    /// on the avatar, so they read as a tidy line-up rather than a clump.
+    fn lay_out_followers(&mut self) {
+        let center = self.session.my_avatar().pos;
+        // Aim for ~130px of breathing room between sprites at the current zoom.
+        let spacing = (130.0 / self.camera.zoom).max(60.0);
+        let n = self.following.len();
+        for (i, fid) in self.following.clone().iter().enumerate() {
+            let offset = (i as f32 - (n as f32 - 1.0) * 0.5) * spacing;
+            if let Some(c) = self.critters.iter_mut().find(|c| c.animal_id == *fid) {
+                c.pos = vec2(center.x + offset, center.y);
+                c.vel = vec2(0.0, 0.0);
+                c.dir = vec2(-1.0, 1.0);
+            }
+        }
+    }
+
+    /// Species of the lone animal already in the active deposit nest, if exactly
+    /// one slot is filled — used to dim non-crossbreedable second picks.
+    pub fn deposit_partner_species(&self) -> Option<&'static str> {
+        let nest_id = self.depositing?;
+        let nest = self.zoo.nests.iter().find(|n| n.id == nest_id)?;
+        let occ = nest.occupants();
+        if occ.len() == 1 {
+            self.zoo.animals.get(&occ[0]).map(|a| a.species)
+        } else {
+            None
+        }
+    }
+
+    /// The following animal whose sprite is under the cursor right now, if any —
+    /// used both to highlight it in the overlay and to resolve a click. Animals
+    /// that can't crossbreed with an already-deposited partner are skipped.
+    pub fn deposit_hovered(&self) -> Option<Uuid> {
+        let mp = mouse_position();
+        let mouse = vec2(mp.0, mp.1);
+        let cam = self.camera;
+        let h = CRITTER_H * cam.zoom;
+        let hw = h * 0.4;
+        let partner = self.deposit_partner_species();
+        // Prefer the front-most (largest screen-Y) match when sprites overlap.
+        let mut best: Option<(f32, Uuid)> = None;
+        for fid in &self.following {
+            let Some(c) = self.critters.iter().find(|c| c.animal_id == *fid) else { continue };
+            // Invalid crossbreed second-picks aren't selectable.
+            if let Some(p) = partner {
+                if species::crossbreed_pool(p, c.species).is_none() {
+                    continue;
+                }
+            }
+            let feet = view::world_to_screen(c.pos, &cam);
+            let hit = mouse.x >= feet.x - hw
+                && mouse.x <= feet.x + hw
+                && mouse.y >= feet.y - h
+                && mouse.y <= feet.y;
+            if hit && best.map_or(true, |(by, _)| feet.y > by) {
+                best = Some((feet.y, *fid));
+            }
+        }
+        best.map(|(_, id)| id)
+    }
+
+    /// Resolve a click in the deposit spotlight: deposit the hovered animal into
+    /// the active nest. Stays in the view (so you can fill the second slot)
+    /// until the nest is full or nothing is left to deposit.
+    fn try_deposit_select(&mut self, now: DateTime<Utc>) {
+        let Some(nest_id) = self.depositing else { return };
+        let Some(fid) = self.deposit_hovered() else { return };
+        match self.zoo.deposit_in_nest(nest_id, fid) {
+            Ok(()) => {
+                self.stop_following(fid);
+                self.sync_critters();
+                self.save_under_lock(now);
+                self.set_status("deposited in nest");
+                // Auto-exit once the nest is full or the chain is empty.
+                let nest_full = self
+                    .zoo
+                    .nests
+                    .iter()
+                    .find(|n| n.id == nest_id)
+                    .map_or(true, |n| n.free_slot().is_none());
+                if nest_full || self.following.is_empty() {
+                    self.depositing = None;
+                } else {
+                    // Re-center the remaining animals so no gap is left behind.
+                    self.lay_out_followers();
+                }
+            }
+            Err(e) => self.set_status(format!("{e}")),
+        }
     }
 
     /// Drop a fast-travel waypoint at the local avatar's current position.
@@ -955,50 +1422,6 @@ impl GameApp {
         if self.zoo.remove_waypoint(id) {
             self.save_under_lock(now);
         }
-    }
-
-    /// Idle animals eligible to breed with `first_pick` (different species and
-    /// a valid crossbreed pool). With no first pick, all idle animals.
-    pub fn breeding_candidates(&self, first_pick: Option<Uuid>) -> Vec<&Animal> {
-        let first_species = first_pick
-            .and_then(|id| self.zoo.animals.get(&id))
-            .map(|a| a.species);
-        let mut v: Vec<&Animal> = self
-            .zoo
-            .animals
-            .values()
-            .filter(|a| matches!(a.state, AnimalState::Idle))
-            .filter(|a| match (first_pick, first_species) {
-                (Some(fid), Some(sp)) => {
-                    a.id != fid
-                        && a.species != sp
-                        && species::crossbreed_pool(sp, a.species).is_some()
-                }
-                _ => true,
-            })
-            .collect();
-        v.sort_by(|a, b| a.species.cmp(b.species).then(a.id.cmp(&b.id)));
-        v
-    }
-
-    /// Active gestation pairs as (animal_a, animal_b, ends_at), de-duped.
-    pub fn active_gestations(&self) -> Vec<(&Animal, &Animal, DateTime<Utc>)> {
-        let mut seen: std::collections::HashSet<Uuid> = std::collections::HashSet::new();
-        let mut out = Vec::new();
-        for a in self.zoo.animals.values() {
-            if seen.contains(&a.id) {
-                continue;
-            }
-            if let AnimalState::Breeding { partner_id, ends_at } = a.state {
-                if let Some(b) = self.zoo.animals.get(&partner_id) {
-                    seen.insert(a.id);
-                    seen.insert(partner_id);
-                    out.push((a, b, ends_at));
-                }
-            }
-        }
-        out.sort_by(|x, y| x.2.cmp(&y.2));
-        out
     }
 
     /// If `mouse` is over a critter, collect its backing animal's income via
@@ -1127,6 +1550,14 @@ impl GameApp {
     }
 
     pub fn draw(&mut self, now: DateTime<Utc>) {
+        // Biome-preview debug mode short-circuits the whole gameplay render:
+        // just the biome colour field + a minimal HUD, then the cursor.
+        if self.debug_biome {
+            world::draw_biome_debug(self);
+            self.draw_cursor();
+            return;
+        }
+
         let menu = self.menu_t > 0.001;
         let effect_on = self.effect != PostEffect::None;
         let venom = self.venom_fx > 0.0;
@@ -1155,11 +1586,14 @@ impl GameApp {
                 self.composite_effect(&rt);
             }
             if !menu {
-                world::draw_hud(self);
+                world::draw_hud(self, now);
             }
             menus::draw(self, now);
         } else {
             world::draw(self, now);
+        }
+        if self.depositing.is_some() {
+            world::draw_deposit_overlay(self);
         }
         self.draw_cursor();
     }

@@ -134,6 +134,65 @@ pub struct ChunkDelta {
     pub partial: Vec<(u16, u32)>,
 }
 
+// ── Per-chunk metadata flags (Minecraft-style markers) ─────────────────────────
+
+/// Deterministic per-chunk markers, computed purely from `(coord, world_seed)`
+/// — the same determinism contract as the wild-animal spawns, so they are
+/// **never persisted** (always regenerated from the seed). Most chunks have no
+/// flags set; the rare flagged chunk is a "special" tile.
+///
+/// STUB: none of these influence gameplay yet — they reserve ideas to wire up
+/// later (an exotic merchant tent, biome-agnostic spawns, DNA-rich packs, …).
+/// Each is rolled independently against its own low probability, so a chunk can
+/// (rarely) carry several at once.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ChunkFlags {
+    /// A travelling exotic merchant is camped here. Future: spawn a shop tent.
+    pub exotic_merchant: bool,
+    /// Spawns here ignore the biome table and can roll any species.
+    pub biome_agnostic_spawns: bool,
+    /// Animals here are biased toward DNA-producing (exotic) species.
+    pub dna_rich: bool,
+    /// Ruins worth exploring. Future: collectible / lore / dig site.
+    pub ancient_ruins: bool,
+    /// A fallen meteor. Future: rare-material node or event spawn.
+    pub meteor_site: bool,
+    /// Elevated chance of albino / shiny colour variants. Future: rare skins.
+    pub albino_surge: bool,
+    /// Encounters here always form a full pack. Future: horde challenge.
+    pub dense_pack: bool,
+}
+
+impl ChunkFlags {
+    /// True when no marker is set (the common case).
+    pub fn is_empty(self) -> bool {
+        self == ChunkFlags::default()
+    }
+}
+
+/// Roll the deterministic flags for `coord` under `world_seed`. Pure function;
+/// cheap enough to recompute on demand.
+fn compute_chunk_flags(coord: (i32, i32), world_seed: u64) -> ChunkFlags {
+    // Same chunk-seed mix used by `spawn_chunk_animals`, re-salted so the flag
+    // rolls don't correlate with the spawn rolls.
+    let seed = world_seed
+        .wrapping_mul(0x9E37_79B9_7F4A_7C15)
+        .wrapping_add((coord.0 as u64).wrapping_mul(73_856_093))
+        .wrapping_add((coord.1 as u64).wrapping_mul(19_349_663))
+        ^ 0xF1A6_5C0D_E2B7_4419;
+    let mut rng = LcgRng::new(seed);
+    // Each marker rolls against its own rarity (probabilities are tuning stubs).
+    ChunkFlags {
+        exotic_merchant:       rng.next_f32() < 0.010,
+        biome_agnostic_spawns: rng.next_f32() < 0.015,
+        dna_rich:              rng.next_f32() < 0.020,
+        ancient_ruins:         rng.next_f32() < 0.008,
+        meteor_site:           rng.next_f32() < 0.004,
+        albino_surge:          rng.next_f32() < 0.012,
+        dense_pack:            rng.next_f32() < 0.020,
+    }
+}
+
 // ── WorldChunks ───────────────────────────────────────────────────────────────
 
 pub struct WorldChunks {
@@ -164,6 +223,12 @@ impl WorldChunks {
     /// The world's procedural seed (for syncing back into the save snapshot).
     pub fn world_seed(&self) -> u64 {
         self.world_seed
+    }
+
+    /// Deterministic special-chunk markers at `coord` for this world. Recomputed
+    /// on demand from `(coord, world_seed)`; not persisted. See [`ChunkFlags`].
+    pub fn chunk_flags(&self, coord: (i32, i32)) -> ChunkFlags {
+        compute_chunk_flags(coord, self.world_seed)
     }
 
     /// Clone the persisted deltas for serialization into the save snapshot.
@@ -477,6 +542,25 @@ fn spawn_chunk_animals(coord: (i32, i32), world_seed: u64) -> Vec<WildAnimal> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Chunk flags must be deterministic per (coord, seed), and at least some
+    /// chunks across a region should carry a marker (they're rare but present).
+    #[test]
+    fn chunk_flags_deterministic_and_present() {
+        let seed = 0x00AB_CDEF;
+        let mut any = false;
+        for cy in 0..120 {
+            for cx in 0..120 {
+                let a = compute_chunk_flags((cx, cy), seed);
+                let b = compute_chunk_flags((cx, cy), seed);
+                assert_eq!(a, b, "flags differ at ({cx},{cy})");
+                if !a.is_empty() {
+                    any = true;
+                }
+            }
+        }
+        assert!(any, "no flagged chunks found in a 120x120 region");
+    }
 
     /// Regenerating the same chunk from the same seed must yield an identical
     /// ordered animal list — this is what makes spawn indices a stable identity.

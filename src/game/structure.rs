@@ -7,7 +7,13 @@ use super::structure_kind::{self, StructureKindId};
 const STRUCTURE_RATE_BONUS: f64 = 0.5;
 
 pub const MAX_STRUCTURE_LEVEL: u8 = 10;
-pub const STRUCTURE_TOTAL_CAP: usize = 4;
+
+/// The five physical food generators along the bottom of the zoo all share this
+/// single uniform kind (mirrors the nest pattern).
+pub const FOOD_KIND: StructureKindId = "food_silo";
+
+/// Hard cap on physical food structures. All start locked, unlocked in sequence.
+pub const MAX_FOOD_STRUCTURES: usize = 5;
 
 #[derive(Clone, Debug)]
 pub struct Structure {
@@ -46,13 +52,16 @@ impl Structure {
     }
 }
 
-/// Coins to buy the (current_count+1)-th structure. Same indexing rule as habitats.
-pub fn structure_purchase_cost(current_count: usize) -> u64 {
-    match current_count {
-        0 => 250,
-        1 => 750,
-        2 => 1800,
-        _ => 3500,
+/// Coins to unlock the next food structure given how many are already owned.
+/// Escalating, mirroring the nest unlock curve. `None` once all five are owned.
+pub fn food_structure_unlock_cost(owned: usize) -> Option<u64> {
+    match owned {
+        0 => Some(200),
+        1 => Some(1_000),
+        2 => Some(4_000),
+        3 => Some(12_000),
+        4 => Some(30_000),
+        _ => None,
     }
 }
 

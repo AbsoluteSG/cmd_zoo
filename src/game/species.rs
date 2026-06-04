@@ -12,6 +12,21 @@ pub enum HabitatTheme {
     Wetland,
     Jungle,
     Ocean,
+    // ── Added in the proc-gen overhaul: natural biomes ──────────────────────
+    // Cosmetic for now (no spawn-table entries yet → barren land); gameplay
+    // habitats can adopt them later.
+    Desert,
+    Tundra,
+    Taiga,
+    Volcanic,
+    Badlands,
+    Beach,
+    Highlands,
+    // ── Fantastical / rare biomes (scattered special patches) ───────────────
+    Mythical,
+    Void,
+    Festive,
+    Food,
 }
 
 impl HabitatTheme {
@@ -23,7 +38,18 @@ impl HabitatTheme {
             HabitatTheme::Savanna => "Savanna",
             HabitatTheme::Wetland => "Wetland",
             HabitatTheme::Jungle => "Jungle",
-            HabitatTheme::Ocean => "Ocean"
+            HabitatTheme::Ocean => "Ocean",
+            HabitatTheme::Desert => "Desert",
+            HabitatTheme::Tundra => "Tundra",
+            HabitatTheme::Taiga => "Taiga",
+            HabitatTheme::Volcanic => "Volcanic",
+            HabitatTheme::Badlands => "Badlands",
+            HabitatTheme::Beach => "Beach",
+            HabitatTheme::Highlands => "Highlands",
+            HabitatTheme::Mythical => "Mythical",
+            HabitatTheme::Void => "Void",
+            HabitatTheme::Festive => "Festive",
+            HabitatTheme::Food => "Food",
         }
     }
 
@@ -36,6 +62,17 @@ impl HabitatTheme {
             "Wetland" => Some(Self::Wetland),
             "Jungle" => Some(Self::Jungle),
             "Ocean" => Some(Self::Ocean),
+            "Desert" => Some(Self::Desert),
+            "Tundra" => Some(Self::Tundra),
+            "Taiga" => Some(Self::Taiga),
+            "Volcanic" => Some(Self::Volcanic),
+            "Badlands" => Some(Self::Badlands),
+            "Beach" => Some(Self::Beach),
+            "Highlands" => Some(Self::Highlands),
+            "Mythical" => Some(Self::Mythical),
+            "Void" => Some(Self::Void),
+            "Festive" => Some(Self::Festive),
+            "Food" => Some(Self::Food),
             _ => None,
         }
     }
@@ -303,7 +340,7 @@ static CATALOG: Lazy<HashMap<SpeciesId, SpeciesDef>> = Lazy::new(|| {
         },
         // Sprinter: foxes lean toward burst output.
         SpeciesDef {
-            id: "fox",
+            id: "red_fox",
             display_name: "Red Fox",            
             theme: HabitatTheme::Forest,
             base_rate_per_sec: 1.5,
@@ -699,7 +736,7 @@ static CATALOG: Lazy<HashMap<SpeciesId, SpeciesDef>> = Lazy::new(|| {
         coin_species("badger", "Badger", HabitatTheme::Forest, 1.2, 220, 150, 170, TANK, false),
         coin_species("raccoon", "Raccoon", HabitatTheme::Forest, 1.3, 200, 170, 160, SPRINTER, false),
         coin_species("squirrel", "Squirrel", HabitatTheme::Forest, 0.7, 90, 40, 80, SPRINTER, false),
-        coin_species("wolf", "Grey Wolf", HabitatTheme::Forest, 2.2, 420, 420, 260, BALANCED, false),
+        coin_species("grey_wolf", "Grey Wolf", HabitatTheme::Forest, 2.2, 420, 420, 260, BALANCED, false),
         coin_species("boar", "Wild Boar", HabitatTheme::Forest, 1.8, 360, 300, 240, TANK, false),
         coin_species("robin", "Robin", HabitatTheme::Forest, 0.8, 90, 45, 80, SPRINTER, false),
         coin_species("mole", "Mole", HabitatTheme::Forest, 0.7, 200, 70, 130, TANK, false),
@@ -808,9 +845,281 @@ static CATALOG: Lazy<HashMap<SpeciesId, SpeciesDef>> = Lazy::new(|| {
         coin_species("nightmaw", "Nightmaw", HabitatTheme::Jungle, 22.0, 8000, 125000, 60000, SPRINTER, true),
         coin_species("snugfang", "Snugfang", HabitatTheme::Arctic, 5.5, 34000, 64000, 50400, TANK, true),
         coin_species("voltscale", "Voltscale", HabitatTheme::Jungle, 12.0, 6500, 50000, 34200, SPRINTER, true),
-        coin_species("frostingmane", "Frostingmane", HabitatTheme::Farmland, 6.0, 13000, 46000, 37800, BALANCED, true),
+        coin_species("jack_of_all_manes", "Jack of All Manes", HabitatTheme::Farmland, 6.0, 13000, 46000, 37800, BALANCED, true),
         coin_species("mechabyss", "Mechabyss", HabitatTheme::Ocean, 15.0, 40000, 180000, 90000, TANK, true),
         coin_species("gravestalker", "Gravestalker", HabitatTheme::Jungle, 18.0, 12000, 135000, 64800, SPRINTER, true),
+    ]);
+
+    // ─── Secondary (rarer) crossbreed hybrids ────────────────────────────────
+    // Every recipe can also drop a second, scarcer hybrid (see RECIPES). These
+    // are slightly stronger than the primary hybrid as a reward for the lower
+    // odds. Themed to match the cross's primary hybrid.
+    entries.extend([
+        // Secondary drops for the base-roster recipes.
+        coin_species("billowool", "Billowool", HabitatTheme::Farmland, 3.0, 950, 950, 310, TANK, true),
+        coin_species("hornwool_bovram", "Hornwool Bovram", HabitatTheme::Farmland, 3.2, 2300, 1200, 430, TANK, true),
+        coin_species("marshplume", "Marsh Plume", HabitatTheme::Wetland, 3.3, 540, 1000, 290, SPRINTER, true),
+        coin_species("bramblesett", "Bramblesett", HabitatTheme::Forest, 2.7, 560, 860, 260, TANK, true),
+        coin_species("tuskhowl", "Tuskhowl", HabitatTheme::Forest, 3.6, 860, 1300, 350, TANK, true),
+        coin_species("duskrunner", "Duskrunner", HabitatTheme::Forest, 3.8, 680, 1400, 330, SPRINTER, true),
+        coin_species("quillsqueak", "Quillsqueak", HabitatTheme::Forest, 2.4, 500, 760, 230, SPRINTER, true),
+        coin_species("frostpup", "Frostpup", HabitatTheme::Arctic, 3.0, 660, 950, 290, BALANCED, true),
+        coin_species("tundratusk", "Tundratusk", HabitatTheme::Arctic, 3.4, 1150, 1400, 430, TANK, true),
+        coin_species("blizzardmaw", "Blizzardmaw", HabitatTheme::Arctic, 4.4, 1700, 2000, 470, TANK, true),
+        coin_species("spotspire", "Spotspire", HabitatTheme::Savanna, 3.8, 950, 1600, 370, SPRINTER, true),
+        coin_species("pachyhorn", "Pachyhorn", HabitatTheme::Savanna, 4.2, 2300, 2400, 530, TANK, true),
+        coin_species("sentryplume", "Sentryplume", HabitatTheme::Savanna, 3.2, 560, 1150, 290, SPRINTER, true),
+        coin_species("prideflash", "Prideflash", HabitatTheme::Savanna, 4.6, 860, 2100, 410, SPRINTER, true),
+        coin_species("stripespire", "Stripespire", HabitatTheme::Savanna, 3.6, 1050, 1500, 390, BALANCED, true),
+        coin_species("plumeprowl", "Plumeprowl", HabitatTheme::Jungle, 4.0, 680, 1600, 350, SPRINTER, true),
+        coin_species("mosslimber", "Mosslimber", HabitatTheme::Jungle, 2.1, 950, 950, 410, TANK, true),
+        coin_species("chatterperch", "Chatterperch", HabitatTheme::Jungle, 3.4, 600, 1150, 310, SPRINTER, true),
+        coin_species("gildedyawn", "Gilded Yawn", HabitatTheme::Jungle, 1.1, 1500, 1100, 470, TANK, true),
+        coin_species("inkfin", "Inkfin", HabitatTheme::Ocean, 3.6, 760, 1400, 350, BALANCED, true),
+        coin_species("spineshell", "Spineshell", HabitatTheme::Ocean, 2.6, 600, 870, 270, TANK, true),
+        coin_species("tidecurl", "Tidecurl", HabitatTheme::Ocean, 3.8, 740, 1500, 350, SPRINTER, true),
+        coin_species("gildedspine", "Gilded Spine", HabitatTheme::Ocean, 3.2, 680, 1300, 330, BALANCED, true),
+        coin_species("rivergnaw", "Rivergnaw", HabitatTheme::Wetland, 3.1, 680, 1050, 310, BALANCED, true),
+        coin_species("frosttalon", "Frosttalon", HabitatTheme::Arctic, 3.2, 600, 1150, 310, SPRINTER, true),
+        coin_species("shellantler", "Shellantler", HabitatTheme::Arctic, 2.4, 1300, 1100, 450, TANK, true),
+        coin_species("palevelvet", "Pale Velvet", HabitatTheme::Forest, 3.4, 760, 1400, 370, BALANCED, true),
+        // Secondary drops for the early forest starters.
+        coin_species("kitnip", "Kitnip", HabitatTheme::Forest, 1.8, 380, 400, 190, SPRINTER, true),
+        coin_species("pipsplash", "Pipsplash", HabitatTheme::Forest, 2.0, 320, 360, 180, SPRINTER, true),
+        coin_species("bogtrot", "Bogtrot", HabitatTheme::Forest, 2.2, 440, 460, 210, BALANCED, true),
+        coin_species("cinderpaw", "Cinderpaw", HabitatTheme::Forest, 2.8, 540, 660, 250, BALANCED, true),
+        coin_species("marshpride", "Marsh Pride", HabitatTheme::Forest, 2.6, 580, 600, 250, TANK, true),
+        coin_species("squeakmane", "Squeakmane", HabitatTheme::Forest, 2.4, 480, 520, 220, SPRINTER, true),
+        coin_species("tunnelnib", "Tunnelnib", HabitatTheme::Forest, 1.7, 540, 400, 210, TANK, true),
+        coin_species("snowprowl", "Snowprowl", HabitatTheme::Forest, 3.0, 620, 760, 270, BALANCED, true),
+        // Secondary drops for the concept (exotic-cross) recipes.
+        coin_species("fizzhopper", "Fizzhopper", HabitatTheme::Wetland, 6.4, 12500, 40000, 33000, SPRINTER, true),
+        coin_species("bitsqueak", "Bitsqueak", HabitatTheme::Forest, 14.5, 7200, 57000, 40000, SPRINTER, true),
+        coin_species("frostmoo", "Frostmoo", HabitatTheme::Ocean, 7.4, 24500, 73000, 47500, TANK, true),
+        coin_species("gnawhop", "Gnawhop", HabitatTheme::Forest, 6.4, 15500, 44000, 36500, BALANCED, true),
+        coin_species("ashpaw", "Ashpaw", HabitatTheme::Arctic, 16.5, 9200, 98000, 51000, BALANCED, true),
+        coin_species("gleamantler", "Gleamantler", HabitatTheme::Arctic, 8.4, 28500, 91000, 54500, TANK, true),
+        coin_species("creasewing", "Creasewing", HabitatTheme::Wetland, 6.8, 9200, 34000, 29200, BALANCED, true),
+        coin_species("gearhoot", "Gearhoot", HabitatTheme::Arctic, 10.5, 12200, 62000, 42000, SPRINTER, true),
+        coin_species("comettail", "Comettail", HabitatTheme::Ocean, 9.4, 63000, 170000, 87000, TANK, true),
+        coin_species("shroomleap", "Shroomleap", HabitatTheme::Wetland, 5.2, 16500, 27000, 25600, TANK, true),
+        coin_species("umbraprowl", "Umbraprowl", HabitatTheme::Jungle, 22.5, 8200, 128000, 60500, SPRINTER, true),
+        coin_species("fluffmaw", "Fluffmaw", HabitatTheme::Arctic, 5.7, 34500, 66000, 51000, TANK, true),
+        coin_species("glowtail", "Glowtail", HabitatTheme::Jungle, 12.5, 6700, 52000, 34800, SPRINTER, true),
+        coin_species("confettihoof", "Confettihoof", HabitatTheme::Farmland, 6.3, 13500, 47500, 38200, BALANCED, true),
+        coin_species("cogwhale", "Cogwhale", HabitatTheme::Ocean, 15.5, 41000, 185000, 90500, TANK, true),
+        coin_species("cryptfang", "Cryptfang", HabitatTheme::Jungle, 18.5, 12500, 138000, 65200, SPRINTER, true),
+        // Tertiary (jackpot) drops — the rarest tier on a handful of recipes
+        // that roll three possible hybrids.
+        coin_species("nightfang", "Nightfang", HabitatTheme::Forest, 4.0, 720, 1500, 340, SPRINTER, true),
+        coin_species("glacialith", "Glacialith", HabitatTheme::Arctic, 4.8, 1900, 2300, 500, TANK, true),
+        coin_species("colossatusk", "Colossatusk", HabitatTheme::Savanna, 4.6, 2600, 2700, 560, TANK, true),
+        coin_species("blitzfang", "Blitzfang", HabitatTheme::Savanna, 5.0, 900, 2400, 430, SPRINTER, true),
+        coin_species("auroracrown", "Auroracrown", HabitatTheme::Arctic, 9.0, 30000, 99000, 56000, TANK, true),
+        coin_species("voidsong", "Voidsong", HabitatTheme::Ocean, 10.0, 66000, 185000, 88000, TANK, true),
+        coin_species("eclipsemaw", "Eclipsemaw", HabitatTheme::Jungle, 24.0, 9000, 142000, 62000, SPRINTER, true),
+        coin_species("singularis", "Singularis", HabitatTheme::Ocean, 16.5, 44000, 200000, 92000, TANK, true),
+    ]);
+
+    // ─── New-biome wild rosters (proc-gen overhaul) ──────────────────────────
+    // Themed fauna populating the biomes added in the world-gen overhaul. These
+    // are regular catchable/purchasable species (art falls back to placeholder
+    // drawing until PNGs are authored). Costs are spread so commons tame in a
+    // catch or two while the apex predators of each biome take several.
+    entries.extend([
+        // ── Desert ──────────────────────────────────────────────────────────
+        coin_species("fennec_fox", "Fennec Fox", HabitatTheme::Desert, 0.7, 90, 40, 80, SPRINTER, false),
+        coin_species("jerboa", "Jerboa", HabitatTheme::Desert, 0.6, 70, 30, 70, SPRINTER, false),
+        coin_species("desert_hare", "Desert Hare", HabitatTheme::Desert, 0.7, 90, 45, 80, SPRINTER, false),
+        coin_species("horned_lizard", "Horned Lizard", HabitatTheme::Desert, 0.8, 130, 70, 120, TANK, false),
+        coin_species("desert_tortoise", "Desert Tortoise", HabitatTheme::Desert, 0.3, 500, 150, 600, TANK, false),
+        coin_species("scorpion", "Desert Scorpion", HabitatTheme::Desert, 0.9, 110, 90, 130, BALANCED, false),
+        coin_species("camel", "Dromedary Camel", HabitatTheme::Desert, 1.5, 600, 300, 360, TANK, false),
+        coin_species("roadrunner", "Roadrunner", HabitatTheme::Desert, 1.3, 160, 180, 170, SPRINTER, false),
+        coin_species("sand_viper", "Sand Viper", HabitatTheme::Desert, 1.1, 120, 150, 150, BALANCED, false),
+        coin_species("vulture", "Desert Vulture", HabitatTheme::Desert, 1.6, 220, 260, 240, BALANCED, false),
+        coin_species("sidewinder", "Sidewinder", HabitatTheme::Desert, 1.4, 180, 240, 220, SPRINTER, false),
+        coin_species("dust_jackal", "Dust Jackal", HabitatTheme::Desert, 2.0, 360, 420, 260, BALANCED, false),
+        // ── Tundra ──────────────────────────────────────────────────────────
+        coin_species("arctic_hare", "Arctic Hare", HabitatTheme::Tundra, 0.7, 90, 45, 80, SPRINTER, false),
+        coin_species("lemming", "Lemming", HabitatTheme::Tundra, 0.5, 60, 25, 60, SPRINTER, false),
+        coin_species("snow_vole", "Snow Vole", HabitatTheme::Tundra, 0.6, 70, 30, 70, BALANCED, false),
+        coin_species("snow_bunting", "Snow Bunting", HabitatTheme::Tundra, 0.7, 80, 40, 80, SPRINTER, false),
+        coin_species("ptarmigan", "Ptarmigan", HabitatTheme::Tundra, 0.9, 110, 80, 120, BALANCED, false),
+        coin_species("stoat", "Stoat", HabitatTheme::Tundra, 1.0, 140, 110, 150, SPRINTER, false),
+        coin_species("ermine", "Ermine", HabitatTheme::Tundra, 1.1, 150, 130, 160, SPRINTER, false),
+        coin_species("caribou", "Caribou", HabitatTheme::Tundra, 1.7, 400, 340, 300, BALANCED, false),
+        coin_species("snow_fox", "Snow Fox", HabitatTheme::Tundra, 1.4, 240, 220, 200, SPRINTER, false),
+        coin_species("musk_ox", "Musk Ox", HabitatTheme::Tundra, 2.0, 800, 500, 420, TANK, false),
+        coin_species("wolverine", "Wolverine", HabitatTheme::Tundra, 2.4, 420, 520, 300, SPRINTER, false),
+        coin_species("tundra_wolf", "Tundra Wolf", HabitatTheme::Tundra, 2.6, 520, 640, 340, BALANCED, false),
+        // ── Taiga ───────────────────────────────────────────────────────────
+        coin_species("chipmunk", "Chipmunk", HabitatTheme::Taiga, 0.6, 80, 35, 70, SPRINTER, false),
+        coin_species("red_squirrel", "Red Squirrel", HabitatTheme::Taiga, 0.7, 90, 40, 80, SPRINTER, false),
+        coin_species("crossbill", "Crossbill", HabitatTheme::Taiga, 0.8, 90, 50, 90, SPRINTER, false),
+        coin_species("capercaillie", "Capercaillie", HabitatTheme::Taiga, 1.0, 140, 110, 150, BALANCED, false),
+        coin_species("pine_marten", "Pine Marten", HabitatTheme::Taiga, 1.2, 200, 150, 170, SPRINTER, false),
+        coin_species("sable", "Sable", HabitatTheme::Taiga, 1.3, 180, 170, 180, SPRINTER, false),
+        coin_species("boreal_owl", "Boreal Owl", HabitatTheme::Taiga, 1.5, 160, 180, 200, BALANCED, false),
+        coin_species("siberian_lynx", "Siberian Lynx", HabitatTheme::Taiga, 1.9, 300, 340, 240, SPRINTER, false),
+        coin_species("elk", "Elk", HabitatTheme::Taiga, 2.4, 700, 520, 360, TANK, false),
+        coin_species("timber_wolf", "Timber Wolf", HabitatTheme::Taiga, 2.6, 520, 640, 340, BALANCED, false),
+        coin_species("moose", "Moose", HabitatTheme::Taiga, 3.0, 1200, 1000, 460, TANK, false),
+        coin_species("brown_bear", "Brown Bear", HabitatTheme::Taiga, 3.2, 1000, 900, 440, TANK, false),
+        // ── Volcanic ────────────────────────────────────────────────────────
+        coin_species("ash_beetle", "Ash Beetle", HabitatTheme::Volcanic, 0.7, 100, 40, 80, TANK, false),
+        coin_species("lava_newt", "Lava Newt", HabitatTheme::Volcanic, 1.0, 130, 90, 130, BALANCED, false),
+        coin_species("obsidian_toad", "Obsidian Toad", HabitatTheme::Volcanic, 0.9, 180, 110, 160, TANK, false),
+        coin_species("cinder_lizard", "Cinder Lizard", HabitatTheme::Volcanic, 1.1, 150, 130, 160, BALANCED, false),
+        coin_species("ember_moth", "Ember Moth", HabitatTheme::Volcanic, 1.2, 140, 150, 170, SPRINTER, false),
+        coin_species("magma_crab", "Magma Crab", HabitatTheme::Volcanic, 1.3, 260, 180, 220, TANK, false),
+        coin_species("fire_salamander", "Fire Salamander", HabitatTheme::Volcanic, 1.4, 180, 220, 220, BALANCED, false),
+        coin_species("sulfur_serpent", "Sulfur Serpent", HabitatTheme::Volcanic, 1.6, 220, 300, 260, SPRINTER, false),
+        coin_species("ashen_vulture", "Ashen Vulture", HabitatTheme::Volcanic, 1.7, 240, 300, 260, BALANCED, false),
+        coin_species("rock_python", "Rock Python", HabitatTheme::Volcanic, 1.8, 320, 360, 280, BALANCED, false),
+        coin_species("magma_hound", "Magma Hound", HabitatTheme::Volcanic, 2.6, 520, 640, 360, SPRINTER, false),
+        coin_species("cinder_drake", "Cinder Drake", HabitatTheme::Volcanic, 3.0, 600, 900, 440, SPRINTER, false),
+        // ── Badlands ────────────────────────────────────────────────────────
+        coin_species("prairie_dog", "Prairie Dog", HabitatTheme::Badlands, 0.6, 80, 35, 70, SPRINTER, false),
+        coin_species("jackrabbit", "Jackrabbit", HabitatTheme::Badlands, 0.7, 90, 45, 80, SPRINTER, false),
+        coin_species("gila_woodpecker", "Gila Woodpecker", HabitatTheme::Badlands, 0.9, 100, 70, 100, SPRINTER, false),
+        coin_species("horned_toad", "Horned Toad", HabitatTheme::Badlands, 0.9, 130, 80, 130, TANK, false),
+        coin_species("armadillo", "Armadillo", HabitatTheme::Badlands, 0.8, 200, 90, 150, TANK, false),
+        coin_species("rattlesnake", "Rattlesnake", HabitatTheme::Badlands, 1.2, 150, 160, 170, BALANCED, false),
+        coin_species("kit_fox", "Kit Fox", HabitatTheme::Badlands, 1.3, 200, 170, 180, SPRINTER, false),
+        coin_species("turkey_vulture", "Turkey Vulture", HabitatTheme::Badlands, 1.6, 220, 260, 240, BALANCED, false),
+        coin_species("coyote", "Coyote", HabitatTheme::Badlands, 1.8, 320, 300, 240, SPRINTER, false),
+        coin_species("bighorn_sheep", "Bighorn Sheep", HabitatTheme::Badlands, 2.2, 600, 440, 340, TANK, false),
+        coin_species("cougar", "Cougar", HabitatTheme::Badlands, 3.0, 520, 820, 360, SPRINTER, false),
+        coin_species("bison", "Bison", HabitatTheme::Badlands, 3.2, 1400, 1100, 480, TANK, false),
+        // ── Beach ───────────────────────────────────────────────────────────
+        coin_species("sandpiper", "Sandpiper", HabitatTheme::Beach, 0.7, 80, 40, 80, SPRINTER, false),
+        coin_species("hermit_crab", "Hermit Crab", HabitatTheme::Beach, 0.6, 120, 40, 90, TANK, false),
+        coin_species("fiddler_crab", "Fiddler Crab", HabitatTheme::Beach, 0.7, 100, 50, 90, SPRINTER, false),
+        coin_species("sanderling", "Sanderling", HabitatTheme::Beach, 0.7, 80, 45, 80, SPRINTER, false),
+        coin_species("ghost_crab", "Ghost Crab", HabitatTheme::Beach, 0.9, 110, 90, 130, SPRINTER, false),
+        coin_species("seagull", "Seagull", HabitatTheme::Beach, 1.0, 130, 100, 140, BALANCED, false),
+        coin_species("horseshoe_crab", "Horseshoe Crab", HabitatTheme::Beach, 0.5, 200, 90, 160, TANK, false),
+        coin_species("sea_turtle", "Sea Turtle", HabitatTheme::Beach, 0.4, 500, 180, 600, TANK, false),
+        coin_species("pelican", "Pelican", HabitatTheme::Beach, 1.4, 240, 200, 220, BALANCED, false),
+        coin_species("osprey", "Osprey", HabitatTheme::Beach, 1.7, 220, 280, 260, SPRINTER, false),
+        coin_species("sea_lion", "Sea Lion", HabitatTheme::Beach, 2.0, 520, 360, 300, TANK, false),
+        coin_species("coastal_jackal", "Coastal Jackal", HabitatTheme::Beach, 2.0, 360, 420, 280, BALANCED, false),
+        // ── Highlands ───────────────────────────────────────────────────────
+        coin_species("pika", "Pika", HabitatTheme::Highlands, 0.6, 80, 35, 70, SPRINTER, false),
+        coin_species("marmot", "Marmot", HabitatTheme::Highlands, 0.7, 120, 50, 90, TANK, false),
+        coin_species("alpine_hare", "Alpine Hare", HabitatTheme::Highlands, 0.7, 90, 45, 80, SPRINTER, false),
+        coin_species("rock_ptarmigan", "Rock Ptarmigan", HabitatTheme::Highlands, 0.8, 100, 60, 100, BALANCED, false),
+        coin_species("chamois", "Chamois", HabitatTheme::Highlands, 1.5, 320, 260, 260, SPRINTER, false),
+        coin_species("mountain_goat", "Mountain Goat", HabitatTheme::Highlands, 1.6, 360, 280, 260, TANK, false),
+        coin_species("ibex", "Ibex", HabitatTheme::Highlands, 1.8, 400, 340, 300, BALANCED, false),
+        coin_species("condor", "Condor", HabitatTheme::Highlands, 2.0, 280, 400, 300, BALANCED, false),
+        coin_species("golden_eagle", "Golden Eagle", HabitatTheme::Highlands, 2.4, 300, 520, 320, SPRINTER, false),
+        coin_species("yak", "Yak", HabitatTheme::Highlands, 2.4, 900, 560, 420, TANK, false),
+        coin_species("highland_wolf", "Highland Wolf", HabitatTheme::Highlands, 2.6, 520, 640, 340, BALANCED, false),
+        coin_species("snow_leopard", "Snow Leopard", HabitatTheme::Highlands, 3.2, 520, 860, 380, SPRINTER, false),
+        // ── Mythical ────────────────────────────────────────────────────────
+        coin_species("gnome", "Garden Gnome", HabitatTheme::Mythical, 1.2, 220, 180, 200, TANK, false),
+        coin_species("jackalope", "Jackalope", HabitatTheme::Mythical, 1.4, 200, 220, 220, SPRINTER, false),
+        coin_species("pixie", "Pixie", HabitatTheme::Mythical, 1.5, 150, 200, 200, SPRINTER, false),
+        coin_species("will_o_wisp", "Will-o'-Wisp", HabitatTheme::Mythical, 1.6, 160, 260, 240, SPRINTER, false),
+        coin_species("faun", "Faun", HabitatTheme::Mythical, 1.8, 300, 320, 260, BALANCED, false),
+        coin_species("griffon_chick", "Griffon Chick", HabitatTheme::Mythical, 2.0, 260, 400, 300, SPRINTER, false),
+        coin_species("kelpie", "Kelpie", HabitatTheme::Mythical, 2.2, 420, 480, 320, BALANCED, false),
+        coin_species("unicorn_foal", "Unicorn Foal", HabitatTheme::Mythical, 2.4, 400, 560, 360, BALANCED, false),
+        coin_species("sprite_stag", "Sprite Stag", HabitatTheme::Mythical, 2.6, 460, 640, 380, BALANCED, false),
+        coin_species("phoenix_chick", "Phoenix Chick", HabitatTheme::Mythical, 3.0, 500, 900, 440, SPRINTER, false),
+        coin_species("basilisk", "Basilisk", HabitatTheme::Mythical, 3.2, 560, 1000, 460, BALANCED, false),
+        coin_species("wyvern", "Wyvern", HabitatTheme::Mythical, 3.4, 600, 1100, 460, SPRINTER, false),
+        // ── Void ────────────────────────────────────────────────────────────
+        coin_species("gloom_bat", "Gloom Bat", HabitatTheme::Void, 1.0, 120, 90, 130, SPRINTER, false),
+        coin_species("void_moth", "Void Moth", HabitatTheme::Void, 1.2, 140, 160, 180, SPRINTER, false),
+        coin_species("cosmic_jelly", "Cosmic Jelly", HabitatTheme::Void, 1.3, 260, 200, 220, TANK, false),
+        coin_species("null_crawler", "Null Crawler", HabitatTheme::Void, 1.4, 220, 220, 220, BALANCED, false),
+        coin_species("dusk_raven", "Dusk Raven", HabitatTheme::Void, 1.5, 180, 220, 220, BALANCED, false),
+        coin_species("shade_wisp", "Shade Wisp", HabitatTheme::Void, 1.6, 160, 240, 240, SPRINTER, false),
+        coin_species("phantom_stag", "Phantom Stag", HabitatTheme::Void, 2.4, 460, 560, 360, BALANCED, false),
+        coin_species("eclipse_hound", "Eclipse Hound", HabitatTheme::Void, 2.6, 520, 640, 360, SPRINTER, false),
+        coin_species("nightmare_foal", "Nightmare Foal", HabitatTheme::Void, 2.6, 480, 680, 380, BALANCED, false),
+        coin_species("abyss_serpent", "Abyss Serpent", HabitatTheme::Void, 2.8, 500, 820, 420, SPRINTER, false),
+        coin_species("star_eater", "Star Eater", HabitatTheme::Void, 3.0, 600, 900, 460, BALANCED, false),
+        coin_species("singularity_wyrm", "Singularity Wyrm", HabitatTheme::Void, 3.4, 700, 1200, 480, SPRINTER, false),
+        // ── Festive ─────────────────────────────────────────────────────────
+        coin_species("peppermint_hare", "Peppermint Hare", HabitatTheme::Festive, 0.8, 90, 50, 90, SPRINTER, false),
+        coin_species("candy_cardinal", "Candy Cardinal", HabitatTheme::Festive, 0.9, 100, 70, 100, SPRINTER, false),
+        coin_species("cocoa_pup", "Cocoa Pup", HabitatTheme::Festive, 1.0, 140, 90, 120, BALANCED, false),
+        coin_species("gift_goose", "Gift Goose", HabitatTheme::Festive, 1.2, 180, 140, 170, BALANCED, false),
+        coin_species("jingle_fox", "Jingle Fox", HabitatTheme::Festive, 1.4, 220, 200, 200, SPRINTER, false),
+        coin_species("starlight_dove", "Starlight Dove", HabitatTheme::Festive, 1.4, 160, 200, 220, SPRINTER, false),
+        coin_species("tinsel_cat", "Tinsel Cat", HabitatTheme::Festive, 1.5, 200, 220, 220, SPRINTER, false),
+        coin_species("garland_owl", "Garland Owl", HabitatTheme::Festive, 1.6, 180, 240, 240, BALANCED, false),
+        coin_species("reindeer_calf", "Reindeer Calf", HabitatTheme::Festive, 1.7, 360, 300, 260, BALANCED, false),
+        coin_species("sugarplum_doe", "Sugarplum Doe", HabitatTheme::Festive, 1.8, 320, 320, 260, BALANCED, false),
+        coin_species("frostbell_stag", "Frostbell Stag", HabitatTheme::Festive, 2.4, 460, 560, 360, TANK, false),
+        coin_species("sleigh_hound", "Sleigh Hound", HabitatTheme::Festive, 2.6, 520, 640, 360, SPRINTER, false),
+        // ── Food ────────────────────────────────────────────────────────────
+        coin_species("muffin_mouse", "Muffin Mouse", HabitatTheme::Food, 0.6, 80, 30, 70, SPRINTER, false),
+        coin_species("cheddar_rat", "Cheddar Rat", HabitatTheme::Food, 0.6, 90, 35, 70, SPRINTER, false),
+        coin_species("berry_finch", "Berry Finch", HabitatTheme::Food, 0.7, 80, 40, 80, SPRINTER, false),
+        coin_species("jelly_slug", "Jelly Slug", HabitatTheme::Food, 0.7, 160, 50, 110, TANK, false),
+        coin_species("cookie_crab", "Cookie Crab", HabitatTheme::Food, 0.8, 120, 70, 110, TANK, false),
+        coin_species("popcorn_quail", "Popcorn Quail", HabitatTheme::Food, 0.9, 110, 80, 120, SPRINTER, false),
+        coin_species("marshmallow_lamb", "Marshmallow Lamb", HabitatTheme::Food, 1.0, 200, 120, 160, TANK, false),
+        coin_species("noodle_serpent", "Noodle Serpent", HabitatTheme::Food, 1.3, 200, 180, 200, SPRINTER, false),
+        coin_species("donut_seal", "Donut Seal", HabitatTheme::Food, 1.6, 360, 280, 260, TANK, false),
+        coin_species("caramel_stag", "Caramel Stag", HabitatTheme::Food, 2.0, 400, 420, 320, BALANCED, false),
+        coin_species("honey_badger", "Honey Badger", HabitatTheme::Food, 2.2, 420, 460, 300, SPRINTER, false),
+        coin_species("pancake_turtle", "Pancake Turtle", HabitatTheme::Food, 0.4, 400, 140, 500, TANK, false),
+    ]);
+
+    // ─── New-biome crossbreed hybrids (see RECIPES) ──────────────────────────
+    // One or two hybrids per new biome, bred from that biome's wild fauna.
+    // Stronger than their parents, themed to the biome.
+    entries.extend([
+        // Desert
+        coin_species("sandwyrm", "Sand Wyrm", HabitatTheme::Desert, 2.6, 520, 900, 300, SPRINTER, true),
+        coin_species("dunestrider", "Dunestrider", HabitatTheme::Desert, 2.2, 640, 820, 320, TANK, true),
+        coin_species("dashfennec", "Dash Fennec", HabitatTheme::Desert, 2.4, 420, 760, 260, SPRINTER, true),
+        // Tundra
+        coin_species("glaciox", "Glaciox", HabitatTheme::Tundra, 3.2, 1100, 1300, 420, TANK, true),
+        coin_species("tundratitan", "Tundra Titan", HabitatTheme::Tundra, 3.6, 1400, 1700, 460, TANK, true),
+        coin_species("snowdart", "Snowdart", HabitatTheme::Tundra, 1.6, 300, 420, 220, SPRINTER, true),
+        // Taiga
+        coin_species("black_moose", "Black Moose", HabitatTheme::Taiga, 3.8, 1500, 1900, 470, TANK, true),
+        coin_species("pinegrizzle", "Pine Grizzle", HabitatTheme::Taiga, 3.4, 1100, 1500, 440, TANK, true),
+        coin_species("shadepine", "Shadepine", HabitatTheme::Taiga, 2.6, 520, 900, 300, SPRINTER, true),
+        // Volcanic
+        coin_species("emberclaw", "Emberclaw", HabitatTheme::Volcanic, 3.0, 640, 1100, 360, BALANCED, true),
+        coin_species("magmadrake", "Magma Drake", HabitatTheme::Volcanic, 3.6, 720, 1500, 460, SPRINTER, true),
+        coin_species("infernewt", "Infernewt", HabitatTheme::Volcanic, 2.2, 480, 760, 280, BALANCED, true),
+        // Badlands
+        coin_species("dustcharger", "Dust Charger", HabitatTheme::Badlands, 3.4, 1100, 1400, 420, TANK, true),
+        coin_species("mesatitan", "Mesa Titan", HabitatTheme::Badlands, 3.8, 1500, 1800, 470, TANK, true),
+        coin_species("fangstalker", "Fangstalker", HabitatTheme::Badlands, 3.2, 560, 1100, 340, SPRINTER, true),
+        // Beach
+        coin_species("tidehunter", "Tidehunter", HabitatTheme::Beach, 2.8, 620, 1000, 320, SPRINTER, true),
+        coin_species("surfmane", "Surfmane", HabitatTheme::Beach, 2.4, 560, 820, 300, BALANCED, true),
+        coin_species("shellshade", "Shellshade", HabitatTheme::Beach, 1.6, 360, 520, 240, TANK, true),
+        // Highlands
+        coin_species("peakprowler", "Peak Prowler", HabitatTheme::Highlands, 3.4, 640, 1300, 380, SPRINTER, true),
+        coin_species("summitmaw", "Summit Maw", HabitatTheme::Highlands, 3.6, 1100, 1600, 450, TANK, true),
+        coin_species("cragsoar", "Cragsoar", HabitatTheme::Highlands, 2.8, 460, 900, 320, SPRINTER, true),
+        // Mythical
+        coin_species("skytalon", "Skytalon", HabitatTheme::Mythical, 3.6, 700, 1500, 440, SPRINTER, true),
+        coin_species("dracogriff", "Dracogriff", HabitatTheme::Mythical, 4.0, 820, 1900, 470, SPRINTER, true),
+        coin_species("fae_sprite", "Fae Sprite", HabitatTheme::Mythical, 2.2, 360, 760, 260, SPRINTER, true),
+        // Void
+        coin_species("voidmaw", "Voidmaw", HabitatTheme::Void, 3.6, 700, 1500, 460, BALANCED, true),
+        coin_species("riftserpent", "Rift Serpent", HabitatTheme::Void, 3.8, 760, 1700, 470, SPRINTER, true),
+        coin_species("wraithstag", "Wraith Stag", HabitatTheme::Void, 2.8, 520, 1000, 340, BALANCED, true),
+        // Festive
+        coin_species("yulebeast", "Yule Beast", HabitatTheme::Festive, 3.2, 900, 1300, 400, TANK, true),
+        coin_species("tinselmane", "Tinselmane", HabitatTheme::Festive, 3.0, 640, 1100, 360, BALANCED, true),
+        coin_species("candyglow", "Candyglow", HabitatTheme::Festive, 2.0, 360, 700, 260, SPRINTER, true),
+        // Food
+        coin_species("pastrycoil", "Pastry Coil", HabitatTheme::Food, 2.4, 520, 820, 300, BALANCED, true),
+        coin_species("creamfin", "Creamfin", HabitatTheme::Food, 2.6, 640, 900, 320, TANK, true),
+        coin_species("toffeestag", "Toffee Stag", HabitatTheme::Food, 2.8, 560, 1000, 340, BALANCED, true),
     ]);
 
     entries.into_iter().map(|d| (d.id, d)).collect()
@@ -832,10 +1141,10 @@ static CATALOG: Lazy<HashMap<SpeciesId, SpeciesDef>> = Lazy::new(|| {
 static RECIPES: Lazy<HashMap<(SpeciesId, SpeciesId), Vec<PoolEntry>>> = Lazy::new(|| {
     let raw: &[(SpeciesId, SpeciesId, &[PoolEntry])] = &[
         (
-            "fox",
+            "red_fox",
             "treeFrog",
             &[
-                PoolEntry { species: "fox", weight: 45 },
+                PoolEntry { species: "red_fox", weight: 45 },
                 PoolEntry { species: "treeFrog", weight: 45 },
                 PoolEntry { species: "frox", weight: 10 },
             ],
@@ -903,78 +1212,116 @@ static RECIPES: Lazy<HashMap<(SpeciesId, SpeciesId), Vec<PoolEntry>>> = Lazy::ne
         out.insert((*b, *a), pool.to_vec());
     }
 
-    // Bulk recipes in compact (parentA, parentB, hybrid) form. Each gets the
-    // standard 45/45/10 pool (most pairings hand back a parent; the hybrid is
-    // the rare drop). Chosen so that nearly every base species is a parent in
-    // at least one recipe and every hybrid is some recipe's offspring.
-    let simple: &[(SpeciesId, SpeciesId, SpeciesId)] = &[
-        ("rabbit", "chicken", "chickbit"),
-        ("sheep", "goat", "shoat"),
-        ("cow", "sheep", "woolcow"),
-        ("duck", "beaver", "duckver"),
-        ("heron", "salamander", "heronder"),
-        ("blue_frog", "duck", "frock"),
-        ("hedgehog", "badger", "hedger"),
-        ("raccoon", "squirrel", "rascurrel"),
-        ("wolf", "boar", "wolboar"),
-        ("fox", "wolf", "direfox"),
-        ("field_mouse", "hedgehog", "prickmouse"),
-        ("arctic_fox", "seal", "sealfox"),
-        ("walrus", "reindeer", "walrideer"),
-        ("penguin", "seal", "penseal"),
-        ("polar_bear", "walrus", "tuskbear"),
-        ("cheetah", "giraffe", "cheeraffe"),
-        ("elephant", "rhino", "elephino"),
-        ("meerkat", "ostrich", "meerich"),
-        ("lion", "cheetah", "liotah"),
-        ("zebra", "giraffe", "zebraffe"),
-        ("parrot", "jaguar", "parrojag"),
-        ("sloth", "chameleon", "slowmeleon"),
-        ("monkey", "parrot", "monrot"),
-        ("toucan", "parrot", "torrot"),
-        ("goldenToucan", "sloth", "goldsloth"),
-        ("dolphin", "octopus", "doctopus"),
-        ("pufferfish", "crab", "puffcrab"),
-        ("reefSeahorse", "dolphin", "seadolph"),
-        ("goldenCarp", "pufferfish", "goldpuff"),
-        ("otter", "beaver", "ottaver"),
-        ("snowyOwl", "arctic_fox", "owlfox"),
-        ("giantTortoise", "reindeer", "tortdeer"),
-        ("albinoDeer", "reindeer", "ghostdeer"),
-        // Early-game forest hybrids from the starter species — reachable quickly
-        // so the opening hours aren't boring.
-        ("fox", "field_mouse", "scamp"),
-        ("field_mouse", "blue_frog", "lilyleap"),
-        ("blue_frog", "fox", "marshmask"),
-        ("fox", "lion", "embermane"),
-        ("blue_frog", "lion", "bogmane"),
-        ("field_mouse", "lion", "pridelet"),
-        ("mole", "field_mouse", "burrowkin"),
-        ("lynx", "albinoDeer", "stagstalker"),
+    // Bulk recipes in compact form: (parentA, parentB, wA, wB, &[(hybrid, w)]).
+    // The number of hybrid outcomes is deliberately mixed — some crosses drop a
+    // single hybrid, some two, a few roll three (the last being a rare jackpot).
+    // Weights are varied per recipe so odds don't feel mechanical; hybrids are
+    // always rarer than the parents, and successive hybrids get rarer still.
+    #[rustfmt::skip]
+    let simple: &[(SpeciesId, SpeciesId, u32, u32, &[(SpeciesId, u32)])] = &[
+        ("rabbit", "chicken",       42, 42, &[("chickbit", 16)]),
+        ("sheep", "goat",           41, 41, &[("shoat", 13), ("billowool", 5)]),
+        ("cow", "sheep",            40, 40, &[("woolcow", 15), ("hornwool_bovram", 5)]),
+        ("duck", "beaver",          43, 43, &[("duckver", 14)]),
+        ("heron", "salamander",     43, 40, &[("heronder", 12), ("marshplume", 5)]),
+        ("blue_frog", "duck",       44, 44, &[("frock", 12)]),
+        ("hedgehog", "badger",      39, 39, &[("hedger", 15), ("bramblesett", 7)]),
+        ("raccoon", "squirrel",     42, 42, &[("rascurrel", 15)]),
+        ("grey_wolf", "boar",            41, 41, &[("wolboar", 12), ("tuskhowl", 6)]),
+        ("red_fox", "grey_wolf",             40, 40, &[("direfox", 12), ("duskrunner", 6), ("nightfang", 2)]),
+        ("field_mouse", "hedgehog", 40, 40, &[("prickmouse", 14), ("quillsqueak", 6)]),
+        ("arctic_fox", "seal",      42, 40, &[("sealfox", 12), ("frostpup", 6)]),
+        ("walrus", "reindeer",      41, 41, &[("walrideer", 13), ("tundratusk", 5)]),
+        ("penguin", "seal",         43, 43, &[("penseal", 13)]),
+        ("polar_bear", "walrus",    41, 41, &[("tuskbear", 11), ("blizzardmaw", 5), ("glacialith", 2)]),
+        ("cheetah", "giraffe",      40, 42, &[("cheeraffe", 12), ("spotspire", 6)]),
+        ("elephant", "rhino",       40, 40, &[("elephino", 12), ("pachyhorn", 6), ("colossatusk", 2)]),
+        ("meerkat", "ostrich",      40, 40, &[("meerich", 14), ("sentryplume", 6)]),
+        ("lion", "cheetah",         40, 40, &[("liotah", 12), ("prideflash", 6), ("blitzfang", 2)]),
+        ("zebra", "giraffe",        41, 41, &[("zebraffe", 13), ("stripespire", 5)]),
+        ("parrot", "jaguar",        42, 42, &[("parrojag", 11), ("plumeprowl", 5)]),
+        ("sloth", "chameleon",      40, 40, &[("slowmeleon", 14), ("mosslimber", 6)]),
+        ("monkey", "parrot",        41, 43, &[("monrot", 11), ("chatterperch", 5)]),
+        ("toucan", "parrot",        44, 44, &[("torrot", 12)]),
+        ("goldenToucan", "sloth",   42, 40, &[("goldsloth", 12), ("gildedyawn", 6)]),
+        ("dolphin", "octopus",      41, 41, &[("doctopus", 13), ("inkfin", 5)]),
+        ("pufferfish", "crab",      40, 42, &[("puffcrab", 13), ("spineshell", 5)]),
+        ("reefSeahorse", "dolphin", 42, 42, &[("seadolph", 11), ("tidecurl", 5)]),
+        ("goldenCarp", "pufferfish",43, 43, &[("goldpuff", 10), ("gildedspine", 4)]),
+        ("otter", "beaver",         40, 40, &[("ottaver", 14), ("rivergnaw", 6)]),
+        ("snowyOwl", "arctic_fox",  42, 40, &[("owlfox", 12), ("frosttalon", 6)]),
+        ("giantTortoise", "reindeer",44, 44, &[("tortdeer", 8), ("shellantler", 4)]),
+        ("albinoDeer", "reindeer",  41, 41, &[("ghostdeer", 13), ("palevelvet", 5)]),
+        // Early-game forest hybrids — more generous hybrid odds so the opening
+        // hours pay off quickly.
+        ("red_fox", "field_mouse",      38, 38, &[("scamp", 17), ("kitnip", 7)]),
+        ("field_mouse", "blue_frog",38, 38, &[("lilyleap", 17), ("pipsplash", 7)]),
+        ("blue_frog", "red_fox",        39, 39, &[("marshmask", 15), ("bogtrot", 7)]),
+        ("red_fox", "lion",             40, 40, &[("embermane", 14), ("cinderpaw", 6)]),
+        ("blue_frog", "lion",       40, 40, &[("bogmane", 14), ("marshpride", 6)]),
+        ("field_mouse", "lion",     39, 39, &[("pridelet", 15), ("squeakmane", 7)]),
+        ("mole", "field_mouse",     38, 40, &[("burrowkin", 16), ("tunnelnib", 6)]),
+        ("lynx", "albinoDeer",      41, 41, &[("stagstalker", 12), ("snowprowl", 6)]),
         // Concept hybrids: a themed exotic crossed with something from the roster.
-        ("candy_dove", "blue_frog", "gumdrop"),
-        ("robot_cat", "field_mouse", "glitchpaw"),
-        ("moophin", "penguin", "tuxtide"),
-        ("zombie_dog", "rabbit", "hopocalypse"),
-        ("lava_lynx", "arctic_fox", "cinderfrost"),
-        ("crystal_stag", "albinoDeer", "prismhart"),
-        ("origami_crane", "heron", "foldfeather"),
-        ("clockwork_owl", "snowyOwl", "ticktalon"),
-        ("galaxy_whale", "dolphin", "stardive"),
-        ("mushroom_toad", "treeFrog", "sporehop"),
-        ("shadow_panther", "jaguar", "nightmaw"),
-        ("plush_bear", "polar_bear", "snugfang"),
-        ("neon_gecko", "chameleon", "voltscale"),
-        ("candy_dove", "birthday_horse", "frostingmane"),
-        ("robot_cat", "galaxy_whale", "mechabyss"),
-        ("zombie_dog", "shadow_panther", "gravestalker"),
+        ("candy_dove", "blue_frog", 40, 40, &[("gumdrop", 14), ("fizzhopper", 6)]),
+        ("robot_cat", "field_mouse",41, 41, &[("glitchpaw", 12), ("bitsqueak", 6)]),
+        ("moophin", "penguin",      42, 40, &[("tuxtide", 12), ("frostmoo", 6)]),
+        ("zombie_dog", "rabbit",    40, 40, &[("hopocalypse", 14), ("gnawhop", 6)]),
+        ("lava_lynx", "arctic_fox", 41, 41, &[("cinderfrost", 12), ("ashpaw", 6)]),
+        ("crystal_stag", "albinoDeer",40, 40, &[("prismhart", 11), ("gleamantler", 5), ("auroracrown", 2)]),
+        ("origami_crane", "heron",  41, 41, &[("foldfeather", 12), ("creasewing", 6)]),
+        ("clockwork_owl", "snowyOwl",42, 42, &[("ticktalon", 11), ("gearhoot", 5)]),
+        ("galaxy_whale", "dolphin", 40, 40, &[("stardive", 10), ("comettail", 5), ("voidsong", 2)]),
+        ("mushroom_toad", "treeFrog",40, 40, &[("sporehop", 14), ("shroomleap", 6)]),
+        ("shadow_panther", "jaguar",40, 40, &[("nightmaw", 11), ("umbraprowl", 5), ("eclipsemaw", 2)]),
+        ("plush_bear", "polar_bear",41, 41, &[("snugfang", 12), ("fluffmaw", 6)]),
+        ("neon_gecko", "chameleon", 40, 42, &[("voltscale", 12), ("glowtail", 6)]),
+        ("candy_dove", "birthday_horse",42, 42, &[("jack_of_all_manes", 11), ("confettihoof", 5)]),
+        ("robot_cat", "galaxy_whale",40, 40, &[("mechabyss", 10), ("cogwhale", 5), ("singularis", 2)]),
+        ("zombie_dog", "shadow_panther",42, 42, &[("gravestalker", 11), ("cryptfang", 5)]),
+        // ── New-biome crossbreeds (proc-gen overhaul fauna) ──────────────────
+        // Desert
+        ("camel", "sand_viper",       40, 40, &[("sandwyrm", 13), ("dunestrider", 5)]),
+        ("fennec_fox", "roadrunner",  42, 42, &[("dashfennec", 12)]),
+        // Tundra
+        ("musk_ox", "tundra_wolf",    40, 40, &[("glaciox", 12), ("tundratitan", 5)]),
+        ("arctic_hare", "ermine",     43, 43, &[("snowdart", 12)]),
+        // Taiga
+        ("moose", "brown_bear",       40, 40, &[("black_moose", 12), ("pinegrizzle", 5)]),
+        ("pine_marten", "sable",      42, 42, &[("shadepine", 12)]),
+        // Volcanic
+        ("magma_crab", "cinder_drake",40, 40, &[("emberclaw", 13), ("magmadrake", 5)]),
+        ("lava_newt", "fire_salamander",42, 42, &[("infernewt", 12)]),
+        // Badlands
+        ("coyote", "bison",           40, 40, &[("dustcharger", 12), ("mesatitan", 5)]),
+        ("rattlesnake", "cougar",     42, 42, &[("fangstalker", 12)]),
+        // Beach
+        ("sea_lion", "osprey",        40, 40, &[("tidehunter", 13), ("surfmane", 5)]),
+        ("hermit_crab", "ghost_crab", 43, 43, &[("shellshade", 12)]),
+        // Highlands
+        ("yak", "snow_leopard",       40, 40, &[("peakprowler", 12), ("summitmaw", 5)]),
+        ("ibex", "golden_eagle",      42, 42, &[("cragsoar", 12)]),
+        // Mythical
+        ("griffon_chick", "wyvern",   40, 40, &[("skytalon", 13), ("dracogriff", 5)]),
+        ("pixie", "faun",             42, 42, &[("fae_sprite", 12)]),
+        // Void
+        ("eclipse_hound", "abyss_serpent",40, 40, &[("voidmaw", 12), ("riftserpent", 5)]),
+        ("shade_wisp", "phantom_stag",42, 42, &[("wraithstag", 12)]),
+        // Festive
+        ("frostbell_stag", "sleigh_hound",40, 40, &[("yulebeast", 13), ("tinselmane", 5)]),
+        ("jingle_fox", "sugarplum_doe",42, 42, &[("candyglow", 12)]),
+        // Food
+        ("donut_seal", "noodle_serpent",40, 40, &[("pastrycoil", 12), ("creamfin", 5)]),
+        ("honey_badger", "caramel_stag",42, 42, &[("toffeestag", 12)]),
     ];
-    for (a, b, hyb) in simple {
-        let pool = vec![
-            PoolEntry { species: *a, weight: 45 },
-            PoolEntry { species: *b, weight: 45 },
-            PoolEntry { species: *hyb, weight: 10 },
+    for (a, b, wa, wb, hybrids) in simple {
+        let mut pool = vec![
+            PoolEntry { species: *a, weight: *wa },
+            PoolEntry { species: *b, weight: *wb },
         ];
+        for (h, w) in *hybrids {
+            pool.push(PoolEntry { species: *h, weight: *w });
+        }
         out.insert((*a, *b), pool.clone());
         out.insert((*b, *a), pool);
     }
@@ -1039,11 +1386,13 @@ pub fn all_recipes() -> Vec<(SpeciesId, SpeciesId, SpeciesId)> {
         if !seen.insert(key) {
             continue;
         }
-        // The hybrid in a pool is any entry whose species is neither parent.
-        // There's at most one in our current catalog.
+        // A pool can have two non-parent hybrids (primary + rarer secondary);
+        // the codex summary lists the primary (highest-weight) one. Outcome
+        // panels read the full pool via `crossbreed_pool` instead.
         if let Some(hybrid) = pool
             .iter()
-            .find(|e| e.species != *a && e.species != *b)
+            .filter(|e| e.species != *a && e.species != *b)
+            .max_by_key(|e| e.weight)
         {
             out.push((key.0, key.1, hybrid.species));
         }
@@ -1119,10 +1468,18 @@ mod tests {
         }
     }
 
-    /// At least 90% of all species must participate in some recipe — either as
-    /// a parent or as the hybrid outcome.
+    /// At least 90% of the *breeding roster* must participate in some recipe —
+    /// either as a parent or as the hybrid outcome. The new-biome wild fauna
+    /// (added in the proc-gen overhaul) are intentionally catch-only and not
+    /// part of the breeding economy yet, so they're excluded here. They're
+    /// identified by living in one of the new biome themes, which no
+    /// pre-existing breeding species uses.
     #[test]
     fn most_species_belong_to_a_recipe() {
+        use HabitatTheme::*;
+        let is_breeding_theme = |t: HabitatTheme| {
+            matches!(t, Farmland | Forest | Arctic | Savanna | Wetland | Jungle | Ocean)
+        };
         let mut in_recipe: HashSet<SpeciesId> = HashSet::new();
         for ((a, b), pool) in RECIPES.iter() {
             in_recipe.insert(*a);
@@ -1131,12 +1488,16 @@ mod tests {
                 in_recipe.insert(e.species);
             }
         }
-        let total = CATALOG.len();
-        let covered = CATALOG.keys().filter(|id| in_recipe.contains(*id)).count();
+        let roster: Vec<&SpeciesDef> = CATALOG
+            .values()
+            .filter(|d| is_breeding_theme(d.theme))
+            .collect();
+        let total = roster.len();
+        let covered = roster.iter().filter(|d| in_recipe.contains(d.id)).count();
         let pct = covered as f32 / total as f32;
         assert!(
             pct >= 0.90,
-            "only {covered}/{total} ({:.1}%) species belong to a recipe",
+            "only {covered}/{total} ({:.1}%) breeding-roster species belong to a recipe",
             pct * 100.0
         );
     }
@@ -1148,6 +1509,69 @@ mod tests {
         assert!(hybrids >= 30, "expected >=30 hybrids, found {hybrids}");
         let recipe_pairs = all_recipes().len();
         assert!(recipe_pairs >= 30, "expected >=30 recipes, found {recipe_pairs}");
+    }
+
+    /// Outcome counts should be mixed: some crosses drop one hybrid, some two,
+    /// and a few roll three. Every recipe has 1–3 hybrids.
+    #[test]
+    fn recipe_outcome_counts_are_mixed() {
+        let mut counts: HashSet<usize> = HashSet::new();
+        for (a, b, _) in all_recipes() {
+            let pool = crossbreed_pool(a, b).expect("recipe pool exists");
+            let n = pool.iter().filter(|e| e.species != a && e.species != b).count();
+            assert!((1..=3).contains(&n), "recipe {a}+{b} has {n} hybrid outcomes");
+            counts.insert(n);
+        }
+        assert!(counts.contains(&1), "expected some single-hybrid recipes");
+        assert!(counts.contains(&2), "expected some two-hybrid recipes");
+        assert!(counts.contains(&3), "expected some three-hybrid recipes");
+    }
+
+    /// Odds must be sane and varied: every hybrid is rarer than each parent,
+    /// successive hybrids in a pool get strictly rarer, and the per-recipe
+    /// weight sets aren't all identical.
+    #[test]
+    fn recipe_odds_are_varied_and_hybrids_rarer() {
+        // Two original hand-tuned exotic pools deliberately weight an exotic
+        // parent below a hybrid, so they're exempt from the ordering invariant.
+        let legacy = |a: SpeciesId, b: SpeciesId| {
+            let mut pair = [a, b];
+            pair.sort_unstable();
+            pair == ["biggy_cheese", "polar_bear"] || pair == ["reefSeahorse", "stained_butterfly"]
+        };
+        let mut weight_sets: HashSet<Vec<u32>> = HashSet::new();
+        for (a, b, _) in all_recipes() {
+            let pool = crossbreed_pool(a, b).unwrap();
+            let mut ws: Vec<u32> = pool.iter().map(|e| e.weight).collect();
+            ws.sort_unstable();
+            weight_sets.insert(ws);
+            if legacy(a, b) {
+                continue;
+            }
+            let parent_min = pool
+                .iter()
+                .filter(|e| e.species == a || e.species == b)
+                .map(|e| e.weight)
+                .min()
+                .unwrap();
+            // Hybrids appear after the parents, in descending rarity.
+            let hyb: Vec<u32> = pool
+                .iter()
+                .filter(|e| e.species != a && e.species != b)
+                .map(|e| e.weight)
+                .collect();
+            for w in &hyb {
+                assert!(*w < parent_min, "recipe {a}+{b}: hybrid not rarer than parents");
+            }
+            for pair in hyb.windows(2) {
+                assert!(pair[0] > pair[1], "recipe {a}+{b}: hybrids must get rarer in order");
+            }
+        }
+        assert!(
+            weight_sets.len() >= 6,
+            "expected varied recipe odds, found only {} distinct weight sets",
+            weight_sets.len()
+        );
     }
 }
 

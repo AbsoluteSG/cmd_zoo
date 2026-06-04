@@ -1,7 +1,7 @@
-use macroquad::input::{KeyCode, is_key_down};
+use macroquad::input::{KeyCode, is_key_down, is_key_pressed};
 use macroquad::math::vec2;
 
-use super::controller::{AvatarController, ControllerCtx, ControllerIntent};
+use super::controller::{ActionFlags, AvatarController, ControllerCtx, ControllerIntent};
 
 /// WASD / arrow-key driven avatar control. Stateless — held-key polling each
 /// sample.
@@ -30,9 +30,19 @@ impl AvatarController for KeyboardController {
         if len > 1.0 {
             dir /= len;
         }
+
+        let mut actions = ActionFlags::NONE;
+        // Sprint: held Shift. Dash: a one-frame Space press.
+        if is_key_down(KeyCode::LeftShift) || is_key_down(KeyCode::RightShift) {
+            actions.insert(ActionFlags::SPRINT);
+        }
+        if is_key_pressed(KeyCode::Space) {
+            actions.insert(ActionFlags::DASH);
+        }
+
         ControllerIntent {
             move_dir: dir,
-            ..ControllerIntent::idle()
+            actions,
         }
     }
 }

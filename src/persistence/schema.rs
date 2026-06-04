@@ -2,7 +2,7 @@
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-pub const SCHEMA_VERSION: u32 = 14;
+pub const SCHEMA_VERSION: u32 = 15;
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct ZooSnapshot {
@@ -43,6 +43,17 @@ pub struct ZooSnapshot {
     /// New in v14. Player-placed fast-travel waypoints (home zoo is implicit).
     #[serde(default)]
     pub waypoints: Vec<WaypointDto>,
+    /// New in v15. Lifetime duplicate-acquisition counts per species id, driving
+    /// each animal's Rank. Persists across sell/recapture. `serde(default)` keeps
+    /// pre-v15 JSON loadable.
+    #[serde(default)]
+    pub species_dupes: Vec<SpeciesDupeDto>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct SpeciesDupeDto {
+    pub species: String,
+    pub count: u32,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]

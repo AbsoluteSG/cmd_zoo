@@ -9,7 +9,8 @@ use macroquad::prelude::*;
 use crate::app::{GameApp, PostEffect, Screen};
 use crate::game::exotic_shop::{self, Price};
 use crate::game::species::{self, IncomeKind, SpeciesId};
-use crate::game::zoo::{MAX_NESTS, nest_purchase_cost};
+use crate::game::vendor;
+use crate::game::zoo::NestStatus;
 use crate::render::ui::{self, ACCENT, PANEL, PANEL_EDGE, TEXT, TEXT_DIM, ease_out_back, fade};
 
 const BTN: Color = color_u8!(46, 52, 64, 255);
@@ -53,9 +54,10 @@ pub fn draw(app: &mut GameApp, now: DateTime<Utc>) {
     };
     match app.shown_menu {
         Screen::Shop => draw_shop(app, now, ctx),
-        Screen::Breeding => draw_breeding(app, now, ctx),
         Screen::Settings => draw_settings(app, now, ctx),
         Screen::Waypoints => draw_waypoints(app, now, ctx),
+        Screen::Nest => draw_nest(app, now, ctx),
+        Screen::Structure => draw_structure(app, now, ctx),
         Screen::World => {}
     }
 }
@@ -314,7 +316,11 @@ fn draw_shop(app: &mut GameApp, now: DateTime<Utc>, ctx: Ctx) {
     let coins = app.zoo.coins;
     let dna = app.zoo.dna_helix;
 
-    let mut animals: Vec<(SpeciesId, String, bool)> = species::all_purchasable()
+    // STUB: the shop currently shows the stock of every *open* biome vendor in
+    // one window (see `game::vendor`). The new-biome merchants are "coming
+    // soon", so their fauna stay catch-only and are teased at the bottom.
+    let animals: Vec<(SpeciesId, String, bool)> = vendor::open_shop_stock()
+        .into_iter()
         .map(|d| {
             let (afford, cur) = match d.purchase_currency {
                 IncomeKind::Coin => (coins >= d.purchase_cost, "c"),
@@ -323,7 +329,6 @@ fn draw_shop(app: &mut GameApp, now: DateTime<Utc>, ctx: Ctx) {
             (d.id, format!("{}  ·  {} {}", d.display_name, d.purchase_cost, cur), afford)
         })
         .collect();
-    animals.sort_by_key(|(id, _, _)| species::get(*id).purchase_cost);
 
     let window = exotic_shop::effective_window(now, app.zoo.exotic_skip_window);
     let exotics: Vec<(SpeciesId, String, Price, bool)> = window
@@ -350,7 +355,7 @@ fn draw_shop(app: &mut GameApp, now: DateTime<Utc>, ctx: Ctx) {
     // Wide panel; 2-column animal grid keeps it short.
     let pw = 760.0;
     let rows = animals.len().div_ceil(2);
-    let ph = 96.0 + rows as f32 * 34.0 + 150.0;
+    let ph = 96.0 + rows as f32 * 34.0 + 180.0;
     let (px, py) = (ctx.center.x - pw * 0.5, ctx.center.y - ph * 0.5);
 
     panel(&ctx, px, py, pw, ph);
@@ -423,6 +428,20 @@ fn draw_shop(app: &mut GameApp, now: DateTime<Utc>, ctx: Ctx) {
     }
     let _ = y;
 
+    // STUB teaser: biome merchants that will sell the new-biome fauna once the
+    // segmented (per-NPC) shop ships. Their animals are catch-only for now.
+    let soon: Vec<&str> = vendor::coming_soon_vendors().take(5).map(|v| v.npc_name).collect();
+    if !soon.is_empty() {
+        label(
+            &ctx,
+            px + 26.0,
+            py + ph - 50.0,
+            &format!("Biome merchants coming soon: {} …", soon.join(", ")),
+            13.0,
+            TEXT_DIM,
+        );
+    }
+
     if button(&ctx, px + pw - 26.0 - 120.0, py + ph - 42.0, 120.0, 30.0, "Close  [Esc]", true) {
         app.set_screen(Screen::World);
     }
@@ -455,160 +474,305 @@ fn buy_exotic(app: &mut GameApp, sp: SpeciesId, price: Price, now: DateTime<Utc>
     }
 }
 
-// ─────────────────────────── Breeding ───────────────────────────
+// ───────────────────────────── Nest ─────────────────────────────
 
-fn draw_breeding(app: &mut GameApp, now: DateTime<Utc>, ctx: Ctx) {
-    let owned = app.zoo.nest_count;
-    let busy = app.zoo.active_breeding_pair_count() as u8;
-    let nest_cost = nest_purchase_cost(owned);
+fn draw_nest(app: &mut GameApp, now: DateTime<Utc>, ctx: Ctx) {
+    use uuid::Uuid;
 
-    let gestations: Vec<(uuid::Uuid, String, bool)> = app
-        .active_gestations()
-        .iter()
-        .map(|(a, b, ends_at)| {
-            let na = species::get(a.species).display_name;
-            let nb = species::get(b.species).display_name;
-            let ready = *ends_at <= now;
-            let label = if ready {
-                format!("{na} + {nb}  —  READY")
-            } else {
-                format!("{na} + {nb}  —  {}", fmt_secs((*ends_at - now).num_seconds()))
-            };
-            (a.id, label, ready)
-        })
-        .collect();
-
-    let candidates: Vec<(uuid::Uuid, String)> = app
-        .breeding_candidates(app.breeding_first_pick)
-        .iter()
-        .map(|a| (a.id, format!("{} L{}", species::get(a.species).display_name, a.level)))
-        .collect();
-
-    let first = app.breeding_first_pick;
-    let second = app.breeding_second_pick;
-    let name_of = |id: Option<uuid::Uuid>| -> String {
-        match id.and_then(|i| app.zoo.animals.get(&i)) {
-            Some(a) => format!("{} L{}", species::get(a.species).display_name, a.level),
-            None => "—".to_string(),
-        }
+    let Some(nest_id) = app.active_nest else {
+        app.set_screen(Screen::World);
+        return;
     };
-    let a_label = name_of(first);
-    let b_label = name_of(second);
-    let can_breed = first.is_some() && second.is_some();
+    let Some(nest) = app.zoo.nests.iter().find(|n| n.id == nest_id).cloned() else {
+        app.set_screen(Screen::World);
+        return;
+    };
 
-    let pw = 760.0;
-    let cand_rows = candidates.len().div_ceil(2).max(1);
-    let ph = 150.0 + gestations.len() as f32 * 34.0 + cand_rows as f32 * 32.0 + 130.0;
+    let status = app.zoo.nest_status(nest_id, now);
+
+    // ── Pending offspring: a finished nest holds a single critter to collect.
+    // Parents were auto-released on completion, so the panel is collect-only.
+    if let Some(off_id) = nest.offspring {
+        let (sp, name) = app
+            .zoo
+            .animals
+            .get(&off_id)
+            .map(|a| (a.species, species::get(a.species).display_name.to_string()))
+            .unwrap_or(("field_mouse", "?".to_string()));
+
+        let pw = 420.0;
+        let ph = 320.0;
+        let (px, py) = (ctx.center.x - pw * 0.5, ctx.center.y - ph * 0.5);
+        panel(&ctx, px, py, pw, ph);
+        title(&ctx, px + 26.0, py + 30.0, "NEST");
+        label(&ctx, px + 26.0, py + 62.0, "A new arrival hatched!", 18.0, ACCENT);
+
+        // Centered offspring thumbnail.
+        let thumb = 130.0;
+        if let Some(tx) = app.textures.animal(sp) {
+            let aspect = if tx.height() > 0.0 { tx.width() / tx.height() } else { 1.0 };
+            let w = thumb * aspect;
+            let tp = ctx.pt(px + (pw - w) * 0.5, py + 86.0);
+            draw_texture_ex(
+                &tx,
+                tp.x,
+                tp.y,
+                fade(WHITE, ctx.alpha),
+                DrawTextureParams { dest_size: Some(vec2(w, thumb) * ctx.scale), ..Default::default() },
+            );
+        }
+        let nd = measure_text(&name, None, (20.0 * ctx.scale) as u16, 1.0);
+        label(&ctx, px + (pw - nd.width / ctx.scale) * 0.5, py + 86.0 + thumb + 26.0, &name, 20.0, TEXT);
+
+        let act_y = py + ph - 42.0;
+        if button(&ctx, px + 26.0, act_y, 180.0, 30.0, "Collect", true) {
+            match app.zoo.nest_collect(nest_id, now) {
+                Ok((species, is_hybrid)) => {
+                    app.sync_critters();
+                    app.save_under_lock(now);
+                    let dname = species::get(species).display_name;
+                    let amount = if is_hybrid { "Hybrid! +1 DNA" } else { "Collected" };
+                    app.push_notification(dname, amount, crate::app::NotifIcon::Animal(species));
+                    app.set_screen(Screen::World);
+                }
+                Err(e) => app.set_status(format!("{e}")),
+            }
+        }
+        if button(&ctx, px + pw - 26.0 - 120.0, act_y, 120.0, 30.0, "Close  [Esc]", true) {
+            app.set_screen(Screen::World);
+        }
+        return;
+    }
+
+    // Per-slot occupant info: (animal id, species, name, level, breeding).
+    let mut slots: [Option<(Uuid, SpeciesId, String, u8, bool)>; 2] = [None, None];
+    for (i, s) in nest.slots.iter().enumerate() {
+        if let Some(id) = s {
+            if let Some(a) = app.zoo.animals.get(id) {
+                let breeding = matches!(a.state, crate::game::AnimalState::Breeding { .. });
+                slots[i] = Some((
+                    *id,
+                    a.species,
+                    species::get(a.species).display_name.to_string(),
+                    a.level,
+                    breeding,
+                ));
+            }
+        }
+    }
+    let occupied = slots.iter().filter(|s| s.is_some()).count();
+    let has_free = occupied < 2;
+    let outcomes = app.zoo.nest_outcomes(nest_id);
+    // How many valid animals are on the follow chain (the deposit pool).
+    let follower_count = app
+        .following
+        .iter()
+        .filter(|id| app.zoo.animals.contains_key(id))
+        .count();
+    let show_chooser = has_free && follower_count > 0;
+
+    let pw = 540.0;
+    let out_rows = outcomes.len().max(1);
+    let ph = 340.0 + out_rows as f32 * 24.0;
     let (px, py) = (ctx.center.x - pw * 0.5, ctx.center.y - ph * 0.5);
 
     panel(&ctx, px, py, pw, ph);
-    title(&ctx, px + 26.0, py + 30.0, "BREEDING");
-    right_text(
-        &ctx,
-        px + pw - 26.0,
-        py + 30.0,
-        &format!("nests {busy}/{owned}  (cap {MAX_NESTS})"),
-    );
-    if owned < MAX_NESTS
-        && button(
-            &ctx,
-            px + pw - 26.0 - 200.0,
-            py + 44.0,
-            200.0,
-            26.0,
-            &format!("Buy nest · {nest_cost} c"),
-            app.zoo.coins >= nest_cost,
-        )
-    {
-        match app.zoo.buy_nest() {
+    title(&ctx, px + 26.0, py + 30.0, "NEST");
+
+    // Two slot thumbnails near the top.
+    let thumb = 92.0;
+    let slot_w = 150.0;
+    let gap = 30.0;
+    let row_x = px + (pw - (slot_w * 2.0 + gap)) * 0.5;
+    let row_y = py + 52.0;
+    for i in 0..2 {
+        let sx = row_x + i as f32 * (slot_w + gap);
+        // Slot frame.
+        let fp = ctx.pt(sx, row_y);
+        let fs = vec2(slot_w, thumb + 16.0) * ctx.scale;
+        ui::rrect(fp.x, fp.y, fs.x, fs.y, 10.0 * ctx.scale, fade(BTN_DISABLED, ctx.alpha));
+        if let Some((_, sp, name, level, breeding)) = &slots[i] {
+            // Sprite, centered in the frame.
+            if let Some(tx) = app.textures.animal(sp) {
+                let aspect = if tx.height() > 0.0 { tx.width() / tx.height() } else { 1.0 };
+                let w = thumb * aspect;
+                let tp = ctx.pt(sx + (slot_w - w) * 0.5, row_y + 8.0);
+                draw_texture_ex(
+                    &tx,
+                    tp.x,
+                    tp.y,
+                    fade(WHITE, ctx.alpha),
+                    DrawTextureParams {
+                        dest_size: Some(vec2(w, thumb) * ctx.scale),
+                        ..Default::default()
+                    },
+                );
+            }
+            label(&ctx, sx + 10.0, row_y + thumb + 8.0, &format!("{name} L{level}"), 16.0, TEXT);
+            let _ = breeding;
+        } else {
+            label(&ctx, sx + slot_w * 0.5 - 24.0, row_y + thumb * 0.5 + 8.0, "empty", 16.0, TEXT_DIM);
+        }
+    }
+
+    // Remove buttons under each occupied, non-breeding slot.
+    let mut remove_slot: Option<usize> = None;
+    let rm_y = row_y + thumb + 22.0;
+    for i in 0..2 {
+        if let Some((_, _, _, _, breeding)) = &slots[i] {
+            let sx = row_x + i as f32 * (slot_w + gap);
+            let enabled = !breeding;
+            if button(&ctx, sx, rm_y, slot_w, 26.0, "Remove", enabled) {
+                remove_slot = Some(i);
+            }
+        }
+    }
+
+    // Status line.
+    let status_y = rm_y + 40.0;
+    let status_txt = match status {
+        NestStatus::Empty => "Empty — deposit an animal".to_string(),
+        NestStatus::Partial => "Add a second animal to breed".to_string(),
+        NestStatus::ReadyToBreed => "Ready to breed".to_string(),
+        NestStatus::Incompatible => "These two can't crossbreed".to_string(),
+        NestStatus::Breeding(ends) => format!("Breeding — {}", fmt_secs((ends - now).num_seconds())),
+        NestStatus::ReadyToCollect => "Offspring ready to collect!".to_string(),
+    };
+    let status_col = match status {
+        NestStatus::ReadyToBreed | NestStatus::ReadyToCollect => ACCENT,
+        NestStatus::Incompatible => color_u8!(211, 165, 92, 255),
+        _ => TEXT,
+    };
+    label(&ctx, px + 26.0, status_y, &status_txt, 18.0, status_col);
+
+    // Possible outcomes.
+    let mut oy = status_y + 28.0;
+    label(&ctx, px + 26.0, oy, "Possible outcomes", 16.0, ACCENT);
+    oy += 22.0;
+    if outcomes.is_empty() {
+        label(&ctx, px + 40.0, oy, "—", 16.0, TEXT_DIM);
+        oy += 24.0;
+    }
+    for (sp, pct, discovered) in &outcomes {
+        let name = if *discovered { species::get(*sp).display_name } else { "????" };
+        label(&ctx, px + 40.0, oy, name, 16.0, if *discovered { TEXT } else { TEXT_DIM });
+        right_text(&ctx, px + pw - 26.0, oy, &format!("{pct}%"));
+        oy += 24.0;
+    }
+
+    // Action buttons across the bottom. (Collecting is handled by the dedicated
+    // offspring panel above, which returns early.)
+    let act_y = py + ph - 42.0;
+    let mut do_deposit = false;
+    let mut do_breed = false;
+    let mut bx = px + 26.0;
+    if show_chooser {
+        let lbl = if follower_count == 1 { "Deposit animal" } else { "Deposit…" };
+        if button(&ctx, bx, act_y, 150.0, 30.0, lbl, true) {
+            do_deposit = true;
+        }
+        bx += 160.0;
+    }
+    if matches!(status, NestStatus::ReadyToBreed) && button(&ctx, bx, act_y, 120.0, 30.0, "Breed", true) {
+        do_breed = true;
+    }
+    if button(&ctx, px + pw - 26.0 - 120.0, act_y, 120.0, 30.0, "Close  [Esc]", true) {
+        app.set_screen(Screen::World);
+    }
+
+    // ── Apply the chosen action (after all draws / hit-tests). ──
+    if let Some(slot) = remove_slot {
+        match app.zoo.remove_from_nest(nest_id, slot) {
             Ok(_) => {
+                app.sync_critters();
                 app.save_under_lock(now);
-                app.set_status("bought a nest");
+                app.set_status("removed from nest");
             }
             Err(e) => app.set_status(format!("{e}")),
         }
-    }
-
-    let mut y = py + 82.0;
-    label(&ctx, px + 26.0, y, "Active", 18.0, ACCENT);
-    y += 14.0;
-    if gestations.is_empty() {
-        label(&ctx, px + 26.0, y + 12.0, "(none)", 16.0, TEXT_DIM);
-        y += 28.0;
-    }
-    for (id, lbl, ready) in &gestations {
-        label(&ctx, px + 26.0, y + 18.0, lbl, 16.0, if *ready { ACCENT } else { TEXT });
-        let action = if *ready { "Redeem" } else { "Cancel" };
-        if button(&ctx, px + pw - 26.0 - 120.0, y, 120.0, 26.0, action, true) {
-            if *ready {
-                match app.zoo.claim_completed_breeding(*id, now) {
-                    Ok(c) => {
-                        app.sync_critters();
-                        app.save_under_lock(now);
-                        let name = species::get(c.offspring_species).display_name;
-                        let amount = if c.is_hybrid_drop { "Hybrid! +1 DNA" } else { "Hatched" };
-                        app.push_notification(
-                            name,
-                            amount,
-                            crate::app::NotifIcon::Animal(c.offspring_species),
-                        );
-                    }
-                    Err(e) => app.set_status(format!("{e}")),
-                }
-            } else {
-                let _ = app.zoo.cancel_breeding(*id, now);
-                app.save_under_lock(now);
-                app.set_status("breeding cancelled");
-            }
-        }
-        y += 34.0;
-    }
-
-    y += 8.0;
-    label(&ctx, px + 26.0, y, &format!("A: {a_label}     B: {b_label}"), 16.0, TEXT);
-    if can_breed && button(&ctx, px + pw - 26.0 - 200.0, y - 18.0, 96.0, 26.0, "BREED", true) {
-        let (a, b) = (first.unwrap(), second.unwrap());
-        match app.zoo.start_breeding(a, b, now) {
+    } else if do_deposit {
+        // Hand off to the full-screen spotlight picker.
+        app.enter_deposit_mode(nest_id);
+    } else if do_breed {
+        match app.zoo.nest_breed(nest_id, now) {
             Ok(_) => {
-                app.breeding_first_pick = None;
-                app.breeding_second_pick = None;
                 app.save_under_lock(now);
                 app.set_status("breeding started");
             }
             Err(e) => app.set_status(format!("{e}")),
         }
     }
-    if (first.is_some() || second.is_some())
-        && button(&ctx, px + pw - 26.0 - 96.0, y - 18.0, 96.0, 26.0, "Clear", true)
-    {
-        app.breeding_first_pick = None;
-        app.breeding_second_pick = None;
-    }
-    y += 22.0;
+}
 
-    label(&ctx, px + 26.0, y, "Pick a cross-species pair", 18.0, ACCENT);
-    y += 14.0;
-    if candidates.is_empty() {
-        label(&ctx, px + 26.0, y + 12.0, "(no eligible idle animals)", 16.0, TEXT_DIM);
-    }
-    let col_w = (pw - 52.0 - 12.0) * 0.5;
-    let start_y = y;
-    for (i, (id, lbl)) in candidates.iter().enumerate() {
-        let col = (i % 2) as f32;
-        let bx = px + 26.0 + col * (col_w + 12.0);
-        let by = start_y + (i / 2) as f32 * 32.0;
-        let tag = if first.is_none() { "A" } else { "B" };
-        if button(&ctx, bx, by, col_w, 28.0, &format!("Pick {tag}:  {lbl}"), true) {
-            if app.breeding_first_pick.is_none() {
-                app.breeding_first_pick = Some(*id);
-            } else if app.breeding_second_pick.is_none() {
-                app.breeding_second_pick = Some(*id);
-            }
-        }
-    }
+// ────────────────────────── Food structure ──────────────────────────
 
-    if button(&ctx, px + pw - 26.0 - 120.0, py + ph - 42.0, 120.0, 30.0, "Close  [Esc]", true) {
+fn draw_structure(app: &mut GameApp, now: DateTime<Utc>, ctx: Ctx) {
+    use crate::game::structure::{MAX_STRUCTURE_LEVEL, structure_upgrade_cost};
+
+    let Some(sid) = app.active_structure else {
         app.set_screen(Screen::World);
+        return;
+    };
+    let Some(s) = app.zoo.structures.iter().find(|s| s.id == sid) else {
+        app.set_screen(Screen::World);
+        return;
+    };
+    let level = s.level;
+    let rate = s.food_rate();
+    let stored = s.stored_at(now);
+    let cap = s.food_cap();
+    let at_max = level >= MAX_STRUCTURE_LEVEL;
+    let upgrade_cost = structure_upgrade_cost(level);
+
+    let pw = 440.0;
+    let ph = 250.0;
+    let (px, py) = (ctx.center.x - pw * 0.5, ctx.center.y - ph * 0.5);
+
+    panel(&ctx, px, py, pw, ph);
+    title(&ctx, px + 26.0, py + 30.0, "FOOD STRUCTURE");
+    right_text(&ctx, px + pw - 26.0, py + 30.0, &format!("Lv {level} / {MAX_STRUCTURE_LEVEL}"));
+
+    let mut y = py + 72.0;
+    for (lbl, val) in [
+        ("Food / sec".to_string(), format!("{rate:.2}")),
+        ("Stored".to_string(), format!("{stored} / {cap}")),
+        ("Banked food".to_string(), format!("{}", app.zoo.food)),
+    ] {
+        label(&ctx, px + 26.0, y, &lbl, 18.0, TEXT_DIM);
+        right_text(&ctx, px + pw - 26.0, y, &val);
+        y += 30.0;
+    }
+
+    let act_y = py + ph - 42.0;
+    let mut do_collect = false;
+    let mut do_upgrade = false;
+    if button(&ctx, px + 26.0, act_y, 150.0, 30.0, "Collect food", stored > 0) {
+        do_collect = true;
+    }
+    let up_label = if at_max {
+        "Max level".to_string()
+    } else {
+        format!("Upgrade · {upgrade_cost} c")
+    };
+    if button(&ctx, px + 26.0 + 160.0, act_y, 170.0, 30.0, &up_label, !at_max && app.zoo.coins >= upgrade_cost) {
+        do_upgrade = true;
+    }
+    if button(&ctx, px + pw - 26.0 - 90.0, act_y, 90.0, 30.0, "Close  [Esc]", true) {
+        app.set_screen(Screen::World);
+    }
+
+    if do_collect {
+        let g = app.zoo.collect_food_structure(sid, now);
+        app.save_under_lock(now);
+        app.set_status(format!("collected {g} food"));
+    } else if do_upgrade {
+        match app.zoo.upgrade_structure(sid, now) {
+            Ok(l) => {
+                app.save_under_lock(now);
+                app.set_status(format!("upgraded to level {l}"));
+            }
+            Err(e) => app.set_status(format!("{e}")),
+        }
     }
 }
 

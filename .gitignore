@@ -4,3 +4,6 @@
 *.bk
 *.swp
 *~
+
+# tweetbot tool — lives in its own git repository, excluded from this one entirely
+tools/tweetbot/

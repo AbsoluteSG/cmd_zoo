@@ -10,18 +10,65 @@ and well-documented.
 
 ## What it does
 
-- **Idle economy** — animals live in habitats, accrue income over time, and are
-  collected for coins or DNA Helix.
+- **Idle economy** — animals accrue coins and DNA Helix over time. Click a critter
+  to collect its income once it's full; below-cap animals play a poke sound instead.
 - **An open world to explore** — a chunk-streamed wilderness surrounds your home
-  zoo plot, with biome-driven procedural animal spawns.
-- **Catching** — wild animals roam with per-species evasion behaviors (zigzag,
-  burst, vanish, circle, and a charging "basher"). You catch them with a
-  hover-to-fill capture ring; rarer animals take repeated catches.
-- **Breeding & crossbreeding** — pair animals to discover hybrids from a large
-  recipe table (100+ species, including themed exotics and concept hybrids).
+  zoo plot, with biome-driven procedural animal spawns. Scroll to zoom; use fast-travel
+  waypoints to mark and return to points of interest.
+- **Catching** — enter catch mode (`C`) and hover over a wild animal to fill the
+  capture ring. Wild animals have per-species evasion behaviors: zigzaggers, bursters,
+  circlers, vanishers, and charging bashers that can knock back and interrupt your catch.
+  Rarer species require multiple successful catches before they're tamed.
+- **Breeding & crossbreeding** — walk animals to a nest with the follow chain (`E` to
+  inspect → Follow), then deposit them into a nest to start gestation. Pairs can
+  produce hybrids from a large recipe table (100+ species, including themed exotics
+  and concept hybrids).
+- **Food structures** — unlockable structures (Hay Bale, Insectary, Feed Mill,
+  Aquaculture) produce food as a third resource alongside coins and DNA Helix.
+- **Follow chain** — up to 10 owned animals can trail your avatar in a physics-based
+  elastic chain. Use the spotlight deposit view to place them into nests.
+- **Visual effects** — five fullscreen post-process shaders (Scanlines, Pixelate,
+  Grayscale, Sepia, None) applied to the world scene; menus blur the background.
+  Hit impacts trigger camera shake, hitstop, and a venom vignette.
 - **Local + online play** — a session/avatar layer supports visiting a friend's
   zoo over a Steam relay transport (optional feature) or a loopback transport
-  for single-player.
+  for single-player. Visitors can send gift animals to the host.
+
+## Controls
+
+| Key / Input | Action |
+|-------------|--------|
+| WASD | Move avatar |
+| Shift | Sprint |
+| Space | Dash |
+| C | Toggle catch mode |
+| E | Interact — inspect nearest animal, or open a nest / food-structure panel |
+| Left click | Collect income from a critter (or select in deposit mode) |
+| Mouse wheel | Zoom in / out |
+| 1 | Shop |
+| 3 | Settings / online join panel |
+| 4 | Waypoints |
+| Escape | Close menu or inspect panel |
+
+## Building
+
+```sh
+cargo run            # play single-player
+cargo test           # run the test suite
+cargo build --release
+```
+
+Online play requires the Steamworks SDK and the `steam` feature:
+
+```sh
+cargo run --features steam
+```
+
+Plain `cargo build` works without the SDK — the Steam transport is gated behind
+the optional feature so the project always builds out of the box.
+
+The save file is written to the platform's standard app-data directory
+(`directories` crate). A fresh save seeds one blue frog to get you started.
 
 ## Learning focus
 
@@ -41,24 +88,8 @@ Each module is a focused study in a different area of building a game in Rust:
 Most modules carry doc comments explaining the design decisions, and core logic
 is covered by unit tests (`cargo test`).
 
-## Building
-
-```sh
-cargo run            # play single-player
-cargo test           # run the test suite
-cargo build --release
-```
-
-Online play requires the Steamworks SDK and the `steam` feature:
-
-```sh
-cargo run --features steam
-```
-
-Plain `cargo build` works without the SDK — the Steam transport is gated behind
-the optional feature so the project always builds out of the box.
-
 ## Status
 
 A work in progress and a personal learning project. Expect rough edges,
 placeholder art for newer species, and systems that are still evolving.
+See `docs/GAMEPLAY_BRAINSTORM.md` for the longer-term design direction.

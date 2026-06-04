@@ -46,6 +46,15 @@ static CATALOG: Lazy<HashMap<StructureKindId, StructureKindDef>> = Lazy::new(|| 
             base_food_cap: 1200,
             purchase_cost: 1600,
         },
+        // The uniform kind used by the five physical food structures.
+        StructureKindDef {
+            id: "food_silo",
+            display_name: "Food Silo",
+            glyph: "⛃",
+            base_food_per_sec: 2.0,
+            base_food_cap: 400,
+            purchase_cost: 0,
+        },
     ];
     entries.into_iter().map(|d| (d.id, d)).collect()
 });

@@ -200,6 +200,13 @@ impl Particles {
         self.emit(pos, 8, GREY, (60.0, 150.0), vec2(0.0, -1.0), 1.0, 180.0, (0.3, 0.55), (1.5, 3.0));
     }
 
+    /// Light dust kicked up behind a sprinting avatar. Call once per frame at
+    /// the feet while sprinting; emits a couple of short-lived puffs.
+    pub fn sprint_trail(&mut self, pos: Vec2) {
+        const DUST: Color = color_u8!(225, 228, 236, 255);
+        self.emit(pos, 2, DUST, (10.0, 55.0), vec2(0.0, -1.0), 1.2, 70.0, (0.2, 0.45), (1.5, 3.0));
+    }
+
     /// Purple-green toxic puff rising from a Venomous lunge hit.
     pub fn venom(&mut self, pos: Vec2) {
         const PURPLE: Color = color_u8!(170, 90, 210, 255);

@@ -5,19 +5,19 @@ use chrono::{DateTime, Duration, Utc};
 use macroquad::math::Vec2;
 use uuid::Uuid;
 
-use super::animal::{Animal, AnimalState, MAX_ANIMAL_LEVEL, animal_level_up_cost};
+use super::animal::{Animal, AnimalState, MAX_ANIMAL_LEVEL, animal_level_up_cost, animal_sell_value};
 use super::habitat::{
     Habitat, MAX_HABITAT_LEVEL, footprints_overlap, habitat_purchase_cost, habitat_upgrade_cost,
     habitat_upgrade_duration,
 };
 use super::player::Player;
+use super::rank;
 use super::species::{self, HabitatTheme, SpeciesId};
 use super::visitor::VisitorRecord;
 use super::structure::{
-    MAX_STRUCTURE_LEVEL, STRUCTURE_TOTAL_CAP, Structure, structure_purchase_cost,
+    FOOD_KIND, MAX_FOOD_STRUCTURES, MAX_STRUCTURE_LEVEL, Structure, food_structure_unlock_cost,
     structure_upgrade_cost,
 };
-use super::structure_kind::{self, StructureKindId};
 use super::world_chunks::ChunkDelta;
 use crate::share::{
     GiftContents, GiftPayload, SharedSnapshotPayload, SnapshotView, SpeciesTallyEntry,
@@ -41,6 +41,96 @@ pub struct Waypoint {
     pub pos: Vec2,
 }
 
+/// A physical breeding nest sitting in the home zoo. Holds up to two deposited
+/// animals; breeding/ready state is derived from the occupants' `AnimalState`.
+/// Its world position is derived from its index via [`nest_positions`].
+#[derive(Clone, Debug, PartialEq)]
+pub struct Nest {
+    pub id: Uuid,
+    /// Up to two deposited animal ids (the breeding pair). `None` = empty slot.
+    pub slots: [Option<Uuid>; 2],
+    /// A freshly-bred offspring waiting to be collected. Set automatically when
+    /// breeding completes (the parents are released back to the zoo at that
+    /// moment); cleared when the player collects it. In-session only — not
+    /// persisted, so a reload treats an uncollected offspring as already free.
+    pub offspring: Option<Uuid>,
+}
+
+impl Nest {
+    pub fn new() -> Self {
+        Self { id: Uuid::new_v4(), slots: [None, None], offspring: None }
+    }
+    /// Occupant ids currently in the nest (0–2). Does not include a pending
+    /// offspring — only the deposited breeding pair.
+    pub fn occupants(&self) -> Vec<Uuid> {
+        self.slots.iter().flatten().copied().collect()
+    }
+    /// Index of the first free slot, if any.
+    pub fn free_slot(&self) -> Option<usize> {
+        self.slots.iter().position(|s| s.is_none())
+    }
+    pub fn contains(&self, id: Uuid) -> bool {
+        self.slots.iter().any(|s| *s == Some(id))
+    }
+}
+
+impl Default for Nest {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// World positions of the (up to `MAX_NESTS`) nests, laid out in a row inset
+/// along the top edge of the home zoo plot. A nest's position is `positions[i]`
+/// for its index in `Zoo::nests`.
+pub fn nest_positions() -> [Vec2; MAX_NESTS as usize] {
+    let c = crate::game::world_chunks::zoo_center();
+    let half = crate::game::world_chunks::zoo_half_extent();
+    let row_y = c.y - half * 0.62;
+    let span = half * 1.3;
+    let n = MAX_NESTS as usize;
+    let mut out = [Vec2::new(0.0, 0.0); MAX_NESTS as usize];
+    for (i, p) in out.iter_mut().enumerate() {
+        let t = i as f32 / (n as f32 - 1.0);
+        *p = Vec2::new(c.x - span * 0.5 + span * t, row_y);
+    }
+    out
+}
+
+/// World positions of the (up to [`MAX_FOOD_STRUCTURES`]) food structures, laid
+/// out in a row along the **bottom** edge of the home plot (mirror of
+/// [`nest_positions`], which lines the top).
+pub fn food_structure_positions() -> [Vec2; MAX_FOOD_STRUCTURES] {
+    let c = crate::game::world_chunks::zoo_center();
+    let half = crate::game::world_chunks::zoo_half_extent();
+    let row_y = c.y + half * 0.62;
+    let span = half * 1.3;
+    let n = MAX_FOOD_STRUCTURES;
+    let mut out = [Vec2::new(0.0, 0.0); MAX_FOOD_STRUCTURES];
+    for (i, p) in out.iter_mut().enumerate() {
+        let t = i as f32 / (n as f32 - 1.0);
+        *p = Vec2::new(c.x - span * 0.5 + span * t, row_y);
+    }
+    out
+}
+
+/// Derived state of a nest for UI + parking.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum NestStatus {
+    /// No occupants.
+    Empty,
+    /// One occupant; needs a second to breed.
+    Partial,
+    /// Two occupants, idle, and a valid cross pool exists.
+    ReadyToBreed,
+    /// Two occupants, idle, but no valid cross (same species / no pool).
+    Incompatible,
+    /// Mid-gestation; payload is when it finishes.
+    Breeding(DateTime<Utc>),
+    /// Gestation finished — offspring can be collected.
+    ReadyToCollect,
+}
+
 pub struct Zoo {
     /// The local owner of this zoo (host in M2 co-op). Keeping the field name
     /// `player` here for source compatibility; semantically this is the host.
@@ -58,15 +148,25 @@ pub struct Zoo {
     pub dna_helix: u64,
     pub habitats: Vec<Habitat>,
     pub animals: HashMap<Uuid, Animal>,
+    /// Lifetime count of *duplicate* acquisitions per species, driving each
+    /// animal's Rank. Persists even when the species isn't currently owned (so
+    /// Rank survives sell + recapture). One-of-each: `animals` holds at most one
+    /// animal per species at a time.
+    pub species_dupes: HashMap<SpeciesId, u32>,
     pub structures: Vec<Structure>,
     pub claimed_gifts: HashSet<Uuid>,
     /// Crossbreed recipes the player has unlocked by rolling a hybrid drop.
     /// Recorded only on `claim_completed_breeding` when offspring is not a
     /// parent — parent drops don't count as discoveries.
     pub discovered_recipes: HashSet<SpeciesId>,
-    /// How many concurrent breedings the player can run. Starts at 1; up to
-    /// `MAX_NESTS` after purchasing the rest.
+    /// How many nests the player has unlocked (also the concurrent-breeding
+    /// cap). Starts at 0 — all `MAX_NESTS` begin locked. Kept in sync with
+    /// `nests.len()`.
     pub nest_count: u8,
+    /// Physical breeding nests in the home zoo. `nests.len() == nest_count`.
+    /// Each holds up to two deposited animals; breeding is driven through them.
+    /// Added in schema v15.
+    pub nests: Vec<Nest>,
     /// When set, the index of an exotic-shop window the player paid DNA Helix
     /// to open early during its closed gap. Honored only while that window is
     /// the *next* one (see `exotic_shop::effective_window`); self-expires once
@@ -110,24 +210,34 @@ impl CollectResult {
     }
 }
 
-/// Hard cap on nests. First nest is free; remaining three are gated by coins.
-pub const MAX_NESTS: u8 = 4;
+/// Hard cap on nests. All five start locked; the first two are unlocked with
+/// coins, the remaining three with DNA Helix.
+pub const MAX_NESTS: u8 = 5;
 
-/// Coins to buy the next nest, given how many the player already owns
-/// (i.e. `1` for the standard starter zoo).
-pub fn nest_purchase_cost(current_nests: u8) -> u64 {
-    match current_nests {
-        1 => 1_500,
-        2 => 65_000,
-        3 => 825_000,
-        _ => u64::MAX,
+/// What it costs to unlock a nest, paid in one currency or the other.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NestCost {
+    Coins(u64),
+    Dna(u64),
+}
+
+/// Cost to unlock the next nest given how many the player already owns. The
+/// first two slots are coin-gated, the last three DNA-gated. Returns `None`
+/// once all [`MAX_NESTS`] are owned.
+pub fn nest_unlock_cost(owned: u8) -> Option<NestCost> {
+    match owned {
+        0 => Some(NestCost::Coins(1_500)),
+        1 => Some(NestCost::Coins(25_000)),
+        2 => Some(NestCost::Dna(5)),
+        3 => Some(NestCost::Dna(15)),
+        4 => Some(NestCost::Dna(40)),
+        _ => None,
     }
 }
 
 impl Zoo {
     pub fn new(now: DateTime<Utc>) -> Self {
         let starter_habitat = Habitat::new(HabitatTheme::Forest);
-        let starter_structure = Structure::new("hay_bale", now);
         let player = Player::new_default();
         let world_seed = world_seed_from_player(player.id);
         Self {
@@ -138,10 +248,13 @@ impl Zoo {
             dna_helix: 0,
             habitats: vec![starter_habitat],
             animals: HashMap::new(),
-            structures: vec![starter_structure],
+            species_dupes: HashMap::new(),
+            // All five food structures start locked, like nests.
+            structures: Vec::new(),
             claimed_gifts: HashSet::new(),
             discovered_recipes: HashSet::new(),
-            nest_count: 1,
+            nest_count: 0,
+            nests: Vec::new(),
             exotic_skip_window: None,
             world_seed,
             chunk_deltas: HashMap::new(),
@@ -204,18 +317,309 @@ impl Zoo {
             / 2
     }
 
-    /// Purchase an additional nest. Capped at `MAX_NESTS`.
+    /// Unlock the next nest, paying coins or DNA per [`nest_unlock_cost`].
+    /// Capped at `MAX_NESTS`. Adds a physical `Nest` (its world position is
+    /// derived from its index).
     pub fn buy_nest(&mut self) -> Result<u8, ZooError> {
-        if self.nest_count >= MAX_NESTS {
-            return Err(ZooError::NestCapReached);
+        let cost = nest_unlock_cost(self.nest_count).ok_or(ZooError::NestCapReached)?;
+        match cost {
+            NestCost::Coins(c) => {
+                if self.coins < c {
+                    return Err(ZooError::NotEnoughCoins);
+                }
+                self.coins -= c;
+            }
+            NestCost::Dna(d) => {
+                if self.dna_helix < d {
+                    return Err(ZooError::NotEnoughDna);
+                }
+                self.dna_helix -= d;
+            }
         }
-        let cost = nest_purchase_cost(self.nest_count);
-        if self.coins < cost {
-            return Err(ZooError::NotEnoughCoins);
-        }
-        self.coins -= cost;
         self.nest_count += 1;
+        self.nests.push(Nest::new());
         Ok(self.nest_count)
+    }
+
+    // ── Physical nests ──────────────────────────────────────────────────────
+
+    /// World position of the nest at `index` (derived from the zoo layout).
+    pub fn nest_pos(index: usize) -> Vec2 {
+        let positions = nest_positions();
+        positions[index.min(positions.len() - 1)]
+    }
+
+    /// World position of the food structure at `index`.
+    pub fn food_structure_pos(index: usize) -> Vec2 {
+        let positions = food_structure_positions();
+        positions[index.min(positions.len() - 1)]
+    }
+
+    /// True if `animal_id` currently sits in any nest slot.
+    pub fn animal_in_any_nest(&self, animal_id: Uuid) -> bool {
+        self.nests.iter().any(|n| n.contains(animal_id))
+    }
+
+    /// Deposit `animal_id` into the first free slot of nest `nest_id`.
+    pub fn deposit_in_nest(&mut self, nest_id: Uuid, animal_id: Uuid) -> Result<(), ZooError> {
+        if !self.animals.contains_key(&animal_id) {
+            return Err(ZooError::UnknownAnimal);
+        }
+        if self.animal_in_any_nest(animal_id) {
+            return Err(ZooError::AlreadyNested);
+        }
+        let nest = self.nests.iter_mut().find(|n| n.id == nest_id).ok_or(ZooError::UnknownNest)?;
+        let slot = nest.free_slot().ok_or(ZooError::NestFull)?;
+        nest.slots[slot] = Some(animal_id);
+        Ok(())
+    }
+
+    /// Remove the occupant in `slot` of nest `nest_id`. Refused while that
+    /// animal is mid-breed. Returns the removed animal id.
+    pub fn remove_from_nest(&mut self, nest_id: Uuid, slot: usize) -> Result<Uuid, ZooError> {
+        let occupant = {
+            let nest = self.nests.iter().find(|n| n.id == nest_id).ok_or(ZooError::UnknownNest)?;
+            *nest.slots.get(slot).ok_or(ZooError::UnknownNest)?
+        };
+        let id = occupant.ok_or(ZooError::UnknownAnimal)?;
+        if matches!(self.animals.get(&id).map(|a| &a.state), Some(AnimalState::Breeding { .. })) {
+            return Err(ZooError::OccupantBreeding);
+        }
+        if let Some(nest) = self.nests.iter_mut().find(|n| n.id == nest_id) {
+            nest.slots[slot] = None;
+        }
+        Ok(id)
+    }
+
+    /// Begin breeding the two occupants of `nest_id` (reuses `start_breeding`,
+    /// which validates the cross pool, gestation, and nest capacity).
+    pub fn nest_breed(&mut self, nest_id: Uuid, now: DateTime<Utc>) -> Result<DateTime<Utc>, ZooError> {
+        let occ = self
+            .nests
+            .iter()
+            .find(|n| n.id == nest_id)
+            .ok_or(ZooError::UnknownNest)?
+            .occupants();
+        if occ.len() < 2 {
+            return Err(ZooError::SpeciesMismatch);
+        }
+        self.start_breeding(occ[0], occ[1], now)
+    }
+
+    /// Auto-advance every nest whose gestation has finished: roll the offspring,
+    /// create it as an owned L1 animal, **release both parents** back to the zoo
+    /// (Idle, out of the nest), and leave the offspring sitting in the nest until
+    /// the player collects it. Returns `(nest_index, offspring_species)` for each
+    /// nest that just completed, so the caller can play feedback. Idempotent —
+    /// a nest already holding a pending offspring is skipped.
+    pub fn advance_nests(&mut self, now: DateTime<Utc>) -> Vec<(usize, SpeciesId)> {
+        let mut hatched = Vec::new();
+        for i in 0..self.nests.len() {
+            if self.nests[i].offspring.is_some() {
+                continue;
+            }
+            let occ = self.nests[i].occupants();
+            if occ.len() < 2 {
+                continue;
+            }
+            let (a_id, b_id) = (occ[0], occ[1]);
+            // Both parents share the same breeding `ends_at`; read it off parent A.
+            let ends_at = match self.animals.get(&a_id).map(|a| &a.state) {
+                Some(AnimalState::Breeding { ends_at, .. }) => *ends_at,
+                _ => continue,
+            };
+            if ends_at > now {
+                continue;
+            }
+            let species_a = self.animals[&a_id].species;
+            let species_b = self.animals[&b_id].species;
+            // Deterministic roll from the pair + ends_at (reload-stable).
+            let offspring_species = match species::crossbreed_pool(species_a, species_b) {
+                Some(pool) if !pool.is_empty() => {
+                    let seed = species::pool_seed(a_id, b_id, ends_at.timestamp());
+                    species::roll_pool(seed, pool)
+                }
+                _ => species_a,
+            };
+            let off_id = match self.spawn_animal_freeform(offspring_species, 1, now) {
+                Ok(id) => id,
+                Err(_) => continue,
+            };
+            // Release both parents from the nest, back to Idle.
+            for x in [a_id, b_id] {
+                if let Some(a) = self.animals.get_mut(&x) {
+                    a.state = AnimalState::Idle;
+                    a.last_collected_at = now;
+                }
+            }
+            self.nests[i].slots = [None, None];
+            self.nests[i].offspring = Some(off_id);
+            hatched.push((i, offspring_species));
+        }
+        hatched
+    }
+
+    /// Collect a nest's finished offspring. The offspring is already an owned
+    /// animal (created when breeding completed); collecting simply releases it
+    /// from the nest into the zoo. Awards the hybrid bonus (DNA + codex) here,
+    /// when the player actually claims it. Returns `(species, is_hybrid_drop)`.
+    pub fn nest_collect(
+        &mut self,
+        nest_id: Uuid,
+        _now: DateTime<Utc>,
+    ) -> Result<(SpeciesId, bool), ZooError> {
+        let off_id = {
+            let nest = self
+                .nests
+                .iter_mut()
+                .find(|n| n.id == nest_id)
+                .ok_or(ZooError::UnknownNest)?;
+            nest.offspring.take().ok_or(ZooError::NotReady)?
+        };
+        let species = self
+            .animals
+            .get(&off_id)
+            .map(|a| a.species)
+            .ok_or(ZooError::UnknownAnimal)?;
+        // A hybrid (cross-only) offspring is the player's discovery payoff.
+        let is_hybrid = species::get(species).hybrid;
+        if is_hybrid {
+            self.dna_helix = self.dna_helix.saturating_add(1);
+            self.discovered_recipes.insert(species);
+        }
+        Ok((species, is_hybrid))
+    }
+
+    /// Derived status of a nest for the UI + critter parking. (`_now` is kept
+    /// for call-site symmetry; completion is now driven by `advance_nests`.)
+    pub fn nest_status(&self, nest_id: Uuid, _now: DateTime<Utc>) -> NestStatus {
+        let Some(nest) = self.nests.iter().find(|n| n.id == nest_id) else {
+            return NestStatus::Empty;
+        };
+        // A pending offspring is the highest-priority state.
+        if nest.offspring.is_some() {
+            return NestStatus::ReadyToCollect;
+        }
+        let occ = nest.occupants();
+        // Mid-gestation (auto-completes via `advance_nests` once `ends_at` passes).
+        if let Some(ends_at) = occ.iter().find_map(|id| match self.animals.get(id).map(|a| &a.state) {
+            Some(AnimalState::Breeding { ends_at, .. }) => Some(*ends_at),
+            _ => None,
+        }) {
+            return NestStatus::Breeding(ends_at);
+        }
+        match occ.len() {
+            0 => NestStatus::Empty,
+            1 => NestStatus::Partial,
+            _ => {
+                let sa = self.animals.get(&occ[0]).map(|a| a.species);
+                let sb = self.animals.get(&occ[1]).map(|a| a.species);
+                match (sa, sb) {
+                    (Some(a), Some(b)) if species::crossbreed_pool(a, b).is_some() => {
+                        NestStatus::ReadyToBreed
+                    }
+                    _ => NestStatus::Incompatible,
+                }
+            }
+        }
+    }
+
+    /// Map of `animal_id → nest world position` for every nested occupant, so
+    /// the render layer can park those critters at their nest.
+    pub fn nested_animal_positions(&self) -> HashMap<Uuid, Vec2> {
+        let mut out = HashMap::new();
+        for (i, nest) in self.nests.iter().enumerate() {
+            let base = Self::nest_pos(i);
+            for (slot, occ) in nest.slots.iter().enumerate() {
+                if let Some(id) = occ {
+                    // Spread the two occupants either side of the nest centre.
+                    let off = if slot == 0 { -28.0 } else { 28.0 };
+                    out.insert(*id, Vec2::new(base.x + off, base.y + 20.0));
+                }
+            }
+            // A pending offspring sits in the middle of the nest.
+            if let Some(off_id) = nest.offspring {
+                out.insert(off_id, Vec2::new(base.x, base.y + 20.0));
+            }
+        }
+        out
+    }
+
+    /// Possible offspring of nest `nest_id`, as `(species, percent, discovered)`
+    /// sorted by descending chance. `discovered` is true when the outcome is a
+    /// parent species or an already-unlocked recipe — the UI renders `????` for
+    /// the rest. Empty when the nest doesn't hold two crossable animals.
+    pub fn nest_outcomes(&self, nest_id: Uuid) -> Vec<(SpeciesId, u32, bool)> {
+        let Some(nest) = self.nests.iter().find(|n| n.id == nest_id) else {
+            return Vec::new();
+        };
+        let occ = nest.occupants();
+        if occ.len() < 2 {
+            return Vec::new();
+        }
+        let (Some(sa), Some(sb)) = (
+            self.animals.get(&occ[0]).map(|a| a.species),
+            self.animals.get(&occ[1]).map(|a| a.species),
+        ) else {
+            return Vec::new();
+        };
+        let Some(pool) = species::crossbreed_pool(sa, sb) else {
+            return Vec::new();
+        };
+        let total: u32 = pool.iter().map(|e| e.weight).sum();
+        if total == 0 {
+            return Vec::new();
+        }
+        let mut out: Vec<(SpeciesId, u32, bool)> = pool
+            .iter()
+            .map(|e| {
+                let pct = (e.weight as u64 * 100 / total as u64) as u32;
+                let is_parent = e.species == sa || e.species == sb;
+                let discovered = is_parent || self.discovered_recipes.contains(&e.species);
+                (e.species, pct, discovered)
+            })
+            .collect();
+        out.sort_by(|a, b| b.1.cmp(&a.1));
+        out
+    }
+
+    /// After loading, ensure every in-progress breeding pair lives in a nest
+    /// (older saves bred via the menu, so pairs may not be assigned yet). Also
+    /// drops nest occupant ids whose animal no longer exists.
+    pub fn relink_breeding_nests(&mut self) {
+        // Prune stale occupant ids.
+        let known: HashSet<Uuid> = self.animals.keys().copied().collect();
+        for nest in &mut self.nests {
+            for slot in nest.slots.iter_mut() {
+                if let Some(id) = slot {
+                    if !known.contains(id) {
+                        *slot = None;
+                    }
+                }
+            }
+        }
+        // Collect breeding pairs (canonical, deduped) not already nested.
+        let mut seen: HashSet<Uuid> = HashSet::new();
+        let mut pairs: Vec<(Uuid, Uuid)> = Vec::new();
+        for a in self.animals.values() {
+            if let AnimalState::Breeding { partner_id, .. } = a.state {
+                if seen.contains(&a.id) || seen.contains(&partner_id) {
+                    continue;
+                }
+                seen.insert(a.id);
+                seen.insert(partner_id);
+                let already = self.nests.iter().any(|n| n.contains(a.id) || n.contains(partner_id));
+                if !already {
+                    pairs.push((a.id, partner_id));
+                }
+            }
+        }
+        // Drop each unassigned pair into an empty nest.
+        for (a, b) in pairs {
+            if let Some(nest) = self.nests.iter_mut().find(|n| n.occupants().is_empty()) {
+                nest.slots = [Some(a), Some(b)];
+            }
+        }
     }
 
     /// Cancel an active breeding for the pair containing `animal_id`. Both
@@ -460,28 +864,81 @@ impl Zoo {
         Ok(())
     }
 
-    pub fn buy_structure(
-        &mut self,
-        kind: StructureKindId,
-        now: DateTime<Utc>,
-    ) -> Result<Uuid, ZooError> {
-        if self.structures.len() >= STRUCTURE_TOTAL_CAP {
-            return Err(ZooError::StructureCapReached);
-        }
-        let def = structure_kind::try_get(kind).ok_or(ZooError::UnknownStructureKind)?;
-        let cost = structure_purchase_cost(self.structures.len()).max(def.purchase_cost);
+    /// Unlock the next physical food structure, paying coins per
+    /// [`food_structure_unlock_cost`]. Capped at [`MAX_FOOD_STRUCTURES`]. Mirrors
+    /// [`Zoo::buy_nest`]. Returns the new owned count.
+    pub fn buy_food_structure(&mut self, now: DateTime<Utc>) -> Result<usize, ZooError> {
+        let cost = food_structure_unlock_cost(self.structures.len())
+            .ok_or(ZooError::StructureCapReached)?;
         if self.coins < cost {
             return Err(ZooError::NotEnoughCoins);
         }
         self.coins -= cost;
-        let s = Structure::new(def.id, now);
-        let id = s.id;
-        self.structures.push(s);
-        Ok(id)
+        self.structures.push(Structure::new(FOOD_KIND, now));
+        Ok(self.structures.len())
     }
 
-    /// Place a new animal (no cost). Used by gift claims and internally by `buy_animal`.
-    /// Returns (habitat_id, animal_id).
+    /// Sweep one structure's accrued food into the bank. Returns food gained.
+    pub fn collect_food_structure(&mut self, structure_id: Uuid, now: DateTime<Utc>) -> u64 {
+        let Some(s) = self.structures.iter_mut().find(|s| s.id == structure_id) else {
+            return 0;
+        };
+        let g = s.stored_at(now);
+        s.last_collected_at = now;
+        self.food = self.food.saturating_add(g);
+        g
+    }
+
+    // ── One-of-each ownership + Rank ────────────────────────────────────────
+
+    /// The id of the single owned animal of `species`, if any.
+    pub fn animal_id_for_species(&self, species: SpeciesId) -> Option<Uuid> {
+        self.animals
+            .iter()
+            .find(|(_, a)| a.species == species)
+            .map(|(id, _)| *id)
+    }
+
+    /// Whether `species` is currently owned.
+    pub fn owns_species(&self, species: SpeciesId) -> bool {
+        self.animal_id_for_species(species).is_some()
+    }
+
+    /// Current Rank stage of `species` (derived from lifetime duplicates),
+    /// regardless of whether it is currently owned.
+    pub fn rank_of(&self, species: SpeciesId) -> u8 {
+        rank::rank_for_dupes(self.species_dupes.get(species).copied().unwrap_or(0))
+    }
+
+    /// Habitat containing `animal_id`, if it lives in one.
+    fn habitat_id_of(&self, animal_id: Uuid) -> Option<Uuid> {
+        self.habitats
+            .iter()
+            .find(|h| h.animal_ids.contains(&animal_id))
+            .map(|h| h.id)
+    }
+
+    /// Record acquiring a duplicate of an already-owned species: bump the
+    /// lifetime count and refresh the live animal's Rank. Returns whether the
+    /// Rank advanced this time.
+    fn register_duplicate(&mut self, species: SpeciesId) -> bool {
+        let count = self.species_dupes.entry(species).or_insert(0);
+        *count += 1;
+        let new_stage = rank::rank_for_dupes(*count);
+        if let Some(id) = self.animal_id_for_species(species) {
+            if let Some(a) = self.animals.get_mut(&id) {
+                let advanced = a.stage != new_stage;
+                a.stage = new_stage;
+                return advanced;
+            }
+        }
+        false
+    }
+
+    /// Place a new animal (no cost). Used by gift claims and internally by
+    /// `buy_animal`. If the species is already owned, this advances its Rank
+    /// instead of adding a second copy (one-of-each). Returns
+    /// (habitat_id, animal_id) — for a duplicate, the existing animal's ids.
     pub fn auto_place_animal(
         &mut self,
         species_id: SpeciesId,
@@ -489,6 +946,11 @@ impl Zoo {
         now: DateTime<Utc>,
     ) -> Result<(Uuid, Uuid), ZooError> {
         let def = species::try_get(species_id).ok_or(ZooError::UnknownSpecies)?;
+        if let Some(existing) = self.animal_id_for_species(def.id) {
+            self.register_duplicate(def.id);
+            let hid = self.habitat_id_of(existing).unwrap_or_else(Uuid::nil);
+            return Ok((hid, existing));
+        }
         let target_idx = self
             .habitats
             .iter()
@@ -497,19 +959,23 @@ impl Zoo {
         let habitat_id = self.habitats[target_idx].id;
         let mut animal = Animal::new(def.id, now);
         animal.level = level.clamp(1, MAX_ANIMAL_LEVEL);
+        animal.stage = self.rank_of(def.id);
         let animal_id = animal.id;
         self.habitats[target_idx].animal_ids.push(animal_id);
         self.animals.insert(animal_id, animal);
         Ok((habitat_id, animal_id))
     }
 
-    /// Charge coins and auto-place. Validates affordability and space before mutating.
+    /// Charge coins and auto-place. Validates affordability and space before
+    /// mutating. Buying a species you already own advances its Rank (and needs
+    /// no habitat space).
     pub fn buy_animal(
         &mut self,
         species_id: SpeciesId,
         now: DateTime<Utc>,
     ) -> Result<(Uuid, Uuid), ZooError> {
         let def = species::try_get(species_id).ok_or(ZooError::UnknownSpecies)?;
+        let owned = self.owns_species(def.id);
         // Validate affordability in the species' purchase currency before
         // touching anything.
         match def.purchase_currency {
@@ -524,12 +990,15 @@ impl Zoo {
                 }
             }
         }
-        let has_room = self
-            .habitats
-            .iter()
-            .any(|h| h.theme == def.theme && h.animal_ids.len() < h.capacity());
-        if !has_room {
-            return Err(ZooError::NoHabitatWithSpace);
+        // Only a brand-new animal needs habitat space.
+        if !owned {
+            let has_room = self
+                .habitats
+                .iter()
+                .any(|h| h.theme == def.theme && h.animal_ids.len() < h.capacity());
+            if !has_room {
+                return Err(ZooError::NoHabitatWithSpace);
+            }
         }
         match def.purchase_currency {
             species::IncomeKind::Coin => self.coins -= def.purchase_cost,
@@ -539,8 +1008,8 @@ impl Zoo {
     }
 
     /// Spawn an animal directly into the world with no habitat — the freeform
-    /// model where critters roam the open plane. Returns the new animal id.
-    /// Panics-free analog of `auto_place_animal` (cannot fail on space).
+    /// model where critters roam the open plane. Returns the animal id. If the
+    /// species is already owned, advances its Rank instead of duplicating.
     pub fn spawn_animal_freeform(
         &mut self,
         species_id: SpeciesId,
@@ -548,8 +1017,13 @@ impl Zoo {
         now: DateTime<Utc>,
     ) -> Result<Uuid, ZooError> {
         let def = species::try_get(species_id).ok_or(ZooError::UnknownSpecies)?;
+        if let Some(existing) = self.animal_id_for_species(def.id) {
+            self.register_duplicate(def.id);
+            return Ok(existing);
+        }
         let mut animal = Animal::new(def.id, now);
         animal.level = level.clamp(1, MAX_ANIMAL_LEVEL);
+        animal.stage = self.rank_of(def.id);
         let animal_id = animal.id;
         self.animals.insert(animal_id, animal);
         Ok(animal_id)
@@ -557,7 +1031,7 @@ impl Zoo {
 
     /// Freeform shop buy: validate affordability in the species' purchase
     /// currency, charge, and spawn the critter onto the plane (no habitat
-    /// required). Returns the new animal id.
+    /// required). Returns the animal id (advancing Rank if already owned).
     pub fn purchase_animal(
         &mut self,
         species_id: SpeciesId,
@@ -581,6 +1055,36 @@ impl Zoo {
             species::IncomeKind::DnaHelix => self.dna_helix -= def.purchase_cost,
         }
         self.spawn_animal_freeform(def.id, 1, now)
+    }
+
+    /// Sell an owned animal for coins (inspect-panel Sell action). Removes it
+    /// from the zoo and its habitat. Rank (`species_dupes`) is **retained** so it
+    /// survives a later recapture. Refused while breeding or nested. Returns
+    /// coins gained. Feeding/levelling reuses the existing [`Zoo::level_up_animal`].
+    pub fn sell_animal(&mut self, animal_id: Uuid, now: DateTime<Utc>) -> Result<u64, ZooError> {
+        let (level, base, breeding) = {
+            let a = self.animals.get(&animal_id).ok_or(ZooError::UnknownAnimal)?;
+            (
+                a.level,
+                species::get(a.species).purchase_cost,
+                matches!(a.state, AnimalState::Breeding { .. }),
+            )
+        };
+        if breeding {
+            return Err(ZooError::NotIdle);
+        }
+        if self.animal_in_any_nest(animal_id) {
+            return Err(ZooError::AlreadyNested);
+        }
+        // Sweep any pending at-cap income first so it isn't silently lost.
+        let pending = self.animals.get(&animal_id).map_or(0, |a| a.stored_at(now));
+        let value = animal_sell_value(base, level).saturating_add(pending);
+        for h in self.habitats.iter_mut() {
+            h.animal_ids.retain(|aid| *aid != animal_id);
+        }
+        self.animals.remove(&animal_id);
+        self.coins = self.coins.saturating_add(value);
+        Ok(value)
     }
 
     /// Sweep at-cap income from every animal in a habitat into the
@@ -857,6 +1361,7 @@ pub enum ZooError {
     UnknownHabitat,
     UnknownAnimal,
     UnknownStructure,
+    #[allow(dead_code)]
     UnknownStructureKind,
     HabitatCapReached,
     StructureCapReached,
@@ -887,6 +1392,14 @@ pub enum ZooError {
     UpgradeNotReady,
     AllNestsBusy,
     NestCapReached,
+    /// Tried to deposit into a nest that has no free slot.
+    NestFull,
+    /// Referenced a nest id that doesn't exist.
+    UnknownNest,
+    /// Tried to remove an occupant that is mid-breed.
+    OccupantBreeding,
+    /// Tried to deposit an animal that is already in a nest.
+    AlreadyNested,
     /// Tried to pay to skip the exotic-shop wait while it's already open.
     ExoticShopOpen,
     #[allow(dead_code)]
@@ -901,6 +1414,13 @@ mod tests {
 
     fn ts() -> DateTime<Utc> {
         Utc.with_ymd_and_hms(2026, 5, 28, 9, 0, 0).unwrap()
+    }
+
+    /// Unlock one nest for free (nests start locked) so breeding tests that
+    /// aren't about the nest economy can drive `start_breeding` directly.
+    fn grant_nest(zoo: &mut Zoo) {
+        zoo.nests.push(Nest::new());
+        zoo.nest_count += 1;
     }
 
     #[test]
@@ -1005,8 +1525,9 @@ mod tests {
     fn claim_breeding_falls_back_to_freeform_without_habitat() {
         let mut zoo = Zoo::new(ts());
         zoo.habitats.clear(); // freeform: no habitats to place into
-        let a = zoo.spawn_animal_freeform("fox", 1, ts()).unwrap();
+        let a = zoo.spawn_animal_freeform("red_fox", 1, ts()).unwrap();
         let b = zoo.spawn_animal_freeform("treeFrog", 1, ts()).unwrap();
+        grant_nest(&mut zoo);
         let ends = zoo.start_breeding(a, b, ts()).unwrap();
         let later = ends + chrono::Duration::seconds(1);
         let claimed = zoo.claim_completed_breeding(a, later).unwrap();
@@ -1041,28 +1562,40 @@ mod tests {
     }
 
     #[test]
-    fn nest_purchase_cost_curve_and_cap() {
+    fn nest_unlock_mixes_coins_then_dna_up_to_cap() {
         let mut zoo = Zoo::new(ts());
         zoo.coins = 1_000_000;
-        // Starter has 1 nest. Buy three more to hit 4.
-        let level = zoo.buy_nest().unwrap();
-        assert_eq!(level, 2);
+        zoo.dna_helix = 1_000;
+        assert_eq!(zoo.nest_count, 0, "all nests start locked");
+        // First two are coin-gated.
+        assert_eq!(zoo.buy_nest().unwrap(), 1);
+        assert_eq!(zoo.buy_nest().unwrap(), 2);
+        assert_eq!(zoo.coins, 1_000_000 - (1_500 + 25_000));
+        // Last three are DNA-gated.
         assert_eq!(zoo.buy_nest().unwrap(), 3);
         assert_eq!(zoo.buy_nest().unwrap(), 4);
-        let err = zoo.buy_nest().unwrap_err();
-        assert!(matches!(err, ZooError::NestCapReached));
-        // Cost curve: 1500 + 65000 + 825000 = 891500.
-        assert_eq!(zoo.coins, 1_000_000 - 891_500);
+        assert_eq!(zoo.buy_nest().unwrap(), 5);
+        assert_eq!(zoo.dna_helix, 1_000 - (5 + 15 + 40));
+        // Sixth is refused.
+        assert!(matches!(zoo.buy_nest().unwrap_err(), ZooError::NestCapReached));
+        assert_eq!(zoo.nests.len(), 5);
     }
 
     #[test]
-    fn nest_purchase_rejects_when_too_poor() {
+    fn nest_unlock_rejects_when_too_poor() {
         let mut zoo = Zoo::new(ts());
+        // Too few coins for the first (coin-gated) nest.
         zoo.coins = 100;
-        let err = zoo.buy_nest().unwrap_err();
-        assert!(matches!(err, ZooError::NotEnoughCoins));
-        assert_eq!(zoo.nest_count, 1);
+        assert!(matches!(zoo.buy_nest().unwrap_err(), ZooError::NotEnoughCoins));
+        assert_eq!(zoo.nest_count, 0);
         assert_eq!(zoo.coins, 100);
+        // Afford the two coin nests, then fail the DNA-gated third.
+        zoo.coins = 1_000_000;
+        zoo.buy_nest().unwrap();
+        zoo.buy_nest().unwrap();
+        zoo.dna_helix = 1;
+        assert!(matches!(zoo.buy_nest().unwrap_err(), ZooError::NotEnoughDna));
+        assert_eq!(zoo.nest_count, 2);
     }
 
     #[test]
@@ -1070,10 +1603,11 @@ mod tests {
         let now = ts();
         let mut zoo = Zoo::new(now);
         zoo.coins = 100_000;
+        zoo.buy_nest().unwrap(); // one nest → only one pair can breed at a time
         // Set up two legal cross-species pairs (each with a pool).
         zoo.buy_habitat(HabitatTheme::Wetland, (4, 0)).unwrap();
         zoo.buy_habitat(HabitatTheme::Savanna, (8, 0)).unwrap();
-        let (_, fox) = zoo.buy_animal("fox", now).unwrap();
+        let (_, fox) = zoo.buy_animal("red_fox", now).unwrap();
         let (_, frog) = zoo.buy_animal("treeFrog", now).unwrap();
         zoo.start_breeding(fox, frog, now).unwrap();
         // Second cross-species pair attempts to claim a second nest.
@@ -1088,10 +1622,11 @@ mod tests {
         let now = ts();
         let mut zoo = Zoo::new(now);
         zoo.coins = 100_000;
+        zoo.buy_nest().unwrap();
         // Set up a crossbreed pair so a successful redeem *would* add to
         // discovered_recipes; cancelling must skip that.
         zoo.buy_habitat(HabitatTheme::Wetland, (4, 0)).unwrap();
-        let (_, fox) = zoo.buy_animal("fox", now).unwrap();
+        let (_, fox) = zoo.buy_animal("red_fox", now).unwrap();
         let (_, frog) = zoo.buy_animal("treeFrog", now).unwrap();
         zoo.start_breeding(fox, frog, now).unwrap();
         assert_eq!(zoo.active_breeding_pair_count(), 1);
@@ -1102,7 +1637,7 @@ mod tests {
         assert!(matches!(zoo.animals.get(&fox).unwrap().state, AnimalState::Idle));
         assert!(matches!(zoo.animals.get(&frog).unwrap().state, AnimalState::Idle));
         // No codex entry, only the two parent species exist.
-        assert!(zoo.animals.values().all(|a| a.species == "fox" || a.species == "treeFrog"));
+        assert!(zoo.animals.values().all(|a| a.species == "red_fox" || a.species == "treeFrog"));
         assert!(zoo.discovered_recipes.is_empty());
         // Nest is freed — a new pair can start immediately.
         zoo.start_breeding(fox, frog, now).unwrap();
@@ -1119,15 +1654,237 @@ mod tests {
     }
 
     #[test]
-    fn structure_cap_enforced() {
-        let mut zoo = Zoo::new(ts());
+    fn deposit_and_remove_round_trip_through_a_nest() {
+        let now = ts();
+        let mut zoo = Zoo::new(now);
         zoo.coins = 100_000;
-        // Starter Hay Bale counts as one; buy three more to hit 4.
-        for _ in 0..3 {
-            zoo.buy_structure("hay_bale", ts()).unwrap();
+        zoo.buy_nest().unwrap();
+        let (_, mouse) = zoo.buy_animal("field_mouse", now).unwrap();
+        let nest_id = zoo.nests[0].id;
+
+        zoo.deposit_in_nest(nest_id, mouse).unwrap();
+        assert!(zoo.animal_in_any_nest(mouse));
+        // Re-depositing the same animal is refused.
+        assert!(matches!(
+            zoo.deposit_in_nest(nest_id, mouse).unwrap_err(),
+            ZooError::AlreadyNested
+        ));
+        // Removing returns it and frees the slot.
+        let removed = zoo.remove_from_nest(nest_id, 0).unwrap();
+        assert_eq!(removed, mouse);
+        assert!(!zoo.animal_in_any_nest(mouse));
+    }
+
+    #[test]
+    fn nest_full_rejects_third_occupant() {
+        let now = ts();
+        let mut zoo = Zoo::new(now);
+        zoo.coins = 100_000;
+        zoo.buy_nest().unwrap();
+        // One-of-each: three *distinct* species so they're three distinct ids.
+        let a = zoo.spawn_animal_freeform("field_mouse", 1, now).unwrap();
+        let b = zoo.spawn_animal_freeform("red_fox", 1, now).unwrap();
+        let c = zoo.spawn_animal_freeform("lion", 1, now).unwrap();
+        let nest_id = zoo.nests[0].id;
+        zoo.deposit_in_nest(nest_id, a).unwrap();
+        zoo.deposit_in_nest(nest_id, b).unwrap();
+        assert!(matches!(
+            zoo.deposit_in_nest(nest_id, c).unwrap_err(),
+            ZooError::NestFull
+        ));
+    }
+
+    #[test]
+    fn nest_breed_starts_from_deposited_pair_and_blocks_removal() {
+        let now = ts();
+        let mut zoo = Zoo::new(now);
+        zoo.coins = 100_000;
+        zoo.buy_nest().unwrap();
+        zoo.buy_habitat(HabitatTheme::Wetland, (4, 0)).unwrap();
+        let (_, fox) = zoo.buy_animal("red_fox", now).unwrap();
+        let (_, frog) = zoo.buy_animal("treeFrog", now).unwrap();
+        let nest_id = zoo.nests[0].id;
+        zoo.deposit_in_nest(nest_id, fox).unwrap();
+        zoo.deposit_in_nest(nest_id, frog).unwrap();
+        assert!(matches!(zoo.nest_status(nest_id, now), NestStatus::ReadyToBreed));
+
+        zoo.nest_breed(nest_id, now).unwrap();
+        assert!(matches!(zoo.nest_status(nest_id, now), NestStatus::Breeding(_)));
+        // Occupants can't be yanked mid-breed.
+        assert!(matches!(
+            zoo.remove_from_nest(nest_id, 0).unwrap_err(),
+            ZooError::OccupantBreeding
+        ));
+    }
+
+    #[test]
+    fn nest_completion_releases_parents_and_collect_frees_offspring() {
+        let now = ts();
+        let mut zoo = Zoo::new(now);
+        zoo.coins = 100_000;
+        zoo.buy_habitat(HabitatTheme::Wetland, (4, 0)).unwrap();
+        let (_, fox) = zoo.buy_animal("red_fox", now).unwrap();
+        let (_, frog) = zoo.buy_animal("treeFrog", now).unwrap();
+        grant_nest(&mut zoo);
+        let nest_id = zoo.nests[0].id;
+        zoo.deposit_in_nest(nest_id, fox).unwrap();
+        zoo.deposit_in_nest(nest_id, frog).unwrap();
+        let ends = zoo.nest_breed(nest_id, now).unwrap();
+
+        // Nothing happens before the timer is up.
+        assert!(zoo.advance_nests(now).is_empty());
+
+        // On completion: parents auto-released, offspring left in the nest.
+        let hatched = zoo.advance_nests(ends);
+        assert_eq!(hatched.len(), 1);
+        assert_eq!(zoo.nests[0].occupants().len(), 0, "parents left the nest");
+        assert!(zoo.nests[0].offspring.is_some(), "offspring left in the nest");
+        assert!(matches!(zoo.animals[&fox].state, AnimalState::Idle));
+        assert!(matches!(zoo.animals[&frog].state, AnimalState::Idle));
+        assert!(matches!(zoo.nest_status(nest_id, ends), NestStatus::ReadyToCollect));
+
+        // Re-running advance is idempotent (offspring already pending).
+        assert!(zoo.advance_nests(ends).is_empty());
+
+        // Collecting frees the offspring into the zoo and empties the nest.
+        let off_id = zoo.nests[0].offspring.unwrap();
+        let (species, _is_hybrid) = zoo.nest_collect(nest_id, ends).unwrap();
+        assert!(zoo.animals.contains_key(&off_id), "offspring is an owned animal");
+        assert_eq!(zoo.animals[&off_id].species, species);
+        assert!(zoo.nests[0].offspring.is_none(), "nest emptied after collect");
+        // Collecting again errors — nothing left to collect.
+        assert!(zoo.nest_collect(nest_id, ends).is_err());
+    }
+
+    #[test]
+    fn nest_outcomes_lists_pool_with_discovery_flags() {
+        let now = ts();
+        let mut zoo = Zoo::new(now);
+        zoo.coins = 100_000;
+        zoo.buy_nest().unwrap();
+        zoo.buy_habitat(HabitatTheme::Wetland, (4, 0)).unwrap();
+        let (_, fox) = zoo.buy_animal("red_fox", now).unwrap();
+        let (_, frog) = zoo.buy_animal("treeFrog", now).unwrap();
+        let nest_id = zoo.nests[0].id;
+        zoo.deposit_in_nest(nest_id, fox).unwrap();
+        zoo.deposit_in_nest(nest_id, frog).unwrap();
+
+        let outcomes = zoo.nest_outcomes(nest_id);
+        assert!(!outcomes.is_empty(), "a valid cross should list outcomes");
+        // Parent species are always treated as discovered.
+        let fox_sp = zoo.animals.get(&fox).unwrap().species;
+        assert!(outcomes.iter().any(|(sp, _, disc)| *sp == fox_sp && *disc));
+        // Percentages sum to roughly 100 (integer floor may shave a point).
+        let sum: u32 = outcomes.iter().map(|(_, p, _)| p).sum();
+        assert!((97..=100).contains(&sum), "got {sum}");
+    }
+
+    #[test]
+    fn one_of_each_and_rank_advances_on_duplicates() {
+        let now = ts();
+        let mut zoo = Zoo::new(now);
+        // First acquisition creates the animal at Regular.
+        let id = zoo.spawn_animal_freeform("field_mouse", 1, now).unwrap();
+        assert_eq!(zoo.animals.len(), 1);
+        assert_eq!(zoo.animals[&id].stage, 0);
+        // Each further acquisition is a duplicate, never a second map entry.
+        for _ in 0..10 {
+            let dup = zoo.spawn_animal_freeform("field_mouse", 1, now).unwrap();
+            assert_eq!(dup, id, "one-of-each: same animal id");
+            assert_eq!(zoo.animals.len(), 1);
         }
-        let err = zoo.buy_structure("hay_bale", ts()).unwrap_err();
+        // 10 duplicates → Silver.
+        assert_eq!(*zoo.species_dupes.get("field_mouse").unwrap(), 10);
+        assert_eq!(zoo.animals[&id].stage, 1);
+        // Rank boosts income (Silver = ×1.5 over Regular).
+        let regular = Animal::new("field_mouse", now).rate_per_sec();
+        assert!((zoo.animals[&id].rate_per_sec() - regular * 1.5).abs() < 1e-9);
+        // Push to 30 duplicates → Gold.
+        for _ in 0..20 {
+            zoo.spawn_animal_freeform("field_mouse", 1, now).unwrap();
+        }
+        assert_eq!(zoo.animals[&id].stage, 2);
+    }
+
+    #[test]
+    fn sell_keeps_rank_and_reacquire_restores_it() {
+        let now = ts();
+        let mut zoo = Zoo::new(now);
+        let id = zoo.spawn_animal_freeform("field_mouse", 1, now).unwrap();
+        for _ in 0..10 {
+            zoo.spawn_animal_freeform("field_mouse", 1, now).unwrap();
+        }
+        assert_eq!(zoo.animals[&id].stage, 1); // Silver
+        // Selling removes the animal but keeps the species' Rank progress.
+        zoo.coins = 0;
+        let coins = zoo.sell_animal(id, now).unwrap();
+        assert!(coins > 0);
+        assert_eq!(zoo.coins, coins);
+        assert!(zoo.animals.is_empty());
+        assert_eq!(*zoo.species_dupes.get("field_mouse").unwrap(), 10);
+        // Re-acquiring restores the earned Rank (no increment for the rebuy).
+        let again = zoo.spawn_animal_freeform("field_mouse", 1, now).unwrap();
+        assert_eq!(zoo.animals[&again].stage, 1);
+        assert_eq!(*zoo.species_dupes.get("field_mouse").unwrap(), 10);
+    }
+
+    #[test]
+    fn sell_refused_while_nested() {
+        let now = ts();
+        let mut zoo = Zoo::new(now);
+        zoo.coins = 100_000;
+        zoo.buy_nest().unwrap();
+        let id = zoo.spawn_animal_freeform("field_mouse", 1, now).unwrap();
+        let nest_id = zoo.nests[0].id;
+        zoo.deposit_in_nest(nest_id, id).unwrap();
+        assert!(matches!(zoo.sell_animal(id, now).unwrap_err(), ZooError::AlreadyNested));
+    }
+
+    #[test]
+    fn feed_levels_up_to_thirty_cap() {
+        let now = ts();
+        let mut zoo = Zoo::new(now);
+        let id = zoo.spawn_animal_freeform("field_mouse", 1, now).unwrap();
+        zoo.food = 10_000_000;
+        for _ in 1..MAX_ANIMAL_LEVEL {
+            zoo.level_up_animal(id, now).unwrap();
+        }
+        assert_eq!(zoo.animals[&id].level, MAX_ANIMAL_LEVEL);
+        assert_eq!(MAX_ANIMAL_LEVEL, 30);
+        assert!(matches!(zoo.level_up_animal(id, now).unwrap_err(), ZooError::MaxLevel));
+    }
+
+    #[test]
+    fn food_structures_unlock_in_sequence_up_to_cap() {
+        let mut zoo = Zoo::new(ts());
+        zoo.coins = 1_000_000;
+        assert_eq!(zoo.structures.len(), 0, "all food structures start locked");
+        for n in 1..=MAX_FOOD_STRUCTURES {
+            assert_eq!(zoo.buy_food_structure(ts()).unwrap(), n);
+        }
+        let err = zoo.buy_food_structure(ts()).unwrap_err();
         assert!(matches!(err, ZooError::StructureCapReached));
+        assert_eq!(zoo.structures.len(), MAX_FOOD_STRUCTURES);
+    }
+
+    #[test]
+    fn food_structure_upgrade_and_collect() {
+        let now = ts();
+        let mut zoo = Zoo::new(now);
+        zoo.coins = 1_000_000;
+        zoo.buy_food_structure(now).unwrap();
+        let id = zoo.structures[0].id;
+        // Upgrade to the max level.
+        for _ in 1..MAX_STRUCTURE_LEVEL {
+            zoo.upgrade_structure(id, now).unwrap();
+        }
+        assert_eq!(zoo.structures[0].level, MAX_STRUCTURE_LEVEL);
+        assert!(matches!(zoo.upgrade_structure(id, now).unwrap_err(), ZooError::MaxLevel));
+        // Collect sweeps accrued food into the bank.
+        let later = now + chrono::Duration::seconds(120);
+        let gained = zoo.collect_food_structure(id, later);
+        assert!(gained > 0);
+        assert_eq!(zoo.food, gained);
     }
 
     #[test]
@@ -1139,11 +1896,12 @@ mod tests {
         let mut zoo = Zoo::new(now);
         zoo.coins = 10_000;
         zoo.buy_habitat(HabitatTheme::Wetland, (4, 0)).unwrap();
-        let (_, fox) = zoo.buy_animal("fox", now).unwrap();
+        let (_, fox) = zoo.buy_animal("red_fox", now).unwrap();
         let (_, frog) = zoo.buy_animal("treeFrog", now).unwrap();
+        grant_nest(&mut zoo);
 
         let ends_at = zoo.start_breeding(fox, frog, now).unwrap();
-        let max_solo = species::get("fox")
+        let max_solo = species::get("red_fox")
             .gestation_seconds
             .max(species::get("treeFrog").gestation_seconds);
         let cross = (ends_at - now).num_seconds() as u64;
@@ -1157,7 +1915,7 @@ mod tests {
         // The roll yields fox, treeFrog, or frox — all are legal.
         assert!(matches!(
             outcome.offspring_species,
-            "fox" | "treeFrog" | "frox"
+            "red_fox" | "treeFrog" | "frox"
         ));
         // Codex is only updated on a hybrid drop. DNA mirrors the same rule.
         if outcome.is_hybrid_drop {
@@ -1191,7 +1949,14 @@ mod tests {
         let mut zoo = Zoo::new(now);
         zoo.coins = 10_000;
         let (_, mouse_a) = zoo.buy_animal("field_mouse", now).unwrap();
-        let (_, mouse_b) = zoo.buy_animal("field_mouse", now).unwrap();
+        // One-of-each forbids owning two mice, but the SameSpecies guard must
+        // still hold — craft a second same-species animal directly to test it.
+        let mouse_b = {
+            let extra = Animal::new("field_mouse", now);
+            let id = extra.id;
+            zoo.animals.insert(id, extra);
+            id
+        };
         zoo.buy_habitat(HabitatTheme::Wetland, (4, 0)).unwrap();
         let (_, frog) = zoo.buy_animal("treeFrog", now).unwrap();
         zoo.buy_habitat(HabitatTheme::Savanna, (8, 0)).unwrap();
@@ -1214,7 +1979,8 @@ mod tests {
         ));
         // Different species with a pool: succeeds. Use lion+frog... wait, no
         // pool for that. Use fox+frog (has a pool) instead.
-        let (_, fox) = zoo.buy_animal("fox", now).unwrap();
+        let (_, fox) = zoo.buy_animal("red_fox", now).unwrap();
+        grant_nest(&mut zoo);
         zoo.start_breeding(fox, frog, now).unwrap();
         // Now `fox` is breeding; pairing it again returns NotIdle.
         assert!(matches!(
@@ -1233,8 +1999,9 @@ mod tests {
         let mut zoo = Zoo::new(now);
         zoo.coins = 10_000;
         zoo.buy_habitat(HabitatTheme::Wetland, (4, 0)).unwrap();
-        let (_, a) = zoo.buy_animal("fox", now).unwrap();
+        let (_, a) = zoo.buy_animal("red_fox", now).unwrap();
         let (_, b) = zoo.buy_animal("treeFrog", now).unwrap();
+        grant_nest(&mut zoo);
         let before = zoo.animals.len();
         let ends_at = zoo.start_breeding(a, b, now).unwrap();
         // While breeding, the two animals stop accruing.
@@ -1254,68 +2021,46 @@ mod tests {
         // Both parents are Idle again.
         assert!(matches!(zoo.animals.get(&a).unwrap().state, AnimalState::Idle));
         assert!(matches!(zoo.animals.get(&b).unwrap().state, AnimalState::Idle));
-        // One new animal exists (could be either parent or the hybrid).
-        assert_eq!(zoo.animals.len(), before + 1);
         // The outcome is one of the three pool entries.
         assert!(matches!(
             outcome.offspring_species,
-            "fox" | "treeFrog" | "frox"
+            "red_fox" | "treeFrog" | "frox"
         ));
+        // One-of-each: a hybrid (frox) is a brand-new animal; a parent outcome
+        // is already owned, so it advances that species' Rank instead.
+        if outcome.offspring_species == "frox" {
+            assert_eq!(zoo.animals.len(), before + 1);
+        } else {
+            assert_eq!(zoo.animals.len(), before);
+            assert_eq!(
+                zoo.species_dupes.get(outcome.offspring_species).copied(),
+                Some(1)
+            );
+        }
     }
 
     #[test]
-    fn claim_completed_breeding_errors_when_no_space_and_leaves_breeding_intact() {
-        // Pair fox + treeFrog. Even if the roll lands on Frox (Forest theme)
-        // or fox (Forest), the Forest habitat is full and the claim fails.
+    fn claim_completed_breeding_places_offspring_via_freeform_fallback() {
+        // With no compatible habitat space for the offspring, the claim still
+        // succeeds by spawning the critter freeform — the pair returns to Idle.
         let now = ts();
         let mut zoo = Zoo::new(now);
         zoo.coins = 100_000;
         zoo.buy_habitat(HabitatTheme::Wetland, (4, 0)).unwrap();
-        // Forest has capacity 3; fill it.
-        let (_, a) = zoo.buy_animal("fox", now).unwrap();
-        zoo.buy_animal("fox", now).unwrap();
-        zoo.buy_animal("fox", now).unwrap();
-        // Wetland gets the breeding partner.
+        let (_, a) = zoo.buy_animal("red_fox", now).unwrap();
         let (_, b) = zoo.buy_animal("treeFrog", now).unwrap();
-        assert_eq!(zoo.habitats[0].animal_ids.len(), 3);
+        // Pack the Forest habitat so a Forest-bound hybrid has to go freeform.
+        if let Some(forest) = zoo.habitats.iter_mut().find(|h| h.theme == HabitatTheme::Forest) {
+            while forest.animal_ids.len() < forest.capacity() {
+                forest.animal_ids.push(Uuid::new_v4());
+            }
+        }
+        grant_nest(&mut zoo);
         let ends_at = zoo.start_breeding(a, b, now).unwrap();
         let later = ends_at + chrono::Duration::seconds(1);
-        // The roll is deterministic from (a.id, b.id, ends_at). The outcome
-        // could be fox (Forest, full), treeFrog (Wetland, has room), or frox
-        // (Forest, full). For Wetland-bound outcomes the claim succeeds; we
-        // just need to verify that *if* claim fails the pair stays Breeding.
-        match zoo.claim_completed_breeding(a, later) {
-            Err(ZooError::NoHabitatWithSpace) => {
-                assert!(matches!(
-                    zoo.animals.get(&a).unwrap().state,
-                    AnimalState::Breeding { .. }
-                ));
-                // Upgrade the Forest habitat to free a slot.
-                let forest = zoo
-                    .habitats
-                    .iter()
-                    .find(|h| h.theme == HabitatTheme::Forest)
-                    .unwrap()
-                    .id;
-                let upg = zoo.start_habitat_upgrade(forest, later).unwrap();
-                let after = upg + chrono::Duration::seconds(1);
-                zoo.claim_habitat_upgrade(forest, after).unwrap();
-                zoo.claim_completed_breeding(a, after).unwrap();
-                assert!(matches!(
-                    zoo.animals.get(&a).unwrap().state,
-                    AnimalState::Idle
-                ));
-            }
-            Ok(_) => {
-                // Roll landed on a Wetland-eligible offspring (treeFrog) —
-                // the test still passes: the lifecycle ran cleanly.
-                assert!(matches!(
-                    zoo.animals.get(&a).unwrap().state,
-                    AnimalState::Idle
-                ));
-            }
-            Err(e) => panic!("unexpected error: {e:?}"),
-        }
+        zoo.claim_completed_breeding(a, later).unwrap();
+        assert!(matches!(zoo.animals.get(&a).unwrap().state, AnimalState::Idle));
+        assert!(matches!(zoo.animals.get(&b).unwrap().state, AnimalState::Idle));
     }
 
     #[test]
@@ -1352,8 +2097,9 @@ mod tests {
         let mut zoo = Zoo::new(now);
         zoo.coins = 10_000;
         zoo.buy_habitat(HabitatTheme::Wetland, (4, 0)).unwrap();
-        let (_, a) = zoo.buy_animal("fox", now).unwrap();
+        let (_, a) = zoo.buy_animal("red_fox", now).unwrap();
         let (_, b) = zoo.buy_animal("treeFrog", now).unwrap();
+        grant_nest(&mut zoo);
         zoo.start_breeding(a, b, now).unwrap();
         let err = zoo.send_animal_gift(a, now).unwrap_err();
         assert!(matches!(err, ZooError::NotIdle));
@@ -1366,20 +2112,19 @@ mod tests {
         let now = ts();
         let mut zoo = Zoo::new(now);
         zoo.coins = 10_000;
+        // One-of-each: distinct species, one of each.
         zoo.buy_animal("field_mouse", now).unwrap();
-        zoo.buy_animal("field_mouse", now).unwrap();
-        zoo.buy_animal("fox", now).unwrap();
+        zoo.buy_animal("red_fox", now).unwrap();
         let snap = zoo.build_shared_snapshot(now);
-        assert_eq!(snap.view.animal_count, 3);
+        assert_eq!(snap.view.animal_count, 2);
         let mouse_entry = snap
             .view
             .species_tally
             .iter()
             .find(|e| e.species_id == "field_mouse")
             .unwrap();
-        assert_eq!(mouse_entry.count, 2);
-        // Two mice at L1 each → total_level = 2.
-        assert_eq!(mouse_entry.total_level, 2);
+        assert_eq!(mouse_entry.count, 1);
+        assert_eq!(mouse_entry.total_level, 1);
     }
 
     #[test]
@@ -1416,7 +2161,7 @@ impl fmt::Display for ZooError {
             ZooError::UnknownStructure => "unknown structure",
             ZooError::UnknownStructureKind => "unknown structure kind",
             ZooError::HabitatCapReached => "max habitats of this theme owned (4)",
-            ZooError::StructureCapReached => "max structures owned (4)",
+            ZooError::StructureCapReached => "all 5 food structures already built",
             ZooError::NoHabitatWithSpace => "no room — buy or upgrade a habitat",
             ZooError::NotEnoughCoins => "not enough coins",
             ZooError::NotEnoughFood => "not enough food",
@@ -1435,6 +2180,10 @@ impl fmt::Display for ZooError {
             ZooError::UpgradeNotReady => "habitat upgrade has not finished yet",
             ZooError::AllNestsBusy => "all nests are in use — wait or buy another",
             ZooError::NestCapReached => "already own the max number of nests (4)",
+            ZooError::NestFull => "this nest is full",
+            ZooError::UnknownNest => "unknown nest",
+            ZooError::OccupantBreeding => "can't remove an animal mid-breed",
+            ZooError::AlreadyNested => "that animal is already in a nest",
             ZooError::ExoticShopOpen => "exotic shop is already open",
             ZooError::AlreadyClaimed => "gift already claimed",
         };

@@ -5,7 +5,7 @@
 use glam::{Vec2, vec2};
 
 use crate::game::habitat::{Habitat, footprint};
-use crate::input::{ActionFlags, ControllerIntent};
+use crate::game::intent::{ActionFlags, ControllerIntent};
 
 use super::avatar::{
     AFTERIMAGE_CAP, AFTERIMAGE_LIFE, Afterimage, AvatarState, DASH_COOLDOWN, DASH_DURATION,
@@ -211,7 +211,7 @@ pub fn default_behaviors() -> Vec<Box<dyn Behavior>> {
 mod tests {
     use super::*;
     use crate::game::avatar::{AVATAR_RADIUS, PlayerAvatar};
-    use crate::input::{ActionFlags, ControllerIntent};
+    use crate::game::intent::{ActionFlags, ControllerIntent};
     use uuid::Uuid;
 
     fn empty_world() -> Vec<Habitat> {

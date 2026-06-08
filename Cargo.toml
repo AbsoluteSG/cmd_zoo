@@ -4,6 +4,10 @@ version = "0.1.0"
 edition = "2024"
 description = "An idle-zoo game in Rust"
 
+[workspace]
+members = ["crates/cmd_zoo_core"]
+resolver = "2"
+
 [features]
 # Build with the Steam relay transport. Requires the Steamworks SDK to be
 # discoverable by the `steamworks-sys` crate at build time (steam_api.lib on
@@ -12,6 +16,7 @@ default = []
 steam = ["dep:steamworks"]
 
 [dependencies]
+cmd_zoo_core = { path = "crates/cmd_zoo_core" }
 macroquad = { version = "0.4", features = ["audio"] }
 # Pinned to the exact version macroquad re-exports so `glam::Vec2` and
 # `macroquad::math::Vec2` are the identical type (lets the headless domain use

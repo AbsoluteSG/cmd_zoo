@@ -6,6 +6,7 @@ pub mod biome;
 pub mod economy;
 pub mod exotic_shop;
 pub mod habitat;
+pub mod intent;
 pub mod merchant;
 pub mod npc;
 pub mod pedestal;

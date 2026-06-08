@@ -14,7 +14,10 @@
 use glam::{Vec2, vec2};
 
 use crate::game::world_chunks::{zoo_center, zoo_half_extent};
-use crate::render::view::POP_DURATION;
+
+/// Interaction "pop" animation duration (seconds). Kept in the core so the
+/// NPC sim is engine-free; the renderer has its own matching `view::POP_DURATION`.
+const POP_DURATION: f32 = 0.3;
 
 /// Idle bob speed (radians/sec).
 const BOB_RATE: f32 = 2.2;

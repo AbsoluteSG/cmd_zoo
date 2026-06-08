@@ -126,6 +126,7 @@ dependencies = [
  "anyhow",
  "base64",
  "chrono",
+ "cmd_zoo_core",
  "directories",
  "flate2",
  "fs2",
@@ -139,6 +140,25 @@ dependencies = [
  "tempfile",
  "uuid",
  "winresource",
+]
+
+[[package]]
+name = "cmd_zoo_core"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "base64",
+ "chrono",
+ "directories",
+ "flate2",
+ "fs2",
+ "glam",
+ "once_cell",
+ "qrcode",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "uuid",
 ]
 
 [[package]]

@@ -485,6 +485,12 @@ pub struct GameApp {
     /// The other player (`player_id`) whose interaction panel (`Screen::Player`)
     /// is open, if any.
     pub active_player: Option<Uuid>,
+    /// Render-only neighbouring zoos, keyed by their owner's `player_id`, each
+    /// at its own `plot_origin` on the shared hub. Phase 2 (additive): `self.zoo`
+    /// stays "my zoo" and these are read-only neighbours drawn alongside it; the
+    /// full authoritative `HashMap<player_id, Zoo>` arrives with the SpacetimeDB
+    /// model in Phase 4. Populated today only by the F4 debug neighbour.
+    pub peer_zoos: HashMap<Uuid, Zoo>,
 }
 
 /// Far-out zoom floor allowed only in biome-debug mode, so the whole 500k
@@ -583,7 +589,36 @@ impl GameApp {
             debug_biome: false,
             disconnect_reason: None,
             active_player: None,
+            peer_zoos: HashMap::new(),
         }
+    }
+
+    /// Toggle a simulated neighbouring zoo on the hub (F4 debug). Proves
+    /// multi-plot rendering locally: a second furnished plot at its own
+    /// `plot_origin` one plot-width east of home, drawn read-only alongside
+    /// `self.zoo`. Off by default so normal solo play is untouched.
+    fn toggle_debug_neighbor(&mut self, now: DateTime<Utc>) {
+        if !self.peer_zoos.is_empty() {
+            self.peer_zoos.clear();
+            self.set_status("Debug neighbour removed");
+            return;
+        }
+        let mut neighbor = Zoo::new(now);
+        // Sit one plot-width (plus a lane) east of home so the two plots don't
+        // touch. `plot_half_extent` is the same for both at level 0.
+        let gap = self.zoo.plot_half_extent() * 2.6;
+        neighbor.plot_origin = self.zoo.plot_origin + vec2(gap, 0.0);
+        // Furnish it a little so the plot reads as a lived-in neighbour: a few
+        // nests, a couple of food structures, and a pedestal on a tile.
+        neighbor.coins = 1_000_000;
+        neighbor.nest_count = 3;
+        neighbor.nests = (0..3).map(|_| crate::game::zoo::Nest::new()).collect();
+        let _ = neighbor.buy_food_structure(now);
+        let _ = neighbor.buy_food_structure(now);
+        neighbor.unplaced_pedestals = 1;
+        let _ = neighbor.place_pedestal((1, 1));
+        self.peer_zoos.insert(neighbor.player.id, neighbor);
+        self.set_status("Debug neighbour added (F4) — a second plot on the hub");
     }
 
     /// Attempt to join a friend's hosted zoo by `code`. Today this requires
@@ -1105,6 +1140,10 @@ impl GameApp {
         if self.debug_biome {
             self.handle_debug_input();
             return;
+        }
+        // F4 toggles a simulated neighbouring plot on the hub (Phase 2 de-risk).
+        if is_key_pressed(KeyCode::F4) {
+            self.toggle_debug_neighbor(now);
         }
 
         let mp = mouse_position();

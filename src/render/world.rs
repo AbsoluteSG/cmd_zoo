@@ -75,6 +75,9 @@ pub fn draw_scene(app: &mut GameApp, now: DateTime<Utc>) {
     // --- Zoo plot: tinted floor + fence outline marking the home enclosure -
     draw_zoo_plot(&cam, app.zoo.plot_origin, app.zoo.plot_half_extent());
 
+    // --- Neighbouring plots on the shared hub (read-only; Phase 2 de-risk) --
+    draw_peer_plots(app);
+
     // --- Breeding nests on the ground inside the plot ----------------------
     draw_nests(app, now);
     draw_food_structures(app, now);
@@ -632,12 +635,68 @@ fn draw_zoo_plot(cam: &Camera, center: Vec2, half: f32) {
     );
 }
 
+/// Draw each neighbouring plot on the shared hub (Phase 2 additive de-risk):
+/// the plot rectangle plus representative nest/food/pedestal markers and a
+/// placeholder avatar, all resolved from the peer zoo's own `plot_origin` via
+/// the shared tile grid. Read-only — no interaction prompts, since these aren't
+/// the local player's plot. Empty (and free) in normal play; populated only by
+/// the F4 debug neighbour until real peers arrive in Phase 4.
+fn draw_peer_plots(app: &GameApp) {
+    use crate::game::structure::MAX_FOOD_STRUCTURES;
+    use crate::game::zoo::MAX_NESTS;
+    let cam = app.camera;
+    for zoo in app.peer_zoos.values() {
+        draw_zoo_plot(&cam, zoo.plot_origin, zoo.plot_half_extent());
+
+        // Owned breeding nests as woven bowls.
+        for i in 0..MAX_NESTS as usize {
+            if i >= zoo.nest_count as usize {
+                continue;
+            }
+            let p = view::world_to_screen(zoo.nest_pos(i), &cam);
+            let (rx, ry) = (34.0 * cam.zoom, 20.0 * cam.zoom);
+            draw_ellipse(p.x, p.y + ry * 0.35, rx * 1.05, ry, 0.0, color_u8!(0, 0, 0, 60));
+            draw_ellipse(p.x, p.y, rx, ry, 0.0, color_u8!(120, 86, 54, 255));
+            draw_ellipse(p.x, p.y - ry * 0.18, rx * 0.78, ry * 0.7, 0.0, color_u8!(86, 60, 38, 255));
+        }
+
+        // Owned food structures as squat silos.
+        for i in 0..MAX_FOOD_STRUCTURES.min(zoo.structures.len()) {
+            let p = view::world_to_screen(zoo.food_structure_pos(i), &cam);
+            let (half_w, sh) = (26.0 * cam.zoom, 40.0 * cam.zoom);
+            draw_ellipse(p.x, p.y, half_w * 1.1, 9.0 * cam.zoom, 0.0, color_u8!(0, 0, 0, 60));
+            draw_rectangle(p.x - half_w, p.y - sh, half_w * 2.0, sh, color_u8!(150, 130, 78, 255));
+            draw_ellipse(p.x, p.y - sh, half_w, 8.0 * cam.zoom, 0.0, color_u8!(180, 158, 96, 255));
+        }
+
+        // Placed pedestals.
+        for ped in &zoo.pedestals {
+            let p = view::world_to_screen(zoo.tile_to_world(ped.tile), &cam);
+            draw_pedestal_shape(p, cam.zoom, color_u8!(150, 150, 165, 255));
+        }
+
+        // Placeholder neighbour avatar: a capped pillar just inside the top fence,
+        // so the plot reads as occupied without standing in for the real avatar
+        // rig (which arrives with networked peers in Phase 4).
+        let head = view::world_to_screen(
+            zoo.plot_origin + vec2(0.0, -zoo.plot_half_extent() * 0.25),
+            &cam,
+        );
+        draw_circle(head.x, head.y - 18.0 * cam.zoom, 10.0 * cam.zoom, color_u8!(232, 196, 160, 255));
+        draw_rectangle(
+            head.x - 9.0 * cam.zoom, head.y - 8.0 * cam.zoom,
+            18.0 * cam.zoom, 26.0 * cam.zoom,
+            color_u8!(90, 140, 200, 255),
+        );
+    }
+}
+
 /// Draw all five breeding-nest pads as woven bowls on the ground. Owned nests
 /// are tinted by status; still-locked pads render dim with a padlock, and the
 /// next purchasable one shows its coin/DNA price. A reach prompt appears when
 /// the avatar is close.
 fn draw_nests(app: &mut GameApp, now: DateTime<Utc>) {
-    use crate::game::zoo::{MAX_NESTS, NestCost, NestStatus, Zoo, nest_unlock_cost};
+    use crate::game::zoo::{MAX_NESTS, NestCost, NestStatus, nest_unlock_cost};
     let cam = app.camera;
     let apos = app.session.my_avatar().pos;
     let owned = app.zoo.nest_count as usize;
@@ -730,7 +789,6 @@ fn draw_nests(app: &mut GameApp, now: DateTime<Utc>) {
 /// [`draw_nests`].
 fn draw_food_structures(app: &GameApp, now: DateTime<Utc>) {
     use crate::game::structure::{MAX_FOOD_STRUCTURES, food_structure_unlock_cost};
-    use crate::game::zoo::Zoo;
     let cam = app.camera;
     let apos = app.session.my_avatar().pos;
     let owned = app.zoo.structures.len();

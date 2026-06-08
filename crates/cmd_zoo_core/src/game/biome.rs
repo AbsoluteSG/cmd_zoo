@@ -371,6 +371,7 @@ fn smoothstep(t: f32) -> f32 {
 
 /// Deterministic LCG RNG — exported so callers can drive the weighted roll
 /// with the same seed stream as the Poisson-disk placement.
+#[derive(Clone, Copy, Debug)]
 pub struct LcgRng(u64);
 
 impl LcgRng {

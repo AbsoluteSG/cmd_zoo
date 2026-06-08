@@ -3,6 +3,7 @@ pub mod animal;
 pub mod avatar;
 pub mod avatar_system;
 pub mod biome;
+pub mod biome_instance;
 pub mod catch;
 pub mod economy;
 pub mod gear;

@@ -1057,7 +1057,7 @@ impl GameApp {
             self.sync_world_to_zoo();
             for (idx, _species) in &hatched {
                 // Birth sparkle at the nest where it hatched.
-                self.particles.birth(crate::game::zoo::Zoo::nest_pos(*idx));
+                self.particles.birth(self.zoo.nest_pos(*idx));
             }
             self.set_status(if hatched.len() == 1 {
                 "An egg hatched — collect it from the nest!".to_string()
@@ -1815,7 +1815,7 @@ impl GameApp {
         let apos = self.session.my_avatar().pos;
         let mut best: Option<(f32, usize)> = None;
         for i in 0..crate::game::zoo::MAX_NESTS as usize {
-            let d = (Zoo::nest_pos(i) - apos).length_squared();
+            let d = (self.zoo.nest_pos(i) - apos).length_squared();
             if d <= INTERACT_RANGE * INTERACT_RANGE && best.map_or(true, |(bd, _)| d < bd) {
                 best = Some((d, i));
             }
@@ -1836,7 +1836,7 @@ impl GameApp {
         let apos = self.session.my_avatar().pos;
         let mut best: Option<(f32, usize)> = None;
         for i in 0..crate::game::structure::MAX_FOOD_STRUCTURES {
-            let d = (Zoo::food_structure_pos(i) - apos).length_squared();
+            let d = (self.zoo.food_structure_pos(i) - apos).length_squared();
             if d <= INTERACT_RANGE * INTERACT_RANGE && best.map_or(true, |(bd, _)| d < bd) {
                 best = Some((d, i));
             }
@@ -1868,10 +1868,10 @@ impl GameApp {
         let apos = self.session.my_avatar().pos;
         let nest = self
             .nearest_nest_slot()
-            .map(|i| ((Zoo::nest_pos(i) - apos).length_squared(), Pad::Nest(i)));
+            .map(|i| ((self.zoo.nest_pos(i) - apos).length_squared(), Pad::Nest(i)));
         let structure = self
             .nearest_structure_slot()
-            .map(|i| ((Zoo::food_structure_pos(i) - apos).length_squared(), Pad::Structure(i)));
+            .map(|i| ((self.zoo.food_structure_pos(i) - apos).length_squared(), Pad::Structure(i)));
         let mut best: Option<(f32, Pad)> = match (nest, structure) {
             (Some((dn, pn)), Some((ds, ps))) => Some(if dn <= ds { (dn, pn) } else { (ds, ps) }),
             (Some(x), None) | (None, Some(x)) => Some(x),

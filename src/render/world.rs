@@ -644,7 +644,7 @@ fn draw_nests(app: &mut GameApp, now: DateTime<Utc>) {
     // Nest sprite (assets/structures/nest.png); None → woven-bowl placeholder.
     let nest_tex = app.textures.structure("nest");
     for i in 0..MAX_NESTS as usize {
-        let world = Zoo::nest_pos(i);
+        let world = app.zoo.nest_pos(i);
         let p = view::world_to_screen(world, &cam);
         let rx = 34.0 * cam.zoom;
         let ry = 20.0 * cam.zoom;
@@ -735,7 +735,7 @@ fn draw_food_structures(app: &GameApp, now: DateTime<Utc>) {
     let apos = app.session.my_avatar().pos;
     let owned = app.zoo.structures.len();
     for i in 0..MAX_FOOD_STRUCTURES {
-        let world = Zoo::food_structure_pos(i);
+        let world = app.zoo.food_structure_pos(i);
         let p = view::world_to_screen(world, &cam);
         let half_w = 26.0 * cam.zoom;
         let h = 40.0 * cam.zoom;

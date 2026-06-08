@@ -86,16 +86,14 @@ impl Default for Nest {
 /// World positions of the (up to `MAX_NESTS`) nests, laid out in a row inset
 /// along the top edge of the home zoo plot. A nest's position is `positions[i]`
 /// for its index in `Zoo::nests`.
-pub fn nest_positions() -> [Vec2; MAX_NESTS as usize] {
-    let c = crate::game::world_chunks::zoo_center();
-    let half = crate::game::world_chunks::zoo_half_extent();
-    let row_y = c.y - half * 0.62;
+pub fn nest_positions(center: Vec2, half: f32) -> [Vec2; MAX_NESTS as usize] {
+    let row_y = center.y - half * 0.62;
     let span = half * 1.3;
     let n = MAX_NESTS as usize;
     let mut out = [Vec2::new(0.0, 0.0); MAX_NESTS as usize];
     for (i, p) in out.iter_mut().enumerate() {
         let t = i as f32 / (n as f32 - 1.0);
-        *p = Vec2::new(c.x - span * 0.5 + span * t, row_y);
+        *p = Vec2::new(center.x - span * 0.5 + span * t, row_y);
     }
     out
 }
@@ -103,16 +101,14 @@ pub fn nest_positions() -> [Vec2; MAX_NESTS as usize] {
 /// World positions of the (up to [`MAX_FOOD_STRUCTURES`]) food structures, laid
 /// out in a row along the **bottom** edge of the home plot (mirror of
 /// [`nest_positions`], which lines the top).
-pub fn food_structure_positions() -> [Vec2; MAX_FOOD_STRUCTURES] {
-    let c = crate::game::world_chunks::zoo_center();
-    let half = crate::game::world_chunks::zoo_half_extent();
-    let row_y = c.y + half * 0.62;
+pub fn food_structure_positions(center: Vec2, half: f32) -> [Vec2; MAX_FOOD_STRUCTURES] {
+    let row_y = center.y + half * 0.62;
     let span = half * 1.3;
     let n = MAX_FOOD_STRUCTURES;
     let mut out = [Vec2::new(0.0, 0.0); MAX_FOOD_STRUCTURES];
     for (i, p) in out.iter_mut().enumerate() {
         let t = i as f32 / (n as f32 - 1.0);
-        *p = Vec2::new(c.x - span * 0.5 + span * t, row_y);
+        *p = Vec2::new(center.x - span * 0.5 + span * t, row_y);
     }
     out
 }
@@ -191,6 +187,12 @@ pub struct Zoo {
     pub chunk_deltas: HashMap<(i32, i32), ChunkDelta>,
     /// Player-placed fast-travel waypoints (the home zoo is implicit). Added v14.
     pub waypoints: Vec<Waypoint>,
+    /// World-space centre of this zoo's plot. All plot-relative geometry (nests,
+    /// food structures, …) is laid out around this point. For a single-player /
+    /// solo zoo it's the world centre; on a shared hub each player's zoo gets a
+    /// distinct origin. Runtime-only (not yet persisted): set on construction and
+    /// load, and reassigned when a zoo is placed on a hub.
+    pub plot_origin: Vec2,
     /// Zoo expansion level (0 = starting plot). Drives the physical plot size
     /// (mirrored into `world_chunks`) and the global animal capacity. Added v16.
     pub zoo_level: u8,
@@ -332,6 +334,7 @@ impl Zoo {
             world_seed,
             chunk_deltas: HashMap::new(),
             waypoints: Vec::new(),
+            plot_origin: super::world_chunks::zoo_center(),
             zoo_level: 0,
             zoo_upgrade_finishes_at: None,
             last_saved_at: now,
@@ -418,15 +421,24 @@ impl Zoo {
 
     // ── Physical nests ──────────────────────────────────────────────────────
 
-    /// World position of the nest at `index` (derived from the zoo layout).
-    pub fn nest_pos(index: usize) -> Vec2 {
-        let positions = nest_positions();
+    /// Half this zoo's plot edge length, in world units (plot spans
+    /// `plot_origin ± plot_half_extent` on each axis). Derived from the zoo's own
+    /// expansion level, independent of the process-global plot geometry.
+    pub fn plot_half_extent(&self) -> f32 {
+        crate::game::world_chunks::zoo_tiles_for_level(self.zoo_level) as f32
+            * crate::game::world_chunks::ZOO_TILE_W
+            * 0.5
+    }
+
+    /// World position of the nest at `index`, laid out around this zoo's plot.
+    pub fn nest_pos(&self, index: usize) -> Vec2 {
+        let positions = nest_positions(self.plot_origin, self.plot_half_extent());
         positions[index.min(positions.len() - 1)]
     }
 
     /// World position of the food structure at `index`.
-    pub fn food_structure_pos(index: usize) -> Vec2 {
-        let positions = food_structure_positions();
+    pub fn food_structure_pos(&self, index: usize) -> Vec2 {
+        let positions = food_structure_positions(self.plot_origin, self.plot_half_extent());
         positions[index.min(positions.len() - 1)]
     }
 
@@ -604,7 +616,7 @@ impl Zoo {
     pub fn nested_animal_positions(&self) -> HashMap<Uuid, Vec2> {
         let mut out = HashMap::new();
         for (i, nest) in self.nests.iter().enumerate() {
-            let base = Self::nest_pos(i);
+            let base = self.nest_pos(i);
             for (slot, occ) in nest.slots.iter().enumerate() {
                 if let Some(id) = occ {
                     // Spread the two occupants either side of the nest centre.

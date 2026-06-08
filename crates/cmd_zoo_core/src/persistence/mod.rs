@@ -892,6 +892,9 @@ pub fn zoo_from_snapshot(s: ZooSnapshot) -> Result<LoadedZoo> {
             .into_iter()
             .map(|w| Waypoint { id: w.id, name: w.name, pos: vec2(w.x, w.y) })
             .collect(),
+        // Runtime plot origin defaults to the world centre; a hub placement
+        // reassigns it after load.
+        plot_origin: crate::game::world_chunks::zoo_center(),
         zoo_level: s.zoo_level.min(crate::game::zoo::MAX_ZOO_LEVEL),
         zoo_upgrade_finishes_at: s.zoo_upgrade_finishes_at,
         pedestals,

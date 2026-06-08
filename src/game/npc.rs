@@ -11,7 +11,7 @@
 //! hang off [`crate::app::GameApp::on_npc_event`] — see the TODOs there). New
 //! NPCs register in [`default_npcs`] and inherit all of this for free.
 
-use macroquad::math::{Vec2, vec2};
+use glam::{Vec2, vec2};
 
 use crate::game::world_chunks::{zoo_center, zoo_half_extent};
 use crate::render::view::POP_DURATION;

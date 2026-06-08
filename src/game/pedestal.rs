@@ -11,7 +11,7 @@
 //! widens).
 
 use chrono::{DateTime, Duration, Utc};
-use macroquad::math::{Vec2, vec2};
+use glam::{Vec2, vec2};
 use uuid::Uuid;
 
 use crate::game::world_chunks::{ZOO_TILE_W, zoo_center, zoo_tiles};

@@ -2,7 +2,7 @@
 //! dash or knockback later is purely additive — insert a new behavior into
 //! the chain rather than rewriting movement.
 
-use macroquad::math::{Vec2, vec2};
+use glam::{Vec2, vec2};
 
 use crate::game::habitat::{Habitat, footprint};
 use crate::input::{ActionFlags, ControllerIntent};

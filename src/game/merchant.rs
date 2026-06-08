@@ -4,7 +4,7 @@
 //! drop in by adding an [`StructureOffer`]. Bought items land in the hotbar
 //! inventory (e.g. `Zoo::unplaced_pedestals`) and are placed from there.
 
-use macroquad::math::{Vec2, vec2};
+use glam::{Vec2, vec2};
 
 use crate::game::world_chunks::{zoo_center, zoo_half_extent};
 

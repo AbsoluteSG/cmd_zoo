@@ -7,9 +7,10 @@
 //! species-specific escape pattern.  The caller drives `update` every frame
 //! and reads `fill_speed` to know how fast the capture circle should progress.
 
-use macroquad::math::{Vec2, vec2};
-use macroquad::rand;
+use glam::{Vec2, vec2};
 use uuid::Uuid;
+
+use crate::game::rng as rand;
 
 use crate::game::species::SpeciesId;
 use crate::game::world_chunks::{resolve_zoo_collision, WORLD_W, WORLD_H};

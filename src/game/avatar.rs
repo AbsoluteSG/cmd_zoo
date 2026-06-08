@@ -4,7 +4,7 @@
 //! `render::world`. State lives here rather than on the controller so a
 //! controller swap (keyboard ↔ remote, in M2) doesn't lose mid-action state.
 
-use macroquad::math::{Vec2, vec2};
+use glam::{Vec2, vec2};
 use uuid::Uuid;
 
 /// World units per second at full input.

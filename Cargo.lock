@@ -129,6 +129,7 @@ dependencies = [
  "directories",
  "flate2",
  "fs2",
+ "glam",
  "macroquad",
  "once_cell",
  "qrcode",

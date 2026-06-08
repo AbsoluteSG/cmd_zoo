@@ -16,8 +16,23 @@
 //!    A "no spawn" baseline weight keeps animal density sparse. The roller
 //!    picks one eligible entry or returns None.
 
-use macroquad::color::Color;
-use macroquad::math::{Vec2, vec2};
+use glam::{Vec2, vec2};
+
+/// Engine-free RGBA colour (0–1 channels). The renderer converts this to its own
+/// colour type at the draw boundary, keeping the biome generator headless.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Rgba {
+    pub r: f32,
+    pub g: f32,
+    pub b: f32,
+    pub a: f32,
+}
+
+impl Rgba {
+    pub const fn new(r: f32, g: f32, b: f32, a: f32) -> Self {
+        Self { r, g, b, a }
+    }
+}
 
 use crate::game::species::HabitatTheme;
 use crate::game::wild_animal::Moveset;
@@ -194,7 +209,7 @@ pub fn biome_at(pos: Vec2, seed: u64) -> HabitatTheme {
 
 /// Smoothly blended ground colour at `pos`. Averages the biome colour of a few
 /// nearby samples so biome boundaries read as gradients rather than hard edges.
-pub fn biome_color_at(pos: Vec2, seed: u64) -> Color {
+pub fn biome_color_at(pos: Vec2, seed: u64) -> Rgba {
     const O: f32 = 1400.0;
     let samples = [
         pos,
@@ -211,30 +226,30 @@ pub fn biome_color_at(pos: Vec2, seed: u64) -> Color {
         b += c.b;
     }
     let n = samples.len() as f32;
-    Color::new(r / n, g / n, b / n, 1.0)
+    Rgba::new(r / n, g / n, b / n, 1.0)
 }
 
 /// Per-biome ground colour (used by `biome_color_at` for blending).
-pub fn biome_color(theme: HabitatTheme) -> Color {
+pub fn biome_color(theme: HabitatTheme) -> Rgba {
     match theme {
-        HabitatTheme::Forest    => Color::new(0.275, 0.451, 0.267, 1.0), // dark forest green
-        HabitatTheme::Arctic    => Color::new(0.765, 0.855, 0.941, 1.0), // icy pale blue
-        HabitatTheme::Savanna   => Color::new(0.686, 0.627, 0.373, 1.0), // golden tan
-        HabitatTheme::Wetland   => Color::new(0.294, 0.451, 0.333, 1.0), // murky olive
-        HabitatTheme::Jungle    => Color::new(0.149, 0.373, 0.216, 1.0), // deep tropical
-        HabitatTheme::Ocean     => Color::new(0.216, 0.373, 0.608, 1.0), // cool blue
-        HabitatTheme::Farmland  => Color::new(0.608, 0.686, 0.412, 1.0), // light field
-        HabitatTheme::Desert    => Color::new(0.850, 0.780, 0.550, 1.0), // pale ochre sand
-        HabitatTheme::Tundra    => Color::new(0.660, 0.700, 0.700, 1.0), // frosted grey
-        HabitatTheme::Taiga     => Color::new(0.310, 0.440, 0.360, 1.0), // dark pine
-        HabitatTheme::Volcanic  => Color::new(0.260, 0.180, 0.180, 1.0), // basalt + ember
-        HabitatTheme::Badlands  => Color::new(0.660, 0.380, 0.260, 1.0), // rusty red
-        HabitatTheme::Beach     => Color::new(0.900, 0.840, 0.620, 1.0), // light sand
-        HabitatTheme::Highlands => Color::new(0.520, 0.540, 0.500, 1.0), // rocky grey-green
-        HabitatTheme::Mythical  => Color::new(0.620, 0.440, 0.780, 1.0), // violet
-        HabitatTheme::Void      => Color::new(0.100, 0.070, 0.150, 1.0), // near-black purple
-        HabitatTheme::Festive   => Color::new(0.800, 0.260, 0.340, 1.0), // crimson
-        HabitatTheme::Food      => Color::new(0.870, 0.560, 0.420, 1.0), // caramel/salmon
+        HabitatTheme::Forest    => Rgba::new(0.275, 0.451, 0.267, 1.0), // dark forest green
+        HabitatTheme::Arctic    => Rgba::new(0.765, 0.855, 0.941, 1.0), // icy pale blue
+        HabitatTheme::Savanna   => Rgba::new(0.686, 0.627, 0.373, 1.0), // golden tan
+        HabitatTheme::Wetland   => Rgba::new(0.294, 0.451, 0.333, 1.0), // murky olive
+        HabitatTheme::Jungle    => Rgba::new(0.149, 0.373, 0.216, 1.0), // deep tropical
+        HabitatTheme::Ocean     => Rgba::new(0.216, 0.373, 0.608, 1.0), // cool blue
+        HabitatTheme::Farmland  => Rgba::new(0.608, 0.686, 0.412, 1.0), // light field
+        HabitatTheme::Desert    => Rgba::new(0.850, 0.780, 0.550, 1.0), // pale ochre sand
+        HabitatTheme::Tundra    => Rgba::new(0.660, 0.700, 0.700, 1.0), // frosted grey
+        HabitatTheme::Taiga     => Rgba::new(0.310, 0.440, 0.360, 1.0), // dark pine
+        HabitatTheme::Volcanic  => Rgba::new(0.260, 0.180, 0.180, 1.0), // basalt + ember
+        HabitatTheme::Badlands  => Rgba::new(0.660, 0.380, 0.260, 1.0), // rusty red
+        HabitatTheme::Beach     => Rgba::new(0.900, 0.840, 0.620, 1.0), // light sand
+        HabitatTheme::Highlands => Rgba::new(0.520, 0.540, 0.500, 1.0), // rocky grey-green
+        HabitatTheme::Mythical  => Rgba::new(0.620, 0.440, 0.780, 1.0), // violet
+        HabitatTheme::Void      => Rgba::new(0.100, 0.070, 0.150, 1.0), // near-black purple
+        HabitatTheme::Festive   => Rgba::new(0.800, 0.260, 0.340, 1.0), // crimson
+        HabitatTheme::Food      => Rgba::new(0.870, 0.560, 0.420, 1.0), // caramel/salmon
     }
 }
 
@@ -242,7 +257,7 @@ pub fn biome_color(theme: HabitatTheme) -> Color {
 /// fine seeded noise so each biome reads as textured patches of related tones
 /// rather than one flat fill. Deterministic for a fixed `(pos, seed)`. Used by
 /// the world ground renderer and the biome-debug view.
-pub fn biome_tile_color(pos: Vec2, seed: u64) -> Color {
+pub fn biome_tile_color(pos: Vec2, seed: u64) -> Rgba {
     let base = biome_color_at(pos, seed);
     // Brightness wobble (±TONE_AMOUNT).
     let n = noise2d_seeded(pos.x, pos.y, TONE_SCALE, seed ^ 0x7_0E0);
@@ -250,7 +265,7 @@ pub fn biome_tile_color(pos: Vec2, seed: u64) -> Color {
     // Subtle warm/cool tint shift from an independent sample.
     let n2 = noise2d_seeded(pos.x + 1234.0, pos.y - 5678.0, TONE_SCALE * 1.7, seed ^ 0xABCD);
     let tint = (n2 - 0.5) * 2.0 * TONE_HUE;
-    Color::new(
+    Rgba::new(
         (base.r * b + tint).clamp(0.0, 1.0),
         (base.g * b).clamp(0.0, 1.0),
         (base.b * b - tint).clamp(0.0, 1.0),

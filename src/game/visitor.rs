@@ -6,7 +6,7 @@
 //! creates the record on first `Hello`.
 
 use chrono::{DateTime, Utc};
-use macroquad::math::{Vec2, vec2};
+use glam::{Vec2, vec2};
 use uuid::Uuid;
 
 use crate::game::species::SpeciesId;

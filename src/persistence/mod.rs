@@ -14,7 +14,7 @@ use crate::game::visitor::{GiftRecord, VisitorRecord};
 use crate::game::world_chunks::ChunkDelta;
 use crate::game::zoo::{Waypoint, world_seed_from_player};
 use crate::game::{Animal, AnimalState, Habitat, HabitatTheme, Structure, Zoo, species};
-use macroquad::math::vec2;
+use glam::vec2;
 use schema::*;
 
 /// Single-instance convenience API. The shared-instance fast path uses
@@ -1095,7 +1095,7 @@ mod tests {
         let now = Utc.with_ymd_and_hms(2026, 1, 1, 12, 0, 0).unwrap();
         let mut zoo = Zoo::new(now);
         let id = zoo
-            .add_waypoint("Oasis", macroquad::math::vec2(123_456.0, 654_321.0))
+            .add_waypoint("Oasis", glam::vec2(123_456.0, 654_321.0))
             .unwrap();
 
         let snap = snapshot_from_zoo(&zoo);
@@ -1375,7 +1375,7 @@ mod tests {
         let mut zoo = Zoo::new(now);
         let visitor_id = Uuid::new_v4();
         let mut v = VisitorRecord::new(visitor_id, "Buddy", now);
-        v.last_pos = macroquad::math::vec2(123.5, 678.25);
+        v.last_pos = glam::vec2(123.5, 678.25);
         v.gift_inbox.push(GiftRecord {
             id: Uuid::new_v4(),
             sender_id: Uuid::new_v4(),

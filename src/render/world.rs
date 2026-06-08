@@ -59,7 +59,7 @@ pub fn draw_scene(app: &mut GameApp, now: DateTime<Utc>) {
             if tile_cx < 0.0 || tile_cx > PLANE_W || tile_cy < 0.0 || tile_cy > PLANE_H {
                 continue;
             }
-            let color = biome::biome_tile_color(vec2(tile_cx, tile_cy), app.zoo.world_seed);
+            let color = biome_color(biome::biome_tile_color(vec2(tile_cx, tile_cy), app.zoo.world_seed));
             let (pos, size) = view::tile_rect(tx, ty, BTILE, &cam);
             // +1 px overlap prevents seams between tiles.
             draw_rectangle(pos.x, pos.y, size.x + 1.0, size.y + 1.0, color);
@@ -185,7 +185,7 @@ pub fn draw_biome_debug(app: &GameApp) {
             if cx < 0.0 || cx > PLANE_W || cy < 0.0 || cy > PLANE_H {
                 continue;
             }
-            let color = biome::biome_tile_color(vec2(cx, cy), seed);
+            let color = biome_color(biome::biome_tile_color(vec2(cx, cy), seed));
             let (pos, size) = view::tile_rect(tx, ty, btile, &cam);
             // +1 px overlap prevents seams between tiles.
             draw_rectangle(pos.x, pos.y, size.x + 1.0, size.y + 1.0, color);
@@ -1510,6 +1510,13 @@ fn draw_inspect_panel(app: &mut GameApp, now: DateTime<Utc>) {
             _ => {}
         }
     }
+}
+
+/// Convert the engine-free biome colour (`game::biome::Rgba`) into macroquad's
+/// `Color` at the draw boundary.
+#[inline]
+fn biome_color(c: crate::game::biome::Rgba) -> Color {
+    Color::new(c.r, c.g, c.b, c.a)
 }
 
 /// Draw `text` twice — a dark offset copy then the coloured text — so small

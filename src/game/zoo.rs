@@ -2,7 +2,7 @@
 use std::fmt;
 
 use chrono::{DateTime, Duration, Utc};
-use macroquad::math::Vec2;
+use glam::Vec2;
 use uuid::Uuid;
 
 use super::animal::{Animal, AnimalState, MAX_ANIMAL_LEVEL, animal_level_up_cost, animal_sell_value};

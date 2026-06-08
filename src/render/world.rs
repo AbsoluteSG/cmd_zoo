@@ -73,7 +73,7 @@ pub fn draw_scene(app: &mut GameApp, now: DateTime<Utc>) {
     super::grass::draw_grass(app, grass_atlas.as_ref(), app.grass_material.as_ref());
 
     // --- Zoo plot: tinted floor + fence outline marking the home enclosure -
-    draw_zoo_plot(&cam);
+    draw_zoo_plot(&cam, app.zoo.plot_origin, app.zoo.plot_half_extent());
 
     // --- Breeding nests on the ground inside the plot ----------------------
     draw_nests(app, now);
@@ -607,12 +607,12 @@ pub fn draw_deposit_overlay(app: &mut GameApp) {
 
 // ── Zoo plot (home enclosure) ─────────────────────────────────────────────────
 
-/// Draw the enclosed 9×9 home zoo: a subtle floor tint plus a fence outline so
-/// the player can always see where home ends and the wilds begin.
-fn draw_zoo_plot(cam: &Camera) {
-    use crate::game::world_chunks::{zoo_center, zoo_half_extent};
-    let c = zoo_center();
-    let half = zoo_half_extent();
+/// Draw an enclosed home zoo plot at `center` with edge half-length `half`: a
+/// subtle floor tint plus a fence outline so the player can always see where
+/// home ends and the wilds begin. Taking the plot geometry as parameters lets
+/// the same routine draw any plot on a shared hub, not just the world centre.
+fn draw_zoo_plot(cam: &Camera, center: Vec2, half: f32) {
+    let c = center;
     let tl = view::world_to_screen(vec2(c.x - half, c.y - half), cam);
     let br = view::world_to_screen(vec2(c.x + half, c.y + half), cam);
     let (w, h) = (br.x - tl.x, br.y - tl.y);
@@ -790,14 +790,11 @@ fn draw_food_structures(app: &GameApp, now: DateTime<Utc>) {
 /// is in progress — a translucent ghost snapped to the tile under the cursor
 /// (green when the tile is valid, red when it's off-plot or already taken).
 fn draw_pedestals(app: &GameApp, now: DateTime<Utc>) {
-    use crate::game::pedestal::{
-        pedestal_tile_in_bounds, pedestal_world, world_to_pedestal_tile,
-    };
     let cam = app.camera;
     let apos = app.session.my_avatar().pos;
 
     for ped in &app.zoo.pedestals {
-        let world = pedestal_world(ped.tile);
+        let world = app.zoo.tile_to_world(ped.tile);
         let p = view::world_to_screen(world, &cam);
         let near = (world - apos).length() <= crate::app::INTERACT_RANGE;
         draw_pedestal_shape(p, cam.zoom, color_u8!(150, 150, 165, 255));
@@ -821,13 +818,13 @@ fn draw_pedestals(app: &GameApp, now: DateTime<Utc>) {
     if let Some(placement) = app.placing {
         let (mx, my) = mouse_position();
         let world = view::screen_to_world(vec2(mx, my), &cam);
-        let tile = world_to_pedestal_tile(world);
+        let tile = app.zoo.world_to_tile(world);
         let ignore = match placement {
             crate::app::Placement::Move(id) => Some(id),
             crate::app::Placement::Hotbar => None,
         };
-        let valid = pedestal_tile_in_bounds(tile) && app.zoo.pedestal_tile_free(tile, ignore);
-        let p = view::world_to_screen(pedestal_world(tile), &cam);
+        let valid = app.zoo.tile_in_bounds(tile) && app.zoo.pedestal_tile_free(tile, ignore);
+        let p = view::world_to_screen(app.zoo.tile_to_world(tile), &cam);
         let tint = if valid {
             color_u8!(120, 235, 160, 160)
         } else {

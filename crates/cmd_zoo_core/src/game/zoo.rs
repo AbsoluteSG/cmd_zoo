@@ -10,9 +10,7 @@ use super::habitat::{
     Habitat, MAX_HABITAT_LEVEL, footprints_overlap, habitat_purchase_cost, habitat_upgrade_cost,
     habitat_upgrade_duration,
 };
-use super::pedestal::{
-    PEDESTAL_OFFLINE_CAP_MULT, Pedestal, pedestal_cost, pedestal_tile_in_bounds, pedestal_world,
-};
+use super::pedestal::{PEDESTAL_OFFLINE_CAP_MULT, Pedestal, pedestal_cost};
 use super::player::Player;
 use super::rank;
 use super::species::{self, HabitatTheme, SpeciesId};
@@ -46,7 +44,8 @@ pub struct Waypoint {
 
 /// A physical breeding nest sitting in the home zoo. Holds up to two deposited
 /// animals; breeding/ready state is derived from the occupants' `AnimalState`.
-/// Its world position is derived from its index via [`nest_positions`].
+/// Its world position is derived from its index via [`Zoo::nest_pos`], which
+/// resolves the nest's assigned plot tile onto the zoo's `plot_origin`.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Nest {
     pub id: Uuid,
@@ -81,36 +80,6 @@ impl Default for Nest {
     fn default() -> Self {
         Self::new()
     }
-}
-
-/// World positions of the (up to `MAX_NESTS`) nests, laid out in a row inset
-/// along the top edge of the home zoo plot. A nest's position is `positions[i]`
-/// for its index in `Zoo::nests`.
-pub fn nest_positions(center: Vec2, half: f32) -> [Vec2; MAX_NESTS as usize] {
-    let row_y = center.y - half * 0.62;
-    let span = half * 1.3;
-    let n = MAX_NESTS as usize;
-    let mut out = [Vec2::new(0.0, 0.0); MAX_NESTS as usize];
-    for (i, p) in out.iter_mut().enumerate() {
-        let t = i as f32 / (n as f32 - 1.0);
-        *p = Vec2::new(center.x - span * 0.5 + span * t, row_y);
-    }
-    out
-}
-
-/// World positions of the (up to [`MAX_FOOD_STRUCTURES`]) food structures, laid
-/// out in a row along the **bottom** edge of the home plot (mirror of
-/// [`nest_positions`], which lines the top).
-pub fn food_structure_positions(center: Vec2, half: f32) -> [Vec2; MAX_FOOD_STRUCTURES] {
-    let row_y = center.y + half * 0.62;
-    let span = half * 1.3;
-    let n = MAX_FOOD_STRUCTURES;
-    let mut out = [Vec2::new(0.0, 0.0); MAX_FOOD_STRUCTURES];
-    for (i, p) in out.iter_mut().enumerate() {
-        let t = i as f32 / (n as f32 - 1.0);
-        *p = Vec2::new(center.x - span * 0.5 + span * t, row_y);
-    }
-    out
 }
 
 /// Derived state of a nest for UI + parking.
@@ -419,7 +388,14 @@ impl Zoo {
         Ok(self.nest_count)
     }
 
-    // ── Physical nests ──────────────────────────────────────────────────────
+    // ── Plot tile grid ────────────────────────────────────────────────────────
+    //
+    // A zoo plot is a square grid of `ZOO_TILE_W`-wide tiles centred on
+    // `plot_origin`. Tile (0,0) is the plot centre and tile coordinates are
+    // centre-relative integers, so the grid re-bases cleanly onto any plot
+    // origin on a shared hub. Every durable plot object — breeding nests, food
+    // structures, pedestals — lives on a tile, so its world position derives
+    // from this single mapping rather than ad-hoc offset arithmetic.
 
     /// Half this zoo's plot edge length, in world units (plot spans
     /// `plot_origin ± plot_half_extent` on each axis). Derived from the zoo's own
@@ -430,16 +406,75 @@ impl Zoo {
             * 0.5
     }
 
-    /// World position of the nest at `index`, laid out around this zoo's plot.
-    pub fn nest_pos(&self, index: usize) -> Vec2 {
-        let positions = nest_positions(self.plot_origin, self.plot_half_extent());
-        positions[index.min(positions.len() - 1)]
+    /// Half-width of the plot in tiles: the valid tile range is `-r..=r` on each
+    /// axis (a `2r+1` square centred on tile 0). Derived from this zoo's own
+    /// expansion level.
+    pub fn plot_tile_radius(&self) -> i32 {
+        (crate::game::world_chunks::zoo_tiles_for_level(self.zoo_level) - 1) / 2
     }
 
-    /// World position of the food structure at `index`.
+    /// World-space centre of `tile` within this plot.
+    pub fn tile_to_world(&self, tile: (i32, i32)) -> Vec2 {
+        self.plot_origin
+            + Vec2::new(tile.0 as f32, tile.1 as f32) * crate::game::world_chunks::ZOO_TILE_W
+    }
+
+    /// Snap a world position to the nearest plot tile (centre-relative).
+    pub fn world_to_tile(&self, world: Vec2) -> (i32, i32) {
+        let rel = (world - self.plot_origin) / crate::game::world_chunks::ZOO_TILE_W;
+        (rel.x.round() as i32, rel.y.round() as i32)
+    }
+
+    /// True when `tile` lies on this plot's grid.
+    pub fn tile_in_bounds(&self, tile: (i32, i32)) -> bool {
+        let r = self.plot_tile_radius();
+        tile.0.abs() <= r && tile.1.abs() <= r
+    }
+
+    /// Spread `N` items evenly across the plot's tile row at `row_y`, inset one
+    /// tile from each side fence, returning centre-relative tile coords
+    /// left→right. Shared by the nest and food-structure rows.
+    fn row_tiles<const N: usize>(&self, row_y: i32) -> [(i32, i32); N] {
+        let edge = (self.plot_tile_radius() - 1).max(0);
+        let mut out = [(0, 0); N];
+        for (i, p) in out.iter_mut().enumerate() {
+            let x = if N <= 1 {
+                0
+            } else {
+                let t = i as f32 / (N as f32 - 1.0);
+                (-(edge as f32) + 2.0 * edge as f32 * t).round() as i32
+            };
+            *p = (x, row_y);
+        }
+        out
+    }
+
+    // ── Physical nests ──────────────────────────────────────────────────────
+
+    /// Centre-relative tiles of the (up to `MAX_NESTS`) breeding nests, laid in
+    /// a row inset one tile from the **top** fence.
+    pub fn nest_tiles(&self) -> [(i32, i32); MAX_NESTS as usize] {
+        let row_y = -(self.plot_tile_radius() - 1).max(0);
+        self.row_tiles(row_y)
+    }
+
+    /// Centre-relative tiles of the (up to [`MAX_FOOD_STRUCTURES`]) food
+    /// structures, mirrored in a row inset one tile from the **bottom** fence.
+    pub fn food_structure_tiles(&self) -> [(i32, i32); MAX_FOOD_STRUCTURES] {
+        let row_y = (self.plot_tile_radius() - 1).max(0);
+        self.row_tiles(row_y)
+    }
+
+    /// World position of the nest at `index`, on its assigned plot tile.
+    pub fn nest_pos(&self, index: usize) -> Vec2 {
+        let tiles = self.nest_tiles();
+        self.tile_to_world(tiles[index.min(tiles.len() - 1)])
+    }
+
+    /// World position of the food structure at `index`, on its assigned plot tile.
     pub fn food_structure_pos(&self, index: usize) -> Vec2 {
-        let positions = food_structure_positions(self.plot_origin, self.plot_half_extent());
-        positions[index.min(positions.len() - 1)]
+        let tiles = self.food_structure_tiles();
+        self.tile_to_world(tiles[index.min(tiles.len() - 1)])
     }
 
     /// True if `animal_id` currently sits in any nest slot.
@@ -660,7 +695,7 @@ impl Zoo {
         if self.unplaced_pedestals == 0 {
             return Err(ZooError::PedestalEmpty);
         }
-        if !pedestal_tile_in_bounds(tile) {
+        if !self.tile_in_bounds(tile) {
             return Err(ZooError::OutOfBounds);
         }
         if !self.pedestal_tile_free(tile, None) {
@@ -675,7 +710,7 @@ impl Zoo {
 
     /// Relocate pedestal `id` to `tile`. Free to do; validates bounds + overlap.
     pub fn move_pedestal(&mut self, id: Uuid, tile: (i32, i32)) -> Result<(), ZooError> {
-        if !pedestal_tile_in_bounds(tile) {
+        if !self.tile_in_bounds(tile) {
             return Err(ZooError::OutOfBounds);
         }
         if !self.pedestal_tile_free(tile, Some(id)) {
@@ -777,7 +812,7 @@ impl Zoo {
         let mut out = HashMap::new();
         for p in &self.pedestals {
             if let Some(id) = p.animal {
-                let w = pedestal_world(p.tile);
+                let w = self.tile_to_world(p.tile);
                 // Sit the critter just above the slab's centre.
                 out.insert(id, Vec2::new(w.x, w.y - 10.0));
             }
@@ -1799,6 +1834,52 @@ mod tests {
     fn grant_nest(zoo: &mut Zoo) {
         zoo.nests.push(Nest::new());
         zoo.nest_count += 1;
+    }
+
+    // ── Plot tile grid ────────────────────────────────────────────────────────
+
+    /// Tile (0,0) is the plot centre and snapping a tile's world centre back to
+    /// a tile round-trips exactly.
+    #[test]
+    fn world_to_tile_round_trips_tile_centres() {
+        let zoo = Zoo::new(ts());
+        assert_eq!(zoo.tile_to_world((0, 0)), zoo.plot_origin);
+        for tile in [(0, 0), (3, -2), (-4, 4), (1, -3)] {
+            assert_eq!(zoo.world_to_tile(zoo.tile_to_world(tile)), tile);
+        }
+    }
+
+    /// All durable plot geometry is anchored on `plot_origin`, so moving the
+    /// plot shifts every derived position by exactly the same delta — the
+    /// invariant a shared hub relies on to place each player's plot.
+    #[test]
+    fn plot_geometry_rebases_with_origin() {
+        let mut zoo = Zoo::new(ts());
+        let before_nest = zoo.nest_pos(0);
+        let before_food = zoo.food_structure_pos(0);
+        let before_tile = zoo.tile_to_world((2, -1));
+        let delta = Vec2::new(10_000.0, -7_500.0);
+        zoo.plot_origin += delta;
+        assert_eq!(zoo.nest_pos(0), before_nest + delta);
+        assert_eq!(zoo.food_structure_pos(0), before_food + delta);
+        assert_eq!(zoo.tile_to_world((2, -1)), before_tile + delta);
+        assert_eq!(zoo.tile_to_world((0, 0)), zoo.plot_origin);
+    }
+
+    /// Nests line the top fence row, food structures the bottom; both rows sit
+    /// on the plot grid and spread left→right.
+    #[test]
+    fn nest_and_food_rows_are_on_grid_and_separated() {
+        let zoo = Zoo::new(ts()); // level 0
+        let inset = zoo.plot_tile_radius() - 1;
+        let nests = zoo.nest_tiles();
+        let food = zoo.food_structure_tiles();
+        assert!(nests.iter().all(|t| t.1 == -inset));
+        assert!(food.iter().all(|t| t.1 == inset));
+        assert!(nests.iter().all(|t| zoo.tile_in_bounds(*t)));
+        assert!(food.iter().all(|t| zoo.tile_in_bounds(*t)));
+        assert!(nests.first().unwrap().0 < nests.last().unwrap().0);
+        assert!(food.first().unwrap().0 < food.last().unwrap().0);
     }
 
     #[test]

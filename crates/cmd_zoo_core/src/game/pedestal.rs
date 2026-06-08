@@ -6,15 +6,14 @@
 //! parked there the animal can't roam, follow, or be bred, but its income is
 //! swept into the wallet automatically whenever it fills — including offline.
 //!
-//! Geometry is stored as **centre-relative integer tile coordinates** so it
-//! survives zoo expansion (the plot centre is fixed; only the valid range
-//! widens).
+//! Geometry is stored as **centre-relative integer tile coordinates** on the
+//! owning zoo's plot grid, so it survives zoo expansion (the plot centre is
+//! fixed; only the valid range widens) and re-bases cleanly onto any plot
+//! origin on a shared hub. The tile↔world mapping and bounds check live on
+//! [`crate::game::zoo::Zoo`] (`tile_to_world`, `world_to_tile`, `tile_in_bounds`).
 
 use chrono::{DateTime, Duration, Utc};
-use glam::{Vec2, vec2};
 use uuid::Uuid;
-
-use crate::game::world_chunks::{ZOO_TILE_W, zoo_center, zoo_tiles};
 
 /// Hard cap on owned pedestals (placed + unplaced in the hotbar).
 pub const MAX_PEDESTALS: usize = 6;
@@ -40,7 +39,8 @@ pub fn pedestal_cooldown() -> Duration {
 #[derive(Clone, Debug)]
 pub struct Pedestal {
     pub id: Uuid,
-    /// Centre-relative tile coordinate: world = `zoo_center() + tile * ZOO_TILE_W`.
+    /// Centre-relative tile coordinate on the owning zoo's plot grid; resolve to
+    /// world space with [`crate::game::zoo::Zoo::tile_to_world`].
     pub tile: (i32, i32),
     /// The dedicated animal, if one has been placed on the pedestal.
     pub animal: Option<Uuid>,
@@ -85,23 +85,4 @@ pub fn pedestal_cost(owned: usize) -> Option<u64> {
         5 => Some(999),
         _ => None,
     }
-}
-
-/// World-space centre of the tile a pedestal at `tile` occupies.
-pub fn pedestal_world(tile: (i32, i32)) -> Vec2 {
-    zoo_center() + vec2(tile.0 as f32 * ZOO_TILE_W, tile.1 as f32 * ZOO_TILE_W)
-}
-
-/// Snap a world position to the nearest pedestal tile.
-pub fn world_to_pedestal_tile(world: Vec2) -> (i32, i32) {
-    let rel = (world - zoo_center()) / ZOO_TILE_W;
-    (rel.x.round() as i32, rel.y.round() as i32)
-}
-
-/// True when `tile` is inside the home plot (keeping the pedestal off the fence).
-pub fn pedestal_tile_in_bounds(tile: (i32, i32)) -> bool {
-    // Plot spans `zoo_tiles()` tiles centred on tile 0; the outermost ring of
-    // tiles sits on the fence, so allow up to one in from the edge.
-    let lim = (zoo_tiles() - 1) / 2;
-    tile.0.abs() <= lim && tile.1.abs() <= lim
 }

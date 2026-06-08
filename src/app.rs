@@ -1879,9 +1879,10 @@ impl GameApp {
         };
         // A placed pedestal wins if it's the closest interactable in range.
         if let Some(id) = self.nearest_pedestal() {
-            let d = (crate::game::pedestal::pedestal_world(
-                self.zoo.pedestals.iter().find(|p| p.id == id).unwrap().tile,
-            ) - apos)
+            let d = (self
+                .zoo
+                .tile_to_world(self.zoo.pedestals.iter().find(|p| p.id == id).unwrap().tile)
+                - apos)
                 .length_squared();
             if best.map_or(true, |(bd, _)| d < bd) {
                 best = Some((d, Pad::Pedestal(id)));
@@ -2090,8 +2091,8 @@ impl GameApp {
     fn try_place_pedestal(&mut self, mouse: Vec2, now: DateTime<Utc>) {
         let Some(placement) = self.placing else { return };
         let world = view::screen_to_world(mouse, &self.camera);
-        let tile = crate::game::pedestal::world_to_pedestal_tile(world);
-        if !crate::game::pedestal::pedestal_tile_in_bounds(tile) {
+        let tile = self.zoo.world_to_tile(world);
+        if !self.zoo.tile_in_bounds(tile) {
             self.set_status("that spot is off the plot");
             return;
         }
@@ -2165,7 +2166,7 @@ impl GameApp {
         let apos = self.session.my_avatar().pos;
         let mut best: Option<(f32, Uuid)> = None;
         for p in &self.zoo.pedestals {
-            let d = (crate::game::pedestal::pedestal_world(p.tile) - apos).length_squared();
+            let d = (self.zoo.tile_to_world(p.tile) - apos).length_squared();
             if d <= INTERACT_RANGE * INTERACT_RANGE && best.map_or(true, |(bd, _)| d < bd) {
                 best = Some((d, p.id));
             }

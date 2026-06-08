@@ -10,6 +10,7 @@
 //! pure-local construction with no transport.
 
 pub mod demo_bot;
+pub mod diag;
 pub mod loopback;
 pub mod protocol;
 pub mod session;

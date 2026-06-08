@@ -9,26 +9,27 @@
 //! steam_id_bytes)` so reinstalls don't lose their `VisitorRecord` at any
 //! host they've visited.
 //!
-//! Discovery: hosts create a private Steam lobby and stash the 6-char join
-//! code as `lobby_data["code"]`. Visitors enumerate lobbies filtered on
-//! that code and connect to the lobby owner's NetworkingSockets P2P
-//! endpoint on virtual port 0.
+//! Discovery: codeless. The host's share code *is* its SteamID (account id in
+//! base32, see [`steam_id_to_code`]); the visitor decodes it and opens a
+//! NetworkingSockets P2P connection straight to that SteamID on virtual port 0.
+//! No Steam lobby is involved — lobby matchmaking is unreliable on the shared
+//! 480 test app, and isn't needed when the code already names the host.
 
 #![allow(dead_code)]
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Result, anyhow};
 use steamworks::{
-    Client, ClientManager, LobbyId, LobbyType, Matchmaking, SteamId,
+    Client, ClientManager, SteamId,
     networking_sockets::{ListenSocket, NetConnection, NetworkingSockets},
     networking_types::{
         ListenSocketEvent, NetConnectionEnd, NetworkingIdentity, SendFlags,
     },
 };
 
-use super::protocol::{NetMessage, PeerId};
+use super::protocol::{JoinCode, NetMessage, PeerId};
 use super::transport::{NetEvent, NetTransport};
 
 /// Virtual port — both sides agree on 0. Higher ports let one app multiplex
@@ -37,12 +38,13 @@ const VIRTUAL_PORT: i32 = 0;
 /// Max in-flight messages drained per `poll`. Bounds frame budget.
 const POLL_BATCH: usize = 64;
 
-/// Host-side transport: owns the lobby + listen socket.
+/// Host-side transport: owns a P2P listen socket. Discovery is codeless —
+/// visitors connect straight to the host's SteamID, which is encoded in the
+/// share code (see [`steam_id_to_code`]) — so no Steam lobby is involved.
 pub struct SteamTransport {
     client: Client<ClientManager>,
     single: steamworks::SingleClient<ClientManager>,
     sockets: NetworkingSockets<ClientManager>,
-    matchmaking: Matchmaking<ClientManager>,
     role: Role,
     /// Live connections keyed by the local-numeric PeerId we expose to the
     /// session layer; we map back to NetConnection for sends.
@@ -58,7 +60,6 @@ pub struct SteamTransport {
 
 enum Role {
     Host {
-        lobby: LobbyId,
         listen: ListenSocket<ClientManager>,
     },
     Visitor {
@@ -67,26 +68,37 @@ enum Role {
 }
 
 impl SteamTransport {
-    /// Start hosting. Creates a private lobby tagged with `code` and a
-    /// NetworkingSockets listen endpoint.
-    pub fn host(code: &str) -> Result<Self> {
-        let (client, single) = Client::init().context("steam init")?;
+    /// Start hosting: open a P2P listen socket. No lobby — visitors reach us by
+    /// connecting straight to our SteamID, which is what the share code encodes
+    /// (see [`local_join_code`](Self::local_join_code)). This sidesteps Steam's
+    /// lobby matchmaking entirely (unreliable on the shared 480 test app).
+    pub fn host() -> Result<Self> {
+        crate::net_log!("HOST: initializing Steam client…");
+        let (client, single) = Client::init().map_err(|e| {
+            crate::net_log!("HOST: steam init FAILED: {e:?}");
+            anyhow!("steam init: {e:?}")
+        })?;
+        let steam_id = client.user().steam_id();
+        crate::net_log!(
+            "HOST: steam init ok (steam_id={}, code={})",
+            steam_id.raw(),
+            steam_id_to_code(steam_id)
+        );
         let sockets = client.networking_sockets();
-        let matchmaking = client.matchmaking();
-
-        let lobby = create_lobby_sync(&matchmaking, LobbyType::Private, 4)?;
-        matchmaking.set_lobby_data(lobby, "code", code);
 
         let listen = sockets
             .create_listen_socket_p2p(VIRTUAL_PORT, vec![])
-            .map_err(|e| anyhow!("create_listen_socket_p2p: {e:?}"))?;
+            .map_err(|e| {
+                crate::net_log!("HOST: create_listen_socket_p2p FAILED: {e:?}");
+                anyhow!("create_listen_socket_p2p: {e:?}")
+            })?;
+        crate::net_log!("HOST: listen socket open on virtual port {VIRTUAL_PORT}; ready for visitors");
 
         Ok(Self {
             client,
             single,
             sockets,
-            matchmaking,
-            role: Role::Host { lobby, listen },
+            role: Role::Host { listen },
             peers: HashMap::new(),
             peer_steam_ids: HashMap::new(),
             inbox: Arc::new(Mutex::new(Vec::new())),
@@ -94,19 +106,47 @@ impl SteamTransport {
         })
     }
 
-    /// Join a host by their 6-char code. Looks up the lobby, then opens a
-    /// P2P NetConnection to the lobby owner.
-    pub fn join(code: &str) -> Result<Self> {
-        let (client, single) = Client::init().context("steam init")?;
-        let sockets = client.networking_sockets();
-        let matchmaking = client.matchmaking();
+    /// The share code for this host: the local user's SteamID, encoded so a
+    /// visitor can reconstruct it and connect directly. Stable across sessions.
+    pub fn local_join_code(&self) -> JoinCode {
+        JoinCode(steam_id_to_code(self.client.user().steam_id()))
+    }
 
-        let lobby = find_lobby_by_code_sync(&matchmaking, code)?;
-        let owner: SteamId = matchmaking.lobby_owner(lobby);
+    /// Stable networked identity for the local user, derived from their SteamID.
+    /// Used as the session/avatar key so two players never collide — even when
+    /// testing from a copied `save.json` that shares `zoo.player.id`.
+    pub fn local_player_id(&self) -> uuid::Uuid {
+        player_id_from_steam_id(self.client.user().steam_id())
+    }
+
+    /// Join a host by their share code. The code *is* the host's SteamID, so we
+    /// decode it and open a P2P connection straight to them — no lobby lookup.
+    /// Steam routes the rendezvous; the relay carries the traffic.
+    pub fn join(code: &str) -> Result<Self> {
+        crate::net_log!("JOIN: initializing Steam client…");
+        let (client, single) = Client::init().map_err(|e| {
+            crate::net_log!("JOIN: steam init FAILED: {e:?}");
+            anyhow!("steam init: {e:?}")
+        })?;
+        let owner = code_to_steam_id(code).ok_or_else(|| {
+            crate::net_log!("JOIN: invalid share code {code:?}");
+            anyhow!("invalid join code")
+        })?;
+        crate::net_log!(
+            "JOIN: steam init ok (me={}); code {code} -> host steam_id={}",
+            client.user().steam_id().raw(),
+            owner.raw()
+        );
+        let sockets = client.networking_sockets();
+
         let identity = NetworkingIdentity::new_steam_id(owner);
         let conn = sockets
             .connect_p2p(identity, VIRTUAL_PORT, vec![])
-            .map_err(|e| anyhow!("connect_p2p: {e:?}"))?;
+            .map_err(|e| {
+                crate::net_log!("JOIN: connect_p2p to host FAILED: {e:?}");
+                anyhow!("connect_p2p: {e:?}")
+            })?;
+        crate::net_log!("JOIN: P2P connection opened to host {}; waiting for Welcome snapshot", owner.raw());
 
         let host_peer = PeerId(owner.raw());
         let mut peers = HashMap::new();
@@ -121,7 +161,6 @@ impl SteamTransport {
             client,
             single,
             sockets,
-            matchmaking,
             role: Role::Visitor { host_peer },
             peers,
             peer_steam_ids,
@@ -236,54 +275,86 @@ impl NetTransport for SteamTransport {
         for p in peers {
             self.disconnect(p);
         }
-        if let Role::Host { lobby, .. } = &self.role {
-            self.matchmaking.leave_lobby(*lobby);
-        }
+        // No lobby to leave — discovery is codeless P2P.
     }
 }
 
 // ──────────────────────────────────────────────────────────────────────────
-// Synchronous helpers wrapping Steam's async lobby APIs.
+// Share-code codec: the host's SteamID encoded as a short, typeable string.
 //
-// Steam callbacks fire on the main thread when we tick `single.run_callbacks`.
-// We poll-wait up to a small timeout — fine for a UI-driven action like
-// "create lobby" / "look up code", where the user can tolerate ~1s latency.
+// A user SteamID64 is `INDIVIDUAL_BASE + account_id`, where `account_id` is the
+// low 32 bits. We encode just the account id in base32 (7 chars) and rebuild
+// the full id assuming a normal individual/public account — true for every
+// human Steam user. This makes the code self-resolving: no lobby, no backend.
 // ──────────────────────────────────────────────────────────────────────────
 
-fn create_lobby_sync(
-    matchmaking: &Matchmaking<ClientManager>,
-    kind: LobbyType,
-    max_members: u32,
-) -> Result<LobbyId> {
-    use std::sync::mpsc;
-    let (tx, rx) = mpsc::channel();
-    matchmaking.create_lobby(kind, max_members, move |res| {
-        let _ = tx.send(res);
-    });
-    rx.recv_timeout(std::time::Duration::from_secs(5))
-        .map_err(|_| anyhow!("create_lobby timed out"))?
-        .map_err(|e| anyhow!("create_lobby error: {e:?}"))
+use super::protocol::CODE_LEN;
+
+/// Same Crockford-style base32 alphabet as `JoinCode`; the index is the digit.
+const CODE_ALPHABET: &[u8] = b"0123456789ABCDEFGHJKMNPQRSTVWXYZ";
+/// SteamID64 of account id 0 for an individual account in the public universe
+/// (`0x0110_0001_0000_0000`). Full id = this + account_id. `CODE_LEN` (7) base32
+/// digits cover the full 32-bit account id space.
+const STEAMID64_INDIVIDUAL_BASE: u64 = 76_561_197_960_265_728;
+
+/// Encode a user SteamID into its share code (account id, base32, [`CODE_LEN`]).
+fn steam_id_to_code(id: SteamId) -> String {
+    let mut v = id.account_id().raw();
+    let mut buf = [b'0'; CODE_LEN];
+    for slot in buf.iter_mut().rev() {
+        *slot = CODE_ALPHABET[(v % 32) as usize];
+        v /= 32;
+    }
+    String::from_utf8(buf.to_vec()).expect("base32 alphabet is ASCII")
 }
 
-fn find_lobby_by_code_sync(
-    matchmaking: &Matchmaking<ClientManager>,
-    code: &str,
-) -> Result<LobbyId> {
-    use std::sync::mpsc;
-    let (tx, rx) = mpsc::channel();
-    matchmaking.request_lobby_list(move |res| {
-        let _ = tx.send(res);
-    });
-    let lobbies = rx
-        .recv_timeout(std::time::Duration::from_secs(5))
-        .map_err(|_| anyhow!("lobby search timed out"))?
-        .map_err(|e| anyhow!("request_lobby_list error: {e:?}"))?;
-    for l in lobbies {
-        if matchmaking.lobby_data(l, "code").as_deref() == Some(code) {
-            return Ok(l);
+/// Decode a share code back into the host's SteamID. Case-insensitive; returns
+/// `None` if the code is empty or contains a character outside the alphabet.
+fn code_to_steam_id(code: &str) -> Option<SteamId> {
+    let mut account_id: u64 = 0;
+    let mut digits = 0;
+    for c in code.trim().bytes() {
+        let up = c.to_ascii_uppercase();
+        let idx = CODE_ALPHABET.iter().position(|&a| a == up)?;
+        account_id = account_id * 32 + idx as u64;
+        digits += 1;
+    }
+    if digits == 0 {
+        return None;
+    }
+    let raw = STEAMID64_INDIVIDUAL_BASE + (account_id & 0xFFFF_FFFF);
+    Some(SteamId::from_raw(raw))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn code_round_trips_through_steam_id() {
+        // A couple of real-world-shaped account ids plus edge values.
+        for raw in [
+            STEAMID64_INDIVIDUAL_BASE,
+            STEAMID64_INDIVIDUAL_BASE + 1,
+            76_561_198_220_452_768, // from a test machine
+            76_561_198_139_757_552, // the other test machine
+            STEAMID64_INDIVIDUAL_BASE + u32::MAX as u64,
+        ] {
+            let id = SteamId::from_raw(raw);
+            let code = steam_id_to_code(id);
+            assert_eq!(code.len(), CODE_LEN);
+            assert_eq!(code_to_steam_id(&code).map(|d| d.raw()), Some(raw));
         }
     }
-    Err(anyhow!("no lobby found with code {code}"))
+
+    #[test]
+    fn decode_is_case_insensitive_and_rejects_junk() {
+        let id = SteamId::from_raw(76_561_198_220_452_768);
+        let code = steam_id_to_code(id);
+        assert_eq!(code_to_steam_id(&code.to_lowercase()).map(|d| d.raw()), Some(id.raw()));
+        assert!(code_to_steam_id("").is_none());
+        assert!(code_to_steam_id("ABC!XYZ").is_none()); // '!' not in alphabet
+    }
 }
 
 /// Derive a stable visitor `player_id` from a SteamID. Same SteamID always

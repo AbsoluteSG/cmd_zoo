@@ -10,6 +10,9 @@ use super::habitat::{
     Habitat, MAX_HABITAT_LEVEL, footprints_overlap, habitat_purchase_cost, habitat_upgrade_cost,
     habitat_upgrade_duration,
 };
+use super::pedestal::{
+    PEDESTAL_OFFLINE_CAP_MULT, Pedestal, pedestal_cost, pedestal_tile_in_bounds, pedestal_world,
+};
 use super::player::Player;
 use super::rank;
 use super::species::{self, HabitatTheme, SpeciesId};
@@ -154,6 +157,12 @@ pub struct Zoo {
     /// animal per species at a time.
     pub species_dupes: HashMap<SpeciesId, u32>,
     pub structures: Vec<Structure>,
+    /// Placeable/moveable income stands. Each holds at most one dedicated animal
+    /// whose income is auto-swept into the wallet at cap. Added in schema v18.
+    pub pedestals: Vec<Pedestal>,
+    /// Unplaced pedestals held in the hotbar (bought from the merchant, not yet
+    /// dropped in the world). Added in schema v19.
+    pub unplaced_pedestals: u32,
     pub claimed_gifts: HashSet<Uuid>,
     /// Crossbreed recipes the player has unlocked by rolling a hybrid drop.
     /// Recorded only on `claim_completed_breeding` when offspring is not a
@@ -182,6 +191,13 @@ pub struct Zoo {
     pub chunk_deltas: HashMap<(i32, i32), ChunkDelta>,
     /// Player-placed fast-travel waypoints (the home zoo is implicit). Added v14.
     pub waypoints: Vec<Waypoint>,
+    /// Zoo expansion level (0 = starting plot). Drives the physical plot size
+    /// (mirrored into `world_chunks`) and the global animal capacity. Added v16.
+    pub zoo_level: u8,
+    /// When `Some`, an expansion from `zoo_level` to `zoo_level + 1` is in
+    /// flight, completing at this instant; the player claims it with
+    /// `claim_zoo_upgrade`. Mirrors the habitat upgrade two-phase pattern.
+    pub zoo_upgrade_finishes_at: Option<DateTime<Utc>>,
     pub last_saved_at: DateTime<Utc>,
 }
 
@@ -214,6 +230,57 @@ impl CollectResult {
 /// coins, the remaining three with DNA Helix.
 pub const MAX_NESTS: u8 = 5;
 
+// ── Zoo expansion (plot size + animal capacity) ───────────────────────────────
+//
+// The home zoo starts small and is expanded with coins. Each expansion grows
+// the physical plot (handled in `world_chunks`) *and* the global animal
+// capacity. Cost climbs on a moderate exponential curve; the build time climbs
+// on a gentle linear one — early expansions are quick and cheap, late ones are
+// a real investment without ballooning out of reach.
+
+/// Hard cap on zoo expansion level (0 = starting plot). The world is vast, so
+/// the progression is long: enough levels that capacity climbs all the way to
+/// ~1 000 — eventually enough to hold one of every animal as the roster grows.
+pub const MAX_ZOO_LEVEL: u8 = 50;
+/// Total animals a level-0 zoo can hold.
+pub const ZOO_CAPACITY_BASE: usize = 12;
+/// Extra animal capacity granted per expansion level. Linear growth: at
+/// [`MAX_ZOO_LEVEL`] the zoo holds `12 + 50·20 = 1012` animals.
+pub const ZOO_CAPACITY_PER_LEVEL: usize = 20;
+
+/// Max number of animals a zoo at `level` can hold.
+pub fn zoo_animal_capacity(level: u8) -> usize {
+    ZOO_CAPACITY_BASE + level as usize * ZOO_CAPACITY_PER_LEVEL
+}
+
+/// Coins to expand the zoo from `level` to `level + 1`. Moderate exponential
+/// tuned for the long 50-level track: `2000 · 1.20^level`, rounded — 2 000 →
+/// 2 400 → 2 880 → … reaching ~18M at the final level. Returns `None` once
+/// [`MAX_ZOO_LEVEL`] is reached.
+pub fn zoo_upgrade_cost(level: u8) -> Option<u64> {
+    if level >= MAX_ZOO_LEVEL {
+        return None;
+    }
+    let cost = 2_000.0 * 1.20_f64.powi(level as i32);
+    Some(cost.round() as u64)
+}
+
+/// Hard ceiling on a single expansion's build time: 4 real days.
+pub const ZOO_UPGRADE_MAX_SECS: i64 = 4 * 24 * 60 * 60;
+
+/// Real time to build the expansion from `level` to `level + 1`. Ramps gently
+/// across the 50-level track so it starts in minutes, climbs through hours, and
+/// only reaches the [4-day] (`ZOO_UPGRADE_MAX_SECS`) ceiling near the very top:
+/// `180s · 1.18^level`, clamped — ~3 min early, ~1.5 h around level 20, ~1.5
+/// days around level 40, then 4 days. Returns `None` past max level.
+pub fn zoo_upgrade_duration(level: u8) -> Option<Duration> {
+    if level >= MAX_ZOO_LEVEL {
+        return None;
+    }
+    let secs = (180.0 * 1.18_f64.powi(level as i32)).round() as i64;
+    Some(Duration::seconds(secs.min(ZOO_UPGRADE_MAX_SECS)))
+}
+
 /// What it costs to unlock a nest, paid in one currency or the other.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum NestCost {
@@ -240,6 +307,10 @@ impl Zoo {
         let starter_habitat = Habitat::new(HabitatTheme::Forest);
         let player = Player::new_default();
         let world_seed = world_seed_from_player(player.id);
+        // A fresh zoo starts at the base plot size; point the global plot
+        // geometry back at level 0 (e.g. when starting a new game after an
+        // expanded save was loaded).
+        super::world_chunks::set_zoo_level(0);
         Self {
             player,
             visitors: HashMap::new(),
@@ -251,6 +322,8 @@ impl Zoo {
             species_dupes: HashMap::new(),
             // All five food structures start locked, like nests.
             structures: Vec::new(),
+            pedestals: Vec::new(),
+            unplaced_pedestals: 0,
             claimed_gifts: HashSet::new(),
             discovered_recipes: HashSet::new(),
             nest_count: 0,
@@ -259,6 +332,8 @@ impl Zoo {
             world_seed,
             chunk_deltas: HashMap::new(),
             waypoints: Vec::new(),
+            zoo_level: 0,
+            zoo_upgrade_finishes_at: None,
             last_saved_at: now,
         }
     }
@@ -365,7 +440,7 @@ impl Zoo {
         if !self.animals.contains_key(&animal_id) {
             return Err(ZooError::UnknownAnimal);
         }
-        if self.animal_in_any_nest(animal_id) {
+        if self.animal_in_any_nest(animal_id) || self.animal_on_any_pedestal(animal_id) {
             return Err(ZooError::AlreadyNested);
         }
         let nest = self.nests.iter_mut().find(|n| n.id == nest_id).ok_or(ZooError::UnknownNest)?;
@@ -543,6 +618,189 @@ impl Zoo {
             }
         }
         out
+    }
+
+    // ── Pedestals (placeable income stands) ──────────────────────────────────
+
+    /// Total pedestals owned — placed plus unplaced (in the hotbar). Drives the
+    /// escalating cost index and the [`MAX_PEDESTALS`] cap.
+    pub fn pedestals_owned(&self) -> usize {
+        self.pedestals.len() + self.unplaced_pedestals as usize
+    }
+
+    /// Buy one pedestal from a structure merchant into the hotbar inventory,
+    /// paying its escalating DNA-Helix cost. Fails at the cap or when the player
+    /// can't afford it.
+    pub fn buy_pedestal_item(&mut self) -> Result<(), ZooError> {
+        let cost = pedestal_cost(self.pedestals_owned()).ok_or(ZooError::PedestalCapReached)?;
+        if self.dna_helix < cost {
+            return Err(ZooError::NotEnoughDna);
+        }
+        self.dna_helix -= cost;
+        self.unplaced_pedestals += 1;
+        Ok(())
+    }
+
+    /// Place one unplaced pedestal from the hotbar onto `tile`. Already paid for
+    /// at purchase, so no DNA is charged. Fails with `PedestalEmpty` when the
+    /// inventory is empty, or off-plot / overlapping. Returns the new id.
+    pub fn place_pedestal(&mut self, tile: (i32, i32)) -> Result<Uuid, ZooError> {
+        if self.unplaced_pedestals == 0 {
+            return Err(ZooError::PedestalEmpty);
+        }
+        if !pedestal_tile_in_bounds(tile) {
+            return Err(ZooError::OutOfBounds);
+        }
+        if !self.pedestal_tile_free(tile, None) {
+            return Err(ZooError::TileOccupied);
+        }
+        self.unplaced_pedestals -= 1;
+        let ped = Pedestal::new(tile);
+        let id = ped.id;
+        self.pedestals.push(ped);
+        Ok(id)
+    }
+
+    /// Relocate pedestal `id` to `tile`. Free to do; validates bounds + overlap.
+    pub fn move_pedestal(&mut self, id: Uuid, tile: (i32, i32)) -> Result<(), ZooError> {
+        if !pedestal_tile_in_bounds(tile) {
+            return Err(ZooError::OutOfBounds);
+        }
+        if !self.pedestal_tile_free(tile, Some(id)) {
+            return Err(ZooError::TileOccupied);
+        }
+        let ped = self
+            .pedestals
+            .iter_mut()
+            .find(|p| p.id == id)
+            .ok_or(ZooError::UnknownPedestal)?;
+        ped.tile = tile;
+        Ok(())
+    }
+
+    /// Remove pedestal `id` back into the hotbar inventory (DNA isn't lost — it
+    /// re-stacks). Its dedicated animal, if any, is freed to roam. Refused while
+    /// it still holds a locked animal.
+    pub fn remove_pedestal(&mut self, id: Uuid, now: DateTime<Utc>) -> Result<(), ZooError> {
+        let ped = self.pedestals.iter().find(|p| p.id == id).ok_or(ZooError::UnknownPedestal)?;
+        if ped.is_locked(now) {
+            return Err(ZooError::AnimalLocked);
+        }
+        self.pedestals.retain(|p| p.id != id);
+        self.unplaced_pedestals += 1;
+        Ok(())
+    }
+
+    /// Dedicate `animal_id` to pedestal `pedestal_id`. The animal must exist, be
+    /// idle, and not already be nested or on another pedestal; the pedestal must
+    /// be empty and not on cooldown. Starts the animal's 48h lock.
+    pub fn dedicate_animal(
+        &mut self,
+        pedestal_id: Uuid,
+        animal_id: Uuid,
+        now: DateTime<Utc>,
+    ) -> Result<(), ZooError> {
+        match self.animals.get(&animal_id) {
+            None => return Err(ZooError::UnknownAnimal),
+            Some(a) if !matches!(a.state, AnimalState::Idle) => return Err(ZooError::NotIdle),
+            _ => {}
+        }
+        if self.animal_in_any_nest(animal_id) || self.animal_on_any_pedestal(animal_id) {
+            return Err(ZooError::AlreadyNested);
+        }
+        let ped = self
+            .pedestals
+            .iter_mut()
+            .find(|p| p.id == pedestal_id)
+            .ok_or(ZooError::UnknownPedestal)?;
+        if ped.animal.is_some() {
+            return Err(ZooError::PedestalOccupied);
+        }
+        if ped.on_cooldown(now) {
+            return Err(ZooError::PedestalOnCooldown);
+        }
+        ped.animal = Some(animal_id);
+        ped.dedicated_at = Some(now);
+        Ok(())
+    }
+
+    /// Release the dedicated animal from pedestal `pedestal_id` and start the
+    /// pedestal's 24h cooldown. Refused while the animal is still locked.
+    /// Returns the freed animal id.
+    pub fn undedicate_animal(
+        &mut self,
+        pedestal_id: Uuid,
+        now: DateTime<Utc>,
+    ) -> Result<Uuid, ZooError> {
+        let ped = self
+            .pedestals
+            .iter_mut()
+            .find(|p| p.id == pedestal_id)
+            .ok_or(ZooError::UnknownPedestal)?;
+        if ped.is_locked(now) {
+            return Err(ZooError::AnimalLocked);
+        }
+        let id = ped.animal.take().ok_or(ZooError::PedestalEmpty)?;
+        ped.dedicated_at = None;
+        ped.cooldown_until = Some(now + super::pedestal::pedestal_cooldown());
+        Ok(id)
+    }
+
+    /// True if `animal_id` is currently dedicated to any pedestal.
+    pub fn animal_on_any_pedestal(&self, animal_id: Uuid) -> bool {
+        self.pedestals.iter().any(|p| p.animal == Some(animal_id))
+    }
+
+    /// True if no pedestal (other than `ignore`) occupies `tile`.
+    pub fn pedestal_tile_free(&self, tile: (i32, i32), ignore: Option<Uuid>) -> bool {
+        !self
+            .pedestals
+            .iter()
+            .any(|p| p.tile == tile && Some(p.id) != ignore)
+    }
+
+    /// Map of `animal_id → pedestal world position` for every dedicated animal,
+    /// so the render layer parks those critters on their stand.
+    pub fn pedestal_animal_positions(&self) -> HashMap<Uuid, Vec2> {
+        let mut out = HashMap::new();
+        for p in &self.pedestals {
+            if let Some(id) = p.animal {
+                let w = pedestal_world(p.tile);
+                // Sit the critter just above the slab's centre.
+                out.insert(id, Vec2::new(w.x, w.y - 10.0));
+            }
+        }
+        out
+    }
+
+    /// Sweep every dedicated animal that has filled to its (1×) storage cap into
+    /// the wallet, in its own currency. Called on the host's tick so pedestal
+    /// income auto-collects.
+    ///
+    /// Banking uses the **10× offline cap**: online, the tick runs every frame,
+    /// so an animal is swept the instant it crosses 1× and never accrues past it;
+    /// offline, no tick runs, so it banks up to 10× on the first tick back. We
+    /// inline the credit here (rather than calling `collect_animal`, which would
+    /// re-clamp to 1× and underpay), gating on the 1× fill point so short gaps
+    /// still collect.
+    pub fn collect_pedestals(&mut self, now: DateTime<Utc>) -> CollectResult {
+        let ids: Vec<Uuid> = self.pedestals.iter().filter_map(|p| p.animal).collect();
+        let mut result = CollectResult::default();
+        for id in ids {
+            let Some(a) = self.animals.get_mut(&id) else { continue };
+            if !a.is_at_cap(now) {
+                continue;
+            }
+            let gained = a.stored_at_with_cap(now, PEDESTAL_OFFLINE_CAP_MULT);
+            a.last_collected_at = now;
+            match species::get(a.species).income_kind {
+                species::IncomeKind::Coin => result.coins = result.coins.saturating_add(gained),
+                species::IncomeKind::DnaHelix => result.dna = result.dna.saturating_add(gained),
+            }
+        }
+        self.coins = self.coins.saturating_add(result.coins);
+        self.dna_helix = self.dna_helix.saturating_add(result.dna);
+        result
     }
 
     /// Possible offspring of nest `nest_id`, as `(species, percent, discovered)`
@@ -935,6 +1193,18 @@ impl Zoo {
         false
     }
 
+    /// Max number of animals this zoo can currently hold (grows with expansion).
+    pub fn max_animal_capacity(&self) -> usize {
+        zoo_animal_capacity(self.zoo_level)
+    }
+
+    /// True when the zoo is full and can't take a *new* species. Acquiring a
+    /// duplicate of an already-owned species never needs capacity (it just
+    /// advances Rank), so callers only consult this for brand-new animals.
+    pub fn at_animal_capacity(&self) -> bool {
+        self.animals.len() >= self.max_animal_capacity()
+    }
+
     /// Place a new animal (no cost). Used by gift claims and internally by
     /// `buy_animal`. If the species is already owned, this advances its Rank
     /// instead of adding a second copy (one-of-each). Returns
@@ -950,6 +1220,10 @@ impl Zoo {
             self.register_duplicate(def.id);
             let hid = self.habitat_id_of(existing).unwrap_or_else(Uuid::nil);
             return Ok((hid, existing));
+        }
+        // A brand-new species counts against the zoo-wide animal capacity.
+        if self.at_animal_capacity() {
+            return Err(ZooError::ZooAtCapacity);
         }
         let target_idx = self
             .habitats
@@ -1021,6 +1295,10 @@ impl Zoo {
             self.register_duplicate(def.id);
             return Ok(existing);
         }
+        // A brand-new species counts against the zoo-wide animal capacity.
+        if self.at_animal_capacity() {
+            return Err(ZooError::ZooAtCapacity);
+        }
         let mut animal = Animal::new(def.id, now);
         animal.level = level.clamp(1, MAX_ANIMAL_LEVEL);
         animal.stage = self.rank_of(def.id);
@@ -1076,11 +1354,28 @@ impl Zoo {
         if self.animal_in_any_nest(animal_id) {
             return Err(ZooError::AlreadyNested);
         }
+        // A pedestal animal can't be sold while it's still locked.
+        if self
+            .pedestals
+            .iter()
+            .any(|p| p.animal == Some(animal_id) && p.is_locked(now))
+        {
+            return Err(ZooError::AnimalLocked);
+        }
         // Sweep any pending at-cap income first so it isn't silently lost.
         let pending = self.animals.get(&animal_id).map_or(0, |a| a.stored_at(now));
         let value = animal_sell_value(base, level).saturating_add(pending);
         for h in self.habitats.iter_mut() {
             h.animal_ids.retain(|aid| *aid != animal_id);
+        }
+        // Selling a dedicated animal vacates its pedestal (past the lock by the
+        // check above) and starts that pedestal's cooldown.
+        for p in self.pedestals.iter_mut() {
+            if p.animal == Some(animal_id) {
+                p.animal = None;
+                p.dedicated_at = None;
+                p.cooldown_until = Some(now + super::pedestal::pedestal_cooldown());
+            }
         }
         self.animals.remove(&animal_id);
         self.coins = self.coins.saturating_add(value);
@@ -1212,6 +1507,52 @@ impl Zoo {
         Ok(self.habitats[idx].level)
     }
 
+    /// Coins to expand the zoo from its current level, or `None` at max size.
+    pub fn zoo_upgrade_cost(&self) -> Option<u64> {
+        zoo_upgrade_cost(self.zoo_level)
+    }
+
+    /// True while a zoo expansion is being built.
+    pub fn zoo_upgrade_in_progress(&self) -> bool {
+        self.zoo_upgrade_finishes_at.is_some()
+    }
+
+    /// Start a zoo expansion: charges coins immediately and sets the build
+    /// timer. Returns the instant it will be ready to claim. The plot and
+    /// capacity only actually grow on [`claim_zoo_upgrade`]. Mirrors the
+    /// habitat two-phase upgrade flow.
+    pub fn start_zoo_upgrade(&mut self, now: DateTime<Utc>) -> Result<DateTime<Utc>, ZooError> {
+        if self.zoo_upgrade_finishes_at.is_some() {
+            return Err(ZooError::ZooUpgradeInProgress);
+        }
+        let cost = zoo_upgrade_cost(self.zoo_level).ok_or(ZooError::ZooMaxSize)?;
+        let dur = zoo_upgrade_duration(self.zoo_level).ok_or(ZooError::ZooMaxSize)?;
+        if self.coins < cost {
+            return Err(ZooError::NotEnoughCoins);
+        }
+        self.coins -= cost;
+        let ends_at = now + dur;
+        self.zoo_upgrade_finishes_at = Some(ends_at);
+        Ok(ends_at)
+    }
+
+    /// Apply a finished zoo expansion: bumps the level (growing both the plot
+    /// size and the animal capacity), syncs the global plot geometry, and clears
+    /// the timer. Errors `ZooUpgradeNotReady` if no build is queued or the timer
+    /// is still running.
+    pub fn claim_zoo_upgrade(&mut self, now: DateTime<Utc>) -> Result<u8, ZooError> {
+        let Some(ends_at) = self.zoo_upgrade_finishes_at else {
+            return Err(ZooError::ZooUpgradeNotReady);
+        };
+        if ends_at > now {
+            return Err(ZooError::ZooUpgradeNotReady);
+        }
+        self.zoo_level = (self.zoo_level + 1).min(MAX_ZOO_LEVEL);
+        self.zoo_upgrade_finishes_at = None;
+        super::world_chunks::set_zoo_level(self.zoo_level);
+        Ok(self.zoo_level)
+    }
+
     pub fn upgrade_structure(
         &mut self,
         structure_id: Uuid,
@@ -1336,6 +1677,10 @@ impl Zoo {
         animal_id: Uuid,
         now: DateTime<Utc>,
     ) -> Result<u8, ZooError> {
+        // A dedicated pedestal animal produces income only — it can't be fed.
+        if self.animal_on_any_pedestal(animal_id) {
+            return Err(ZooError::AnimalLocked);
+        }
         let a = self.animals.get(&animal_id).ok_or(ZooError::UnknownAnimal)?;
         if a.level >= MAX_ANIMAL_LEVEL {
             return Err(ZooError::MaxLevel);
@@ -1402,6 +1747,27 @@ pub enum ZooError {
     AlreadyNested,
     /// Tried to pay to skip the exotic-shop wait while it's already open.
     ExoticShopOpen,
+    /// Tried to acquire a new species while the zoo is at its animal capacity.
+    ZooAtCapacity,
+    /// Tried to expand the zoo while an expansion is already being built.
+    ZooUpgradeInProgress,
+    /// `claim_zoo_upgrade` called with no build queued or while it's still running.
+    ZooUpgradeNotReady,
+    /// Tried to expand a zoo that's already at the maximum plot size.
+    ZooMaxSize,
+    /// Referenced a pedestal id that doesn't exist.
+    UnknownPedestal,
+    /// All pedestals are already placed.
+    PedestalCapReached,
+    /// Tried to dedicate an animal to a pedestal that already holds one.
+    PedestalOccupied,
+    /// Tried to remove a dedicated animal from an empty pedestal, or place a
+    /// pedestal with none left in the hotbar inventory.
+    PedestalEmpty,
+    /// Tried to release/sell an animal still inside its 48h pedestal lock.
+    AnimalLocked,
+    /// Tried to dedicate to a pedestal still inside its post-release cooldown.
+    PedestalOnCooldown,
     #[allow(dead_code)]
     AlreadyClaimed,
 }
@@ -2150,6 +2516,91 @@ mod tests {
         assert_eq!(placed.species, "field_mouse");
         assert_eq!(placed.level, 2);
     }
+
+    #[test]
+    fn zoo_capacity_and_cost_curves() {
+        // Capacity grows linearly with expansion level.
+        assert_eq!(zoo_animal_capacity(0), ZOO_CAPACITY_BASE);
+        assert_eq!(zoo_animal_capacity(1), ZOO_CAPACITY_BASE + ZOO_CAPACITY_PER_LEVEL);
+        assert_eq!(zoo_animal_capacity(2), ZOO_CAPACITY_BASE + 2 * ZOO_CAPACITY_PER_LEVEL);
+
+        // Capacity climbs linearly to ~1 000 over the full 50-level track.
+        assert!(zoo_animal_capacity(MAX_ZOO_LEVEL) >= 1_000);
+
+        // Cost is a moderate exponential across the long track.
+        assert_eq!(zoo_upgrade_cost(0), Some(2_000));
+        assert_eq!(zoo_upgrade_cost(1), Some(2_400));
+        assert_eq!(zoo_upgrade_cost(2), Some(2_880));
+        // Duration ramps minutes → hours → days, clamped to the 4-day ceiling
+        // only near the very top of the track.
+        assert_eq!(zoo_upgrade_duration(0).unwrap().num_seconds(), 180);
+        assert_eq!(zoo_upgrade_duration(1).unwrap().num_seconds(), 212);
+        assert_eq!(zoo_upgrade_duration(2).unwrap().num_seconds(), 251);
+        assert!(zoo_upgrade_duration(20).unwrap().num_seconds() < ZOO_UPGRADE_MAX_SECS);
+        assert_eq!(zoo_upgrade_duration(MAX_ZOO_LEVEL - 1).unwrap().num_seconds(), ZOO_UPGRADE_MAX_SECS);
+
+        // Both bottom out at the max level.
+        assert_eq!(zoo_upgrade_cost(MAX_ZOO_LEVEL), None);
+        assert_eq!(zoo_upgrade_duration(MAX_ZOO_LEVEL), None);
+    }
+
+    #[test]
+    fn freeform_spawn_rejected_at_capacity() {
+        let now = ts();
+        let mut zoo = Zoo::new(now);
+        // Spawn distinct purchasable species (freeform needs no habitat) until
+        // the base cap is reached; the next *new* species is rejected.
+        let ids: Vec<SpeciesId> = species::all_purchasable().map(|d| d.id).collect();
+        assert!(ids.len() > ZOO_CAPACITY_BASE, "need enough species to fill the zoo");
+        for &id in ids.iter().take(ZOO_CAPACITY_BASE) {
+            zoo.spawn_animal_freeform(id, 1, now).unwrap();
+        }
+        assert!(zoo.at_animal_capacity());
+        let err = zoo
+            .spawn_animal_freeform(ids[ZOO_CAPACITY_BASE], 1, now)
+            .unwrap_err();
+        assert!(matches!(err, ZooError::ZooAtCapacity));
+
+        // A duplicate of an already-owned species still works (advances Rank,
+        // needs no capacity).
+        let dup = zoo.spawn_animal_freeform(ids[0], 1, now).unwrap();
+        assert_eq!(dup, zoo.animal_id_for_species(ids[0]).unwrap());
+        assert_eq!(zoo.animals.len(), ZOO_CAPACITY_BASE);
+    }
+
+    #[test]
+    fn zoo_expansion_two_phase() {
+        let now = ts();
+        let mut zoo = Zoo::new(now);
+        zoo.coins = 10_000;
+        assert_eq!(zoo.zoo_level, 0);
+        let base_cap = zoo.max_animal_capacity();
+
+        // Starting an expansion charges coins and queues a build timer.
+        let cost = zoo.zoo_upgrade_cost().unwrap();
+        let ends_at = zoo.start_zoo_upgrade(now).unwrap();
+        assert_eq!(zoo.coins, 10_000 - cost);
+        assert!(zoo.zoo_upgrade_in_progress());
+
+        // Can't start a second build, and can't claim before it's done.
+        assert!(matches!(zoo.start_zoo_upgrade(now), Err(ZooError::ZooUpgradeInProgress)));
+        assert!(matches!(zoo.claim_zoo_upgrade(now), Err(ZooError::ZooUpgradeNotReady)));
+
+        // After the timer, claiming bumps the level and grows capacity.
+        let later = ends_at + Duration::seconds(1);
+        let new_level = zoo.claim_zoo_upgrade(later).unwrap();
+        assert_eq!(new_level, 1);
+        assert!(!zoo.zoo_upgrade_in_progress());
+        assert_eq!(zoo.max_animal_capacity(), base_cap + ZOO_CAPACITY_PER_LEVEL);
+    }
+
+    #[test]
+    fn zoo_expansion_rejects_when_broke() {
+        let now = ts();
+        let mut zoo = Zoo::new(now);
+        zoo.coins = 0;
+        assert!(matches!(zoo.start_zoo_upgrade(now), Err(ZooError::NotEnoughCoins)));
+    }
 }
 
 impl fmt::Display for ZooError {
@@ -2186,6 +2637,16 @@ impl fmt::Display for ZooError {
             ZooError::AlreadyNested => "that animal is already in a nest",
             ZooError::ExoticShopOpen => "exotic shop is already open",
             ZooError::AlreadyClaimed => "gift already claimed",
+            ZooError::ZooAtCapacity => "zoo is at capacity — expand it to hold more animals",
+            ZooError::ZooUpgradeInProgress => "the zoo is already being expanded",
+            ZooError::ZooUpgradeNotReady => "zoo expansion has not finished yet",
+            ZooError::ZooMaxSize => "the zoo is already at its maximum size",
+            ZooError::UnknownPedestal => "unknown pedestal",
+            ZooError::PedestalCapReached => "all pedestals are already placed",
+            ZooError::PedestalOccupied => "this pedestal already has a dedicated animal",
+            ZooError::PedestalEmpty => "no pedestal here / none left in your hotbar",
+            ZooError::AnimalLocked => "this animal is locked to its pedestal for 48h",
+            ZooError::PedestalOnCooldown => "this pedestal is cooling down — try again later",
         };
         f.write_str(s)
     }

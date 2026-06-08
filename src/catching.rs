@@ -7,8 +7,24 @@
 use macroquad::math::{Vec2, vec2};
 use uuid::Uuid;
 
-use crate::game::wild_animal::{WildAnimal, CATCH_SCREEN_RADIUS_BASE};
+use crate::game::species::SpeciesId;
+use crate::game::wild_animal::CATCH_SCREEN_RADIUS_BASE;
 use crate::render::view::{self, Camera, CRITTER_H};
+
+/// A render/catch-ready view of one wild animal, decoupled from the full
+/// `WildAnimal` so it can be fed either from the host's live world or from a
+/// visitor's host-streamed `WildAnimalPose`s — the catch system treats both
+/// identically.
+#[derive(Clone, Copy, Debug)]
+pub struct WildView {
+    pub id: Uuid,
+    pub species: SpeciesId,
+    pub pos: Vec2,
+    pub vel: Vec2,
+    pub catches: u32,
+    pub hidden: bool,
+    pub fill_speed: f32,
+}
 
 // ── Distance-based fill tuning ─────────────────────────────────────────────────
 
@@ -76,7 +92,7 @@ impl CatchState {
         &mut self,
         mouse_screen: Vec2,
         player_pos: Vec2,
-        animals: &[&WildAnimal],
+        animals: &[WildView],
         cam: &Camera,
         dt: f32,
     ) -> Option<Uuid> {
@@ -98,7 +114,7 @@ impl CatchState {
             // Continuing to hover over the same animal → advance fill.
             (Some(prev), Some(now)) if prev == now => {
                 let target = animals.iter().find(|a| a.id == now);
-                let base = target.map(|a| a.fill_speed()).unwrap_or(0.4);
+                let base = target.map(|a| a.fill_speed).unwrap_or(0.4);
                 let dist = target
                     .map(|a| (player_pos - a.pos).length())
                     .unwrap_or(0.0);

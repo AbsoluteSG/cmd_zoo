@@ -2,8 +2,10 @@
 //! world scene. Replaces the retired egui `ui` module. Pure rendering + input
 //! translation — all game rules live in `crate::game`.
 
+pub mod grass;
 pub mod menus;
 pub mod particles;
+pub mod terrain;
 pub mod textures;
 pub mod ui;
 pub mod view;

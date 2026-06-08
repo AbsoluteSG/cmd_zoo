@@ -1,7 +1,11 @@
 //! Sound-effect cache. `build.rs` embeds every file in `assets/sfx/` (ogg/wav)
 //! into a `(&str, &[u8])` table; sounds are decoded once at startup and played
-//! by id. Lookup is fuzzy (snake/camel/kebab insensitive), and missing ids are
-//! a silent no-op so the game runs before any audio art is added.
+//! by id. The id is the file stem, lookup is fuzzy (snake/camel/kebab
+//! insensitive), and missing ids are a silent no-op so the game runs before any
+//! audio art is added.
+//!
+//! Asset naming conventions (per-animal `{species_id}_poke`, global `*_sfx`) and
+//! how to add a clip are documented in [`assets/sfx/README.md`](../../assets/sfx/README.md).
 
 use std::collections::HashMap;
 

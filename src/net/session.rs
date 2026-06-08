@@ -8,12 +8,13 @@ use chrono::Utc;
 use macroquad::math::{Vec2, vec2};
 use uuid::Uuid;
 
+use crate::game::action::Action;
 use crate::game::avatar::{Facing, PlayerAvatar};
 use crate::game::avatar_system::{PLANE_H, PLANE_W};
 use crate::game::visitor::VisitorRecord;
 use crate::game::zoo::Zoo;
 
-use super::protocol::{AvatarPose, ByeReason, JoinCode, NetMessage, PeerId, WireIntent};
+use super::protocol::{AvatarPose, ByeReason, JoinCode, NetMessage, PeerId, WildAnimalPose, WireIntent};
 use super::transport::{NetEvent, NetTransport};
 
 pub const MAX_PEERS: usize = 3; // up to 3 visitors → 4-player zoo (host + 3)
@@ -52,6 +53,12 @@ pub struct Session {
     pub transport: Option<Box<dyn NetTransport>>,
     /// Monotonic tick counter for delta messages.
     pub tick: u32,
+    /// Set on the visitor when the host goes away (sent us `Bye`, or the
+    /// transport dropped). `GameApp` reads this to show the disconnect screen.
+    pub host_gone: Option<ByeReason>,
+    /// Visitor-side: the host's latest streamed wild animals. Replaces the
+    /// visitor's own (unrun) wild simulation for rendering and catching.
+    pub remote_wild: Vec<WildAnimalPose>,
 }
 
 impl Session {
@@ -64,6 +71,8 @@ impl Session {
             local_player_id,
             transport: None,
             tick: 0,
+            host_gone: None,
+            remote_wild: Vec::new(),
         }
     }
 
@@ -95,6 +104,21 @@ impl Session {
         self.role = SessionRole::Solo;
     }
 
+    /// Tear down a visiting session: politely tell the host we're leaving and
+    /// drop the transport. `GameApp` then rebuilds a fresh solo session from the
+    /// player's own (reloaded) zoo, so we don't bother reverting state here.
+    pub fn end_visiting(&mut self) {
+        if let SessionRole::Visiting { host_peer, .. } = self.role {
+            if let Some(t) = self.transport.as_mut() {
+                t.send(host_peer, NetMessage::Goodbye);
+                t.shutdown();
+            }
+        }
+        self.transport = None;
+        self.role = SessionRole::Solo;
+        self.host_gone = None;
+    }
+
     /// Construct a visiting session — the local player is a guest in someone
     /// else's zoo. `host_peer` is the transport-level handle for the host.
     pub fn visit(
@@ -117,7 +141,25 @@ impl Session {
             local_player_id,
             transport: Some(transport),
             tick: 0,
+            host_gone: None,
+            remote_wild: Vec::new(),
         }
+    }
+
+    /// Re-key the local player's identity (and their avatar) to `new_id`. Used
+    /// to switch from the save-derived `zoo.player.id` to a stable, unique
+    /// networked id (SteamID-derived) when a session goes online, so the host
+    /// and visitors never collide on the same `avatars` key.
+    pub fn set_local_player_id(&mut self, new_id: Uuid) {
+        let old = self.local_player_id;
+        if old == new_id {
+            return;
+        }
+        if let Some(mut a) = self.avatars.remove(&old) {
+            a.player_id = new_id;
+            self.avatars.insert(new_id, a);
+        }
+        self.local_player_id = new_id;
     }
 
     pub fn join_code(&self) -> Option<&JoinCode> {
@@ -144,39 +186,86 @@ impl Session {
         self.avatars.get(&id).expect("local avatar exists")
     }
 
-    /// Poll the transport and dispatch events. Returns any inbound `WireIntent`s
-    /// keyed by `player_id` so the host can hand them to per-peer
-    /// `RemoteController`s. (Visitor side returns an empty map.)
-    pub fn pump(&mut self, zoo: &mut Zoo) -> HashMap<Uuid, WireIntent> {
+    /// Poll the transport and dispatch events. Returns `(intents, commands)`:
+    /// inbound `WireIntent`s keyed by `player_id` (for per-peer
+    /// `RemoteController`s) and inbound visitor `Action`s keyed by `player_id`
+    /// (for the host to apply authoritatively). Both empty on the visitor side.
+    pub fn pump(&mut self, zoo: &mut Zoo) -> (HashMap<Uuid, WireIntent>, Vec<(Uuid, Action)>) {
         let mut intents: HashMap<Uuid, WireIntent> = HashMap::new();
+        let mut commands: Vec<(Uuid, Action)> = Vec::new();
         let Some(t) = self.transport.as_mut() else {
-            return intents;
+            return (intents, commands);
         };
         let events = t.poll();
         for ev in events {
             match ev {
-                NetEvent::PeerConnected(_) => { /* awaits Hello/Welcome */ }
+                NetEvent::PeerConnected(peer) => {
+                    // Visitor side: as soon as we're connected to the host, send
+                    // `Hello` so it registers us, spawns our avatar in its world,
+                    // and replies with `Welcome` + a full snapshot. Without this
+                    // the connection sits idle and nothing happens in-game.
+                    let greet = match &self.role {
+                        SessionRole::Visiting { host_peer, my_player_id, .. }
+                            if peer == *host_peer =>
+                        {
+                            Some((*host_peer, *my_player_id))
+                        }
+                        _ => None,
+                    };
+                    if let Some((host_peer, my_player_id)) = greet {
+                        let display_name = zoo.player.name.clone();
+                        if let Some(t) = self.transport.as_mut() {
+                            crate::net_log!(
+                                "JOIN: connected to host; sending Hello (player_id={my_player_id}, name={display_name})"
+                            );
+                            t.send(
+                                host_peer,
+                                NetMessage::Hello { player_id: my_player_id, display_name },
+                            );
+                        }
+                    }
+                }
                 NetEvent::PeerDisconnected(peer) => {
+                    // Visitor losing the host's connection → flag a disconnect so
+                    // GameApp can surface the screen and restore the own zoo.
+                    if matches!(&self.role, SessionRole::Visiting { host_peer, .. } if peer == *host_peer) {
+                        self.host_gone = Some(ByeReason::ConnectionLost);
+                    }
                     handle_disconnect(&mut self.role, &mut self.avatars, zoo, peer);
                 }
                 NetEvent::Message { from, msg } => {
-                    let new_local = handle_message(
-                        &mut self.role,
-                        &mut self.avatars,
-                        zoo,
-                        self.transport.as_mut().unwrap(),
-                        self.local_player_id,
-                        from,
-                        msg,
-                        &mut intents,
-                    );
-                    if let Some(id) = new_local {
-                        self.local_player_id = id;
+                    let from_host =
+                        matches!(&self.role, SessionRole::Visiting { host_peer, .. } if from == *host_peer);
+                    match msg {
+                        // Visitor-only host→client streams handled here so the
+                        // free `handle_message` can stay zoo/avatar focused.
+                        NetMessage::WildDelta { animals, .. } if from_host => {
+                            self.remote_wild = animals;
+                        }
+                        NetMessage::Bye(reason) if from_host => {
+                            self.host_gone = Some(reason);
+                        }
+                        other => {
+                            let new_local = handle_message(
+                                &mut self.role,
+                                &mut self.avatars,
+                                zoo,
+                                self.transport.as_mut().unwrap(),
+                                self.local_player_id,
+                                from,
+                                other,
+                                &mut intents,
+                                &mut commands,
+                            );
+                            if let Some(id) = new_local {
+                                self.local_player_id = id;
+                            }
+                        }
                     }
                 }
             }
         }
-        intents
+        (intents, commands)
     }
 
     /// Broadcast a full authoritative ZooSnapshot to every peer. Host-only.
@@ -191,6 +280,18 @@ impl Session {
         };
         let snapshot = crate::persistence::snapshot_from_zoo(zoo);
         t.broadcast(NetMessage::WorldSnapshot(snapshot), None);
+    }
+
+    /// Broadcast the host's nearby wild animals to all peers. Host-only.
+    pub fn broadcast_wild(&mut self, animals: Vec<WildAnimalPose>) {
+        let SessionRole::Host { .. } = &self.role else {
+            return;
+        };
+        let Some(t) = self.transport.as_mut() else {
+            return;
+        };
+        self.tick = self.tick.wrapping_add(1);
+        t.broadcast(NetMessage::WildDelta { tick: self.tick, animals }, None);
     }
 
     /// Broadcast the current avatar poses to all connected peers. Host-only.
@@ -263,6 +364,7 @@ fn handle_message(
     from: PeerId,
     msg: NetMessage,
     intents: &mut HashMap<Uuid, WireIntent>,
+    commands: &mut Vec<(Uuid, Action)>,
 ) -> Option<Uuid> {
     match (role, msg) {
         (
@@ -312,11 +414,22 @@ fn handle_message(
                     snapshot,
                 },
             );
+            crate::net_log!(
+                "HOST: got Hello → welcomed player_id={player_id} (peer {from:?}); now {} visitor(s)",
+                peers.len()
+            );
         }
         (SessionRole::Host { peers, .. }, NetMessage::Intent(intent)) => {
             if let Some(p) = peers.get_mut(&from) {
                 p.last_intent = intent;
                 intents.insert(p.player_id, intent);
+            }
+        }
+        (SessionRole::Host { peers, .. }, NetMessage::Command(action)) => {
+            // Surface the visitor's action for the host to apply authoritatively
+            // (GameApp drains `commands` after pump and runs `dispatch_remote`).
+            if let Some(p) = peers.get(&from) {
+                commands.push((p.player_id, action));
             }
         }
         (SessionRole::Host { peers, .. }, NetMessage::DropGift { species, level }) => {
@@ -370,6 +483,9 @@ fn handle_message(
         ) => {
             *my_player_id = your_player_id;
             *welcomed = true;
+            crate::net_log!(
+                "JOIN: received Welcome → player_id={your_player_id}, spawning at ({spawn_x:.0},{spawn_y:.0}); loading host's world"
+            );
             if let Some(mut a) = avatars.remove(&local_player_id) {
                 a.player_id = your_player_id;
                 a.pos = vec2(spawn_x, spawn_y);
@@ -406,13 +522,14 @@ fn handle_message(
 fn apply_snapshot_to_zoo(zoo: &mut Zoo, snapshot: crate::persistence::schema::ZooSnapshot) {
     match crate::persistence::zoo_from_snapshot(snapshot) {
         Ok(loaded) => {
-            // Preserve our own identity & visitors map — those are local to
-            // the *visitor* device, not authoritative on the host's side.
+            // Preserve only our own player identity (name/id) so our avatar and
+            // Hello keep working. We DO adopt the host's `visitors` map — while
+            // visiting, the shared zoo is the host's, and it carries our own
+            // granted permissions (read for the Sell button). Our real zoo's
+            // visitor records are offloaded and restored from disk on leave.
             let local_player = zoo.player.clone();
-            let local_visitors = std::mem::take(&mut zoo.visitors);
             *zoo = loaded.zoo;
             zoo.player = local_player;
-            zoo.visitors = local_visitors;
         }
         Err(e) => eprintln!("ignored world snapshot: {e}"),
     }
@@ -433,5 +550,36 @@ pub fn decode_facing(v: u8) -> Facing {
         1 => Facing::E,
         2 => Facing::S,
         _ => Facing::W,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rekey_local_id_moves_avatar_and_updates_pointer() {
+        let a = Uuid::new_v4();
+        let b = Uuid::new_v4();
+        let mut s = Session::solo(a, vec2(10.0, 20.0));
+        assert!(s.avatars.contains_key(&a));
+
+        s.set_local_player_id(b);
+        assert_eq!(s.local_player_id, b);
+        assert!(s.avatars.contains_key(&b), "avatar re-keyed to new id");
+        assert!(!s.avatars.contains_key(&a), "old key removed");
+        assert_eq!(s.avatars.len(), 1, "no duplicate avatar");
+        // Position/identity carried over.
+        assert_eq!(s.my_avatar().pos, vec2(10.0, 20.0));
+        assert_eq!(s.my_avatar().player_id, b);
+    }
+
+    #[test]
+    fn rekey_to_same_id_is_noop() {
+        let a = Uuid::new_v4();
+        let mut s = Session::solo(a, vec2(0.0, 0.0));
+        s.set_local_player_id(a);
+        assert_eq!(s.local_player_id, a);
+        assert_eq!(s.avatars.len(), 1);
     }
 }

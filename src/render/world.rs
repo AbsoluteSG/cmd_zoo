@@ -24,7 +24,10 @@ const DNA_PINK: Color = color_u8!(196, 120, 220, 255);
 
 /// Fraction of sprite height the art is nudged down so its visible base sits
 /// on the shadow (compensates for transparent padding at the bottom of the art).
-const FOOT_SINK: f32 = 0.16;
+const FOOT_SINK: f32 = 0.24;
+
+/// On-screen height (px, pre-zoom) of a breeding-nest sprite when art is present.
+const NEST_SPRITE_H: f32 = 128.0;
 
 /// Full world frame: scene then HUD. Used for the direct (no render-target)
 /// path. When rendering into an offscreen target for post-processing, call
@@ -63,22 +66,33 @@ pub fn draw_scene(app: &mut GameApp, now: DateTime<Utc>) {
         }
     }
 
+    // --- Grass: waving cosmetic field over the ground, under everything else -
+    // Fetch the tuft atlas (mut borrow of the texture cache ends here) before the
+    // immutable `draw_grass` borrow.
+    let grass_atlas = app.textures.grass_atlas();
+    super::grass::draw_grass(app, grass_atlas.as_ref(), app.grass_material.as_ref());
+
     // --- Zoo plot: tinted floor + fence outline marking the home enclosure -
     draw_zoo_plot(&cam);
 
     // --- Breeding nests on the ground inside the plot ----------------------
     draw_nests(app, now);
     draw_food_structures(app, now);
+    draw_pedestals(app, now);
+    draw_npcs(app);
 
     // --- Waypoint beacons: glowing beams on the ground ---------------------
     draw_waypoint_beams(app);
 
-    // --- Critters + every session avatar, depth-sorted by screen-Y (feet) -
-    // All avatars (host + visitors) join the same painter's-algorithm pass
-    // so habitats and critters can occlude them correctly.
+    // --- Terrain props + critters + every session avatar, depth-sorted by
+    // screen-Y (feet). Props (rocks/plants/trees scattered by world-gen) join the
+    // same painter's-algorithm pass so a tree correctly occludes — or is occluded
+    // by — a passing critter or avatar.
+    let props = super::terrain::gather(app.zoo.world_seed, tx0, tx1, ty0, ty1);
     enum Item {
         Critter(usize),
         Avatar(uuid::Uuid),
+        Prop(usize),
     }
     let mut order: Vec<(f32, Item)> = app
         .critters
@@ -88,6 +102,9 @@ pub fn draw_scene(app: &mut GameApp, now: DateTime<Utc>) {
         .collect();
     for (id, a) in app.session.avatars.iter() {
         order.push((a.pos.y, Item::Avatar(*id)));
+    }
+    for (i, p) in props.iter().enumerate() {
+        order.push((p.world.y, Item::Prop(i)));
     }
     order.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
 
@@ -99,6 +116,7 @@ pub fn draw_scene(app: &mut GameApp, now: DateTime<Utc>) {
             Item::Critter(i) => {
                 let c = &app.critters[i];
                 let (sp, pos, dir, aid, pop) = (c.species, c.pos, c.dir, c.animal_id, c.pop);
+                let (bob_phase, bob_amp) = (c.bob_phase, c.bob_amp);
                 let at_cap = app
                     .zoo
                     .animals
@@ -109,13 +127,19 @@ pub fn draw_scene(app: &mut GameApp, now: DateTime<Utc>) {
                 let (icon_id, fallback) = income_icon(sp);
                 let icon = app.textures.icon(icon_id);
                 let scale = view::pop_scale(pop);
-                draw_critter(pos, dir, tex.as_ref(), icon.as_ref(), fallback, at_cap, scale, WHITE, &cam);
+                draw_critter(pos, dir, tex.as_ref(), icon.as_ref(), fallback, at_cap, scale, WHITE, bob_phase, bob_amp, &cam);
             }
             Item::Avatar(id) => {
                 // Procedural toon-ball avatar (no sprite asset needed).
                 if let Some(a) = app.session.avatars.get(&id) {
                     draw_avatar(a, &cam);
                 }
+            }
+            Item::Prop(i) => {
+                let p = &props[i];
+                let (world, scale, flip) = (p.world, p.scale, p.flip);
+                let tex = app.textures.terrain(p.id);
+                draw_prop(world, tex.as_ref(), scale, flip, &cam);
             }
         }
     }
@@ -401,6 +425,8 @@ fn draw_critter(
     at_cap: bool,
     scale: f32,
     tint: Color,
+    bob_phase: f32,
+    bob_amp: f32,
     cam: &Camera,
 ) {
     // Feet land on the projected ground position; the sprite stands up from it.
@@ -412,21 +438,33 @@ fn draw_critter(
     // Art faces left by default: mirror X when moving right.
     let flip_x = dir.x > 0.0;
 
-    // Shadow sits on the ground point, just under the sprite's base.
-    draw_ellipse(feet.x, feet.y, base_h * 0.30, base_h * 0.10, 0.0, SHADOW);
+    // Walk bounce: a volume-preserving squash/stretch plus a small hop, scaled
+    // by the smoothed walk intensity. The sprite is anchored at its base so the
+    // feet stay planted while the body stretches up (top of the bounce) and
+    // squashes down (landing) — no UV cropping needed.
+    let bob = bob_phase.sin();
+    let sy = 1.0 + bob * 0.08 * bob_amp; // tall up-beat, flat on landing
+    let sx = 1.0 / sy; // preserve apparent volume
+    let lift = (bob * 0.5 + 0.5) * bob_amp; // 0 at rest → 1 at the top of a hop
+    let hop = lift * base_h * 0.07; // pixels the body rises off the ground
+
+    // Shadow sits on the ground point, shrinking a touch as the body hops up.
+    let sh = 1.0 - 0.16 * lift;
+    draw_ellipse(feet.x, feet.y, base_h * 0.30 * sh, base_h * 0.10 * sh, 0.0, SHADOW);
 
     let sprite_top = match tex {
         Some(t) => {
             let aspect = if t.height() > 0.0 { t.width() / t.height() } else { 1.0 };
-            let w = sprite_h * aspect;
-            let top = bottom - sprite_h;
+            let w = sprite_h * aspect * sx;
+            let h = sprite_h * sy;
+            let top = bottom - h - hop;
             draw_texture_ex(
                 t,
                 feet.x - w * 0.5,
                 top,
                 tint,
                 DrawTextureParams {
-                    dest_size: Some(vec2(w, sprite_h)),
+                    dest_size: Some(vec2(w, h)),
                     flip_x,
                     ..Default::default()
                 },
@@ -436,11 +474,11 @@ fn draw_critter(
         None => {
             draw_circle(
                 feet.x,
-                bottom - sprite_h * 0.4,
+                bottom - sprite_h * 0.4 - hop,
                 sprite_h * 0.3,
                 ui::fade(color_u8!(90, 150, 210, 255), tint.a),
             );
-            bottom - sprite_h
+            bottom - sprite_h - hop
         }
     };
 
@@ -479,6 +517,34 @@ fn draw_income_icon(cx: f32, sprite_top: f32, icon: Option<&Texture2D>, fallback
     }
 }
 
+/// Draw a scattered terrain prop as a grounded billboard: native pixel size
+/// scaled by zoom (so the source image's resolution controls its world size),
+/// feet planted on the projected ground point, with a soft contact shadow.
+/// No-op when the art is missing (props are purely cosmetic — no placeholder).
+fn draw_prop(world: Vec2, tex: Option<&Texture2D>, scale: f32, flip: bool, cam: &Camera) {
+    let Some(t) = tex else { return };
+    let z = cam.zoom;
+    let w = t.width() * z * scale;
+    let h = t.height() * z * scale;
+    if w <= 0.0 || h <= 0.0 {
+        return;
+    }
+    let feet = view::world_to_screen(world, cam);
+    // Soft contact shadow at the base.
+    draw_ellipse(feet.x, feet.y, w * 0.32, h * 0.07, 0.0, SHADOW);
+    draw_texture_ex(
+        t,
+        feet.x - w * 0.5,
+        feet.y - h,
+        WHITE,
+        DrawTextureParams {
+            dest_size: Some(vec2(w, h)),
+            flip_x: flip,
+            ..Default::default()
+        },
+    );
+}
+
 /// Spotlight deposit view: dim the whole screen with a black gradient and
 /// redraw the player's following animals bright on top. The hovered one pops
 /// and gets a glowing pad so it reads as selectable. Clicking is resolved in
@@ -496,7 +562,11 @@ pub fn draw_deposit_overlay(app: &mut GameApp) {
     let partner = app.deposit_partner_species();
 
     // Instruction banner.
-    let msg = "Click an animal to deposit  ·  Esc to cancel";
+    let msg = if app.dedicating.is_some() {
+        "Click an animal to dedicate to the pedestal  ·  Esc to cancel"
+    } else {
+        "Click an animal to deposit  ·  Esc to cancel"
+    };
     let dim = measure_text(msg, None, 24, 1.0);
     text_shadow(msg, (w - dim.width) * 0.5, 64.0, 24.0, TEXT);
 
@@ -530,7 +600,8 @@ pub fn draw_deposit_overlay(app: &mut GameApp) {
         let icon = app.textures.icon(icon_id);
         let scale = if is_hover { 1.22 } else { 1.0 };
         let tint = if valid { WHITE } else { color_u8!(255, 255, 255, 70) };
-        draw_critter(pos, dir, tex.as_ref(), icon.as_ref(), fallback, false, scale, tint, &cam);
+        // Laid-out (held still) during deposit selection — no walk bounce.
+        draw_critter(pos, dir, tex.as_ref(), icon.as_ref(), fallback, false, scale, tint, 0.0, 0.0, &cam);
     }
 }
 
@@ -565,11 +636,13 @@ fn draw_zoo_plot(cam: &Camera) {
 /// are tinted by status; still-locked pads render dim with a padlock, and the
 /// next purchasable one shows its coin/DNA price. A reach prompt appears when
 /// the avatar is close.
-fn draw_nests(app: &GameApp, now: DateTime<Utc>) {
+fn draw_nests(app: &mut GameApp, now: DateTime<Utc>) {
     use crate::game::zoo::{MAX_NESTS, NestCost, NestStatus, Zoo, nest_unlock_cost};
     let cam = app.camera;
     let apos = app.session.my_avatar().pos;
     let owned = app.zoo.nest_count as usize;
+    // Nest sprite (assets/structures/nest.png); None → woven-bowl placeholder.
+    let nest_tex = app.textures.structure("nest");
     for i in 0..MAX_NESTS as usize {
         let world = Zoo::nest_pos(i);
         let p = view::world_to_screen(world, &cam);
@@ -578,15 +651,42 @@ fn draw_nests(app: &GameApp, now: DateTime<Utc>) {
         let unlocked = i < owned;
         let near = (world - apos).length() <= crate::app::INTERACT_RANGE;
 
-        // Shadow + woven bowl (dim while locked).
-        let (rim, bowl) = if unlocked {
-            (color_u8!(120, 86, 54, 255), color_u8!(86, 60, 38, 255))
-        } else {
-            (color_u8!(70, 64, 58, 200), color_u8!(48, 44, 40, 200))
-        };
+        // Contact shadow (shared by both render paths).
         draw_ellipse(p.x, p.y + ry * 0.35, rx * 1.05, ry, 0.0, color_u8!(0, 0, 0, 60));
-        draw_ellipse(p.x, p.y, rx, ry, 0.0, rim);
-        draw_ellipse(p.x, p.y - ry * 0.18, rx * 0.78, ry * 0.7, 0.0, bowl);
+
+        // Body: the structure sprite if bundled, else the woven-bowl primitives.
+        // Locked nests are dimmed. `label_y` is where the status text/prompt sits.
+        let label_y = match nest_tex.as_ref() {
+            Some(t) => {
+                let h = NEST_SPRITE_H * cam.zoom;
+                let aspect = if t.height() > 0.0 { t.width() / t.height() } else { 1.0 };
+                let w = h * aspect;
+                let bottom = p.y + ry * 0.35; // plant the sprite base on the shadow
+                let top = bottom - h;
+                let tint = if unlocked { WHITE } else { color_u8!(120, 120, 128, 210) };
+                draw_texture_ex(
+                    t,
+                    p.x - w * 0.5,
+                    top,
+                    tint,
+                    DrawTextureParams {
+                        dest_size: Some(vec2(w, h)),
+                        ..Default::default()
+                    },
+                );
+                top - 6.0 * cam.zoom
+            }
+            None => {
+                let (rim, bowl) = if unlocked {
+                    (color_u8!(120, 86, 54, 255), color_u8!(86, 60, 38, 255))
+                } else {
+                    (color_u8!(70, 64, 58, 200), color_u8!(48, 44, 40, 200))
+                };
+                draw_ellipse(p.x, p.y, rx, ry, 0.0, rim);
+                draw_ellipse(p.x, p.y - ry * 0.18, rx * 0.78, ry * 0.7, 0.0, bowl);
+                p.y - ry - 8.0
+            }
+        };
 
         if unlocked {
             let status = app.zoo.nest_status(app.zoo.nests[i].id, now);
@@ -601,7 +701,7 @@ fn draw_nests(app: &GameApp, now: DateTime<Utc>) {
                 draw_circle(p.x, p.y - ry * 0.2, (5.0 + pulse * 2.0) * cam.zoom, col);
             }
             if near {
-                text_shadow("[E] Nest", p.x - 30.0, p.y - ry - 8.0, 18.0, TEXT);
+                text_shadow("[E] Nest", p.x - 30.0, label_y, 18.0, TEXT);
             }
         } else {
             // Padlock dot.
@@ -616,9 +716,9 @@ fn draw_nests(app: &GameApp, now: DateTime<Utc>) {
                 let lbl = if near { format!("[E] Unlock · {price}") } else { format!("Locked · {price}") };
                 let col = if near { COIN_GOLD } else { TEXT_DIM };
                 let w = measure_text(&lbl, None, 18, 1.0).width;
-                text_shadow(&lbl, p.x - w * 0.5, p.y - ry - 8.0, 18.0, col);
+                text_shadow(&lbl, p.x - w * 0.5, label_y, 18.0, col);
             } else {
-                text_shadow("Locked", p.x - 24.0, p.y - ry - 8.0, 16.0, TEXT_DIM);
+                text_shadow("Locked", p.x - 24.0, label_y, 16.0, TEXT_DIM);
             }
         }
     }
@@ -686,6 +786,167 @@ fn draw_food_structures(app: &GameApp, now: DateTime<Utc>) {
     }
 }
 
+/// Draw every placed pedestal as a small pillar + slab, and — while a placement
+/// is in progress — a translucent ghost snapped to the tile under the cursor
+/// (green when the tile is valid, red when it's off-plot or already taken).
+fn draw_pedestals(app: &GameApp, now: DateTime<Utc>) {
+    use crate::game::pedestal::{
+        pedestal_tile_in_bounds, pedestal_world, world_to_pedestal_tile,
+    };
+    let cam = app.camera;
+    let apos = app.session.my_avatar().pos;
+
+    for ped in &app.zoo.pedestals {
+        let world = pedestal_world(ped.tile);
+        let p = view::world_to_screen(world, &cam);
+        let near = (world - apos).length() <= crate::app::INTERACT_RANGE;
+        draw_pedestal_shape(p, cam.zoom, color_u8!(150, 150, 165, 255));
+
+        // A dedicated animal at cap pulses a gold pip (income waiting to sweep).
+        if let Some(a) = ped.animal.and_then(|id| app.zoo.animals.get(&id)) {
+            let col = if a.is_at_cap(now) {
+                let pulse = (get_time() as f32 * 3.0).sin() * 0.5 + 0.5;
+                Color::new(1.0, 0.823, 0.353, 0.6 + 0.4 * pulse)
+            } else {
+                color_u8!(123, 207, 167, 255)
+            };
+            draw_circle(p.x, p.y - 30.0 * cam.zoom, 4.0 * cam.zoom, col);
+        }
+        if near {
+            text_shadow("[E] Pedestal", p.x - 42.0, p.y - 40.0 * cam.zoom, 18.0, TEXT);
+        }
+    }
+
+    // Placement ghost.
+    if let Some(placement) = app.placing {
+        let (mx, my) = mouse_position();
+        let world = view::screen_to_world(vec2(mx, my), &cam);
+        let tile = world_to_pedestal_tile(world);
+        let ignore = match placement {
+            crate::app::Placement::Move(id) => Some(id),
+            crate::app::Placement::Hotbar => None,
+        };
+        let valid = pedestal_tile_in_bounds(tile) && app.zoo.pedestal_tile_free(tile, ignore);
+        let p = view::world_to_screen(pedestal_world(tile), &cam);
+        let tint = if valid {
+            color_u8!(120, 235, 160, 160)
+        } else {
+            color_u8!(235, 110, 110, 160)
+        };
+        draw_pedestal_shape(p, cam.zoom, tint);
+    }
+}
+
+/// Draw every placed NPC as a grounded billboard: idle vertical bob, a scale-pop
+/// on the speaking transition, and a `{id}_speaking` sprite swap while its panel
+/// is open. Falls back to the base sprite if no speaking art exists, and to a
+/// placeholder figure if no sprite exists at all. Shows an `[E] <label>` prompt
+/// when the player is in interaction range.
+fn draw_npcs(app: &mut GameApp) {
+    let cam = app.camera;
+    let apos = app.session.my_avatar().pos;
+    // Snapshot the render data so the per-NPC texture lookups below can borrow
+    // the texture cache mutably without conflicting with the `npcs` borrow.
+    let items: Vec<(String, &'static str, Vec2, f32, f32, &'static str)> = app
+        .npcs
+        .iter()
+        .map(|n| (n.sprite_id(), n.id, n.world, n.bob_offset(), n.pop, n.label))
+        .collect();
+
+    for (sprite_id, base_id, world, bob_off, pop, label) in items {
+        let near = (world - apos).length() <= crate::app::INTERACT_RANGE;
+        // Prefer the resolved sprite (e.g. `{id}_speaking`); fall back to the
+        // base sprite when the variant art isn't bundled.
+        let tex = app
+            .textures
+            .npc(&sprite_id)
+            .or_else(|| app.textures.npc(base_id));
+        draw_npc_billboard(world, tex.as_ref(), bob_off, pop, near, label, &cam);
+    }
+}
+
+/// Render a single NPC billboard + interaction prompt. `bob_off` is the idle bob
+/// offset in pre-zoom px (lifts the body, not the shadow); `pop` drives a
+/// feet-anchored scale-pop.
+fn draw_npc_billboard(
+    world: Vec2,
+    tex: Option<&Texture2D>,
+    bob_off: f32,
+    pop: f32,
+    near: bool,
+    label: &str,
+    cam: &Camera,
+) {
+    let p = view::world_to_screen(world, cam);
+    let z = cam.zoom;
+    let bob = bob_off * z; // body lift in screen px
+    let scale = view::pop_scale(pop);
+
+    // Soft contact shadow stays planted on the ground point (no bob/pop).
+    draw_ellipse(p.x, p.y, 26.0 * z, 8.0 * z, 0.0, color_u8!(0, 0, 0, 60));
+
+    let base = p.y + bob; // feet line, lifted by the idle bob
+    let top_y = match tex {
+        Some(t) => {
+            // Billboard a touch taller than a critter; pop grows it about the feet.
+            let h = CRITTER_H * 1.35 * z * scale;
+            let aspect = if t.height() > 0.0 { t.width() / t.height() } else { 1.0 };
+            let w = h * aspect;
+            let top = base - h;
+            draw_texture_ex(
+                t,
+                p.x - w * 0.5,
+                top,
+                WHITE,
+                DrawTextureParams {
+                    dest_size: Some(vec2(w, h)),
+                    ..Default::default()
+                },
+            );
+            top
+        }
+        None => {
+            // Placeholder: stall awning behind a rounded figure.
+            let s = z * scale;
+            draw_rectangle(p.x - 26.0 * s, base - 54.0 * s, 52.0 * s, 12.0 * s, color_u8!(196, 84, 92, 255));
+            draw_rectangle(p.x - 26.0 * s, base - 42.0 * s, 52.0 * s, 4.0 * s, color_u8!(232, 224, 210, 255));
+            draw_rectangle(p.x - 9.0 * s, base - 36.0 * s, 18.0 * s, 30.0 * s, color_u8!(96, 120, 180, 255));
+            draw_circle(p.x, base - 40.0 * s, 8.0 * s, color_u8!(226, 188, 156, 255));
+            base - 54.0 * s
+        }
+    };
+
+    let prompt;
+    let lbl: &str = if near {
+        prompt = format!("[E] {label}");
+        &prompt
+    } else {
+        label
+    };
+    let col = if near { TEXT } else { TEXT_DIM };
+    let w = measure_text(lbl, None, 18, 1.0).width;
+    text_shadow(lbl, p.x - w * 0.5, top_y - 10.0 * z, 18.0, col);
+}
+
+/// Shared pedestal sprite: a soft shadow, a short pillar, and a flat top slab.
+fn draw_pedestal_shape(p: Vec2, zoom: f32, body: Color) {
+    let hw = 18.0 * zoom;
+    let h = 26.0 * zoom;
+    draw_ellipse(p.x, p.y, hw * 1.2, 7.0 * zoom, 0.0, color_u8!(0, 0, 0, 60));
+    // Pillar.
+    draw_rectangle(p.x - hw * 0.55, p.y - h, hw * 1.1, h, body);
+    // Top slab.
+    draw_ellipse(p.x, p.y - h, hw, 6.0 * zoom, 0.0, body);
+    draw_ellipse(
+        p.x,
+        p.y - h - 2.0 * zoom,
+        hw * 0.78,
+        4.5 * zoom,
+        0.0,
+        Color::new(0.823, 0.823, 0.882, body.a),
+    );
+}
+
 // ── Waypoint beacons ───────────────────────────────────────────────────────────
 
 const BEAM_COLOR: Color = color_u8!(120, 235, 200, 255);
@@ -750,15 +1011,21 @@ fn draw_wild_animals(app: &mut GameApp) {
     let catch_target = app.catch_state.target;
     let catch_fill   = app.catch_state.fill;
 
-    // Collect (species, pos, vel, id) from visible chunks — owned copies so
-    // the immutable borrow on app.world ends before we touch app.textures.
-    let visible: Vec<(&'static str, macroquad::math::Vec2, macroquad::math::Vec2, uuid::Uuid, u32)> = {
-        app.world
-            .visible_animals(cam_tl, cam_br)
-            .into_iter()
-            .map(|a| (a.species, a.pos, a.vel, a.id, a.catches))
-            .collect()
-    };
+    // Unified wild source: host/solo read the live world, a visitor reads the
+    // host's stream. Owned copies so the borrow ends before we touch textures.
+    // Cull to the camera rect and skip mid-teleport (hidden) animals.
+    let visible: Vec<(&'static str, macroquad::math::Vec2, macroquad::math::Vec2, uuid::Uuid, u32)> = app
+        .wild_views()
+        .into_iter()
+        .filter(|v| {
+            !v.hidden
+                && v.pos.x >= cam_tl.x
+                && v.pos.x <= cam_br.x
+                && v.pos.y >= cam_tl.y
+                && v.pos.y <= cam_br.y
+        })
+        .map(|v| (v.species, v.pos, v.vel, v.id, v.catches))
+        .collect();
 
     for (species, pos, vel, id, catches) in visible {
         let feet     = view::world_to_screen(pos, &cam);
@@ -879,9 +1146,19 @@ pub fn draw_hud(app: &mut GameApp, now_utc: DateTime<Utc>) {
     let hint = if app.catch_state.active {
         "C exit catch · hover a wild animal to catch it"
     } else {
-        "WASD move · Shift sprint · Space dash · E inspect / nest · C catch · 1 Shop 3 Settings 4 Waypoints"
+        "WASD move · Shift sprint · Space dash · E inspect / nest · C catch · 1–5 hotbar · U Upgrades O Settings M Waypoints"
     };
     text_shadow(hint, 16.0, 62.0, 18.0, TEXT_DIM);
+
+    // While hosting, always show our own join code so it's readable without
+    // opening Settings (and never confused with the "join a friend" field).
+    if app.is_hosting() {
+        if let Some(code) = app.session.join_code() {
+            let peers = app.session.peer_count();
+            let line = format!("● Online — share code  {}   ·   {peers}/3 visitors", code.as_str());
+            text_shadow(&line, 16.0, 84.0, 18.0, color_u8!(123, 207, 167, 255));
+        }
+    }
 
     if app.catch_state.active {
         text_shadow(
@@ -907,7 +1184,111 @@ pub fn draw_hud(app: &mut GameApp, now_utc: DateTime<Utc>) {
     }
 
     draw_notifications(app);
+    draw_hotbar(app);
     draw_inspect_panel(app, now_utc);
+}
+
+/// The bottom-center hotbar: 5 spaced squares. The selected slot uses the
+/// `slot_container_selected` sprite (else a highlighted rounded rect); item icons
+/// are drawn centered in the slot. Empty slots read as faint outlines.
+fn draw_hotbar(app: &mut GameApp) {
+    use crate::app::HOTBAR_SLOTS;
+    let slots = app.hotbar_slots();
+    let selected_slot = app.selected_slot;
+    let size = 56.0;
+    let gap = 12.0;
+    let total = HOTBAR_SLOTS as f32 * size + (HOTBAR_SLOTS as f32 - 1.0) * gap;
+    let x0 = (screen_width() - total) * 0.5;
+    let y = screen_height() - size - 24.0;
+
+    // Container sprites (owned clones, so the per-slot texture lookups below can
+    // still borrow the cache mutably). `slot_container_selected` falls back to
+    // `slot_container` when only the base art is provided.
+    let container = app.textures.hotbar("slot_container");
+    let container_sel = app.textures.hotbar("slot_container_selected");
+
+    for i in 0..HOTBAR_SLOTS {
+        let x = x0 + i as f32 * (size + gap);
+        let selected = i == selected_slot;
+
+        // Slot background: sprite if available, else the legacy rounded rect.
+        let bg_tex = if selected {
+            container_sel.as_ref().or(container.as_ref())
+        } else {
+            container.as_ref()
+        };
+        match bg_tex {
+            Some(t) => {
+                draw_texture_ex(
+                    t,
+                    x,
+                    y,
+                    WHITE,
+                    DrawTextureParams {
+                        dest_size: Some(vec2(size, size)),
+                        ..Default::default()
+                    },
+                );
+            }
+            None => {
+                let bg = if selected {
+                    color_u8!(44, 50, 62, 235)
+                } else {
+                    color_u8!(24, 27, 33, 200)
+                };
+                ui::rrect(x, y, size, size, 8.0, bg);
+                let edge = if selected {
+                    color_u8!(123, 207, 167, 255)
+                } else {
+                    color_u8!(64, 72, 86, 220)
+                };
+                ui::rrect_outline(x, y, size, size, 8.0, edge);
+            }
+        }
+
+        // Slot number (1-based) in the corner.
+        text_shadow(&format!("{}", i + 1), x + 5.0, y + 16.0, 13.0, TEXT_DIM);
+
+        if let Some((item, count)) = slots[i] {
+            // Item icon, centered in the slot (sprite if provided, else the
+            // in-world pedestal shape as a placeholder).
+            match app.textures.hotbar(item.icon_id()) {
+                Some(t) => draw_centered_icon(&t, x, y, size),
+                None => draw_pedestal_shape(
+                    vec2(x + size * 0.5, y + size * 0.72),
+                    0.5,
+                    color_u8!(150, 150, 165, 255),
+                ),
+            }
+            // Stack-count badge, bottom-right.
+            let badge = format!("×{count}");
+            let w = measure_text(&badge, None, 16, 1.0).width;
+            text_shadow(&badge, x + size - w - 6.0, y + size - 7.0, 16.0, TEXT);
+        }
+    }
+}
+
+/// Draw `tex` centered inside the slot at `(x, y)` of side `size`, fit within an
+/// inner padded box while preserving aspect ratio.
+fn draw_centered_icon(tex: &Texture2D, x: f32, y: f32, size: f32) {
+    let pad = size * 0.16;
+    let box_sz = size - pad * 2.0;
+    let aspect = if tex.height() > 0.0 { tex.width() / tex.height() } else { 1.0 };
+    let (iw, ih) = if aspect >= 1.0 {
+        (box_sz, box_sz / aspect)
+    } else {
+        (box_sz * aspect, box_sz)
+    };
+    draw_texture_ex(
+        tex,
+        x + (size - iw) * 0.5,
+        y + (size - ih) * 0.5,
+        WHITE,
+        DrawTextureParams {
+            dest_size: Some(vec2(iw, ih)),
+            ..Default::default()
+        },
+    );
 }
 
 /// Inspect-panel accent colour for a Rank stage. Regular falls back to the
@@ -989,7 +1370,17 @@ fn draw_inspect_panel(app: &mut GameApp, now: DateTime<Utc>) {
     let max_level = level >= crate::game::animal::MAX_ANIMAL_LEVEL;
     let in_nest = app.zoo.animal_in_any_nest(animal_id);
     let can_feed = !breeding && !max_level && app.zoo.food >= feed_cost;
-    let can_sell = !breeding && !in_nest;
+    // Visitors may only sell if the host granted the permission (the host always
+    // can). Permissions live in the shared `visitors` map under our session id.
+    let may_sell = if app.is_guest() {
+        app.zoo
+            .visitors
+            .get(&app.session.local_player_id)
+            .is_some_and(|r| r.permissions.has(crate::game::visitor::PermissionSet::SELL))
+    } else {
+        true
+    };
+    let can_sell = !breeding && !in_nest && may_sell;
 
     let pw = 320.0;
     let ph = 470.0;
@@ -1097,23 +1488,26 @@ fn draw_inspect_panel(app: &mut GameApp, now: DateTime<Utc>) {
             app.start_following(animal_id);
         }
     } else if do_feed {
-        match app.zoo.level_up_animal(animal_id, now) {
-            Ok(l) => {
-                app.save_under_lock(now);
-                app.set_status(format!("fed — now level {l}"));
-            }
-            Err(e) => app.set_status(format!("{e}")),
+        use crate::game::action::{Action, ActionOutcome};
+        match app.dispatch(Action::LevelUp(animal_id), now) {
+            Some(ActionOutcome::Leveled(l)) => app.set_status(format!("fed — now level {l}")),
+            None if app.is_guest() => app.set_status("feeding…"),
+            _ => {}
         }
     } else if do_sell {
-        match app.zoo.sell_animal(animal_id, now) {
-            Ok(coins) => {
+        use crate::game::action::{Action, ActionOutcome};
+        match app.dispatch(Action::Sell(animal_id), now) {
+            Some(ActionOutcome::Sold(coins)) => {
                 app.stop_following(animal_id);
                 app.inspect = None;
-                app.sync_critters();
-                app.save_under_lock(now);
                 app.set_status(format!("sold for {coins} coins"));
             }
-            Err(e) => app.set_status(format!("{e}")),
+            None if app.is_guest() => {
+                app.stop_following(animal_id);
+                app.inspect = None;
+                app.set_status("sell requested");
+            }
+            _ => {}
         }
     }
 }

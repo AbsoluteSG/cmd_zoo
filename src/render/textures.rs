@@ -16,6 +16,13 @@ static TILE_TABLE: &[(&str, &[u8])] = include!(concat!(env!("OUT_DIR"), "/tile_t
 static HABITAT_TABLE: &[(&str, &[u8])] =
     include!(concat!(env!("OUT_DIR"), "/habitat_table.rs"));
 static ICON_TABLE: &[(&str, &[u8])] = include!(concat!(env!("OUT_DIR"), "/icon_table.rs"));
+static NPC_TABLE: &[(&str, &[u8])] = include!(concat!(env!("OUT_DIR"), "/npc_table.rs"));
+static HOTBAR_TABLE: &[(&str, &[u8])] = include!(concat!(env!("OUT_DIR"), "/hotbar_table.rs"));
+/// Ground-structure sprites (nests, future silos), keyed by id (e.g. `"nest"`).
+static STRUCTURE_TABLE: &[(&str, &[u8])] =
+    include!(concat!(env!("OUT_DIR"), "/structure_table.rs"));
+/// Terrain props, keyed `"<biome>/<name>"` (e.g. `"forest/oak"`).
+static TERRAIN_TABLE: &[(&str, &[u8])] = include!(concat!(env!("OUT_DIR"), "/terrain_table.rs"));
 
 /// Which embedded table to look an id up in.
 #[derive(Clone, Copy)]
@@ -24,6 +31,10 @@ enum Kind {
     Tile,
     Habitat,
     Icon,
+    Npc,
+    Hotbar,
+    Terrain,
+    Structure,
 }
 
 impl Kind {
@@ -33,6 +44,10 @@ impl Kind {
             Kind::Tile => TILE_TABLE,
             Kind::Habitat => HABITAT_TABLE,
             Kind::Icon => ICON_TABLE,
+            Kind::Npc => NPC_TABLE,
+            Kind::Hotbar => HOTBAR_TABLE,
+            Kind::Terrain => TERRAIN_TABLE,
+            Kind::Structure => STRUCTURE_TABLE,
         }
     }
     fn prefix(self) -> &'static str {
@@ -41,8 +56,24 @@ impl Kind {
             Kind::Tile => "t:",
             Kind::Habitat => "h:",
             Kind::Icon => "i:",
+            Kind::Npc => "n:",
+            Kind::Hotbar => "hb:",
+            Kind::Terrain => "tp:",
+            Kind::Structure => "s:",
         }
     }
+}
+
+/// All terrain-prop ids bundled for `biome` (the folder name, matched
+/// case-insensitively), e.g. `["forest/oak", "forest/rock"]`. Empty if the biome
+/// has no props. Used by the world-gen scatter to pick scenery per tile.
+pub fn terrain_prop_ids(biome: &str) -> Vec<&'static str> {
+    let prefix = format!("{}/", biome.to_ascii_lowercase());
+    TERRAIN_TABLE
+        .iter()
+        .filter(|(k, _)| k.to_ascii_lowercase().starts_with(&prefix))
+        .map(|(k, _)| *k)
+        .collect()
 }
 
 #[derive(Default)]
@@ -74,11 +105,65 @@ impl Textures {
         self.get(Kind::Icon, id)
     }
 
+    /// An NPC sprite by id, from `assets/npcs/` (e.g. "structure_merchant").
+    /// `None` falls back to placeholder vector art.
+    pub fn npc(&mut self, id: &str) -> Option<Texture2D> {
+        self.get(Kind::Npc, id)
+    }
+
+    /// A hotbar-UI sprite by id, from `assets/hotbar/` (e.g. "slot_container",
+    /// "slot_container_selected", or an item icon like "pedestal").
+    pub fn hotbar(&mut self, id: &str) -> Option<Texture2D> {
+        self.get(Kind::Hotbar, id)
+    }
+
+    /// A terrain prop by its `"<biome>/<name>"` id, from `assets/terrain/`.
+    pub fn terrain(&mut self, id: &str) -> Option<Texture2D> {
+        self.get(Kind::Terrain, id)
+    }
+
+    /// A ground-structure sprite by id, from `assets/structures/` (e.g. "nest").
+    /// `None` falls back to placeholder vector art.
+    pub fn structure(&mut self, id: &str) -> Option<Texture2D> {
+        self.get(Kind::Structure, id)
+    }
+
     /// Any bundled ground tile (first by sorted id), for auto-detecting the
     /// world tile size. `None` until tile art is dropped into `assets/tiles/`.
     pub fn any_tile(&mut self) -> Option<Texture2D> {
         let id = TILE_TABLE.first()?.0;
         self.get(Kind::Tile, id)
+    }
+
+    /// The grass tuft atlas (`assets/tiles/grass_atlas.png`), converted so the
+    /// blade shape drives **alpha** while RGB is forced white — so the grass
+    /// mesh's per-vertex colour fully controls the hue. The source PNG is a
+    /// grayscale tuft on black (BinbunGrass's `shape` texture, where the red
+    /// channel is the mask), which would otherwise render as opaque black boxes.
+    /// Cached; uses Linear filtering for soft tufts. `None` if the asset is
+    /// missing.
+    pub fn grass_atlas(&mut self) -> Option<Texture2D> {
+        let key = "grass_atlas_rgba".to_string();
+        if let Some(slot) = self.cache.get(&key) {
+            return slot.clone();
+        }
+        let built = lookup_bytes(TILE_TABLE, "grass_atlas").and_then(|bytes| {
+            let mut img = Image::from_file_with_format(bytes, Some(ImageFormat::Png)).ok()?;
+            for px in img.bytes.chunks_exact_mut(4) {
+                // Linear luminance → alpha keeps the soft feathered edges, so big
+                // overlapping translucent tufts blend into a painterly field.
+                let lum = px[0].max(px[1]).max(px[2]);
+                px[0] = 255;
+                px[1] = 255;
+                px[2] = 255;
+                px[3] = lum;
+            }
+            let tex = Texture2D::from_image(&img);
+            tex.set_filter(FilterMode::Linear);
+            Some(tex)
+        });
+        self.cache.insert(key, built.clone());
+        built
     }
 
     fn get(&mut self, kind: Kind, id: &str) -> Option<Texture2D> {

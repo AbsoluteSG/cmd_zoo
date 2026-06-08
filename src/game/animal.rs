@@ -63,13 +63,22 @@ impl Animal {
     }
 
     pub fn stored_at(&self, now: DateTime<Utc>) -> u64 {
+        self.stored_at_with_cap(now, 1.0)
+    }
+
+    /// Accrued income, clamped to `cap_mult ×` the normal storage cap. The base
+    /// `stored_at` uses `1.0`; pedestal animals bank up to `10.0` while offline
+    /// (see [`Zoo::collect_pedestals`]). `cap_mult` only raises the ceiling — the
+    /// rate and elapsed-time math are identical.
+    pub fn stored_at_with_cap(&self, now: DateTime<Utc>, cap_mult: f64) -> u64 {
         if !matches!(self.state, AnimalState::Idle) {
             return 0;
         }
         let elapsed_ms = (now - self.last_collected_at).num_milliseconds().max(0);
         let secs = elapsed_ms as f64 / 1000.0;
         let raw = (secs * self.rate_per_sec()).floor() as i128;
-        raw.clamp(0, self.storage_cap() as i128) as u64
+        let cap = (self.storage_cap() as f64 * cap_mult).floor() as i128;
+        raw.clamp(0, cap) as u64
     }
 
     /// Only collectable when stored output has reached its species cap.

@@ -2,7 +2,7 @@
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-pub const SCHEMA_VERSION: u32 = 15;
+pub const SCHEMA_VERSION: u32 = 19;
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct ZooSnapshot {
@@ -48,6 +48,36 @@ pub struct ZooSnapshot {
     /// pre-v15 JSON loadable.
     #[serde(default)]
     pub species_dupes: Vec<SpeciesDupeDto>,
+    /// New in v16. Zoo expansion level (0 = base plot). Drives plot size and
+    /// animal capacity. `serde(default)` → 0 for pre-v16 saves.
+    #[serde(default)]
+    pub zoo_level: u8,
+    /// New in v16. When `Some`, an in-flight zoo expansion finishes at this
+    /// instant. `serde(default)` → `None` for pre-v16 saves.
+    #[serde(default)]
+    pub zoo_upgrade_finishes_at: Option<DateTime<Utc>>,
+    /// New in v18. Placeable pedestals + their dedicated animals.
+    #[serde(default)]
+    pub pedestals: Vec<PedestalDto>,
+    /// New in v19. Unplaced pedestals held in the hotbar inventory.
+    #[serde(default)]
+    pub unplaced_pedestals: u32,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct PedestalDto {
+    pub id: Uuid,
+    pub tile_x: i32,
+    pub tile_y: i32,
+    /// The dedicated animal id, if any.
+    #[serde(default)]
+    pub animal: Option<Uuid>,
+    /// New in v19. When the current animal was dedicated (drives the 48h lock).
+    #[serde(default)]
+    pub dedicated_at: Option<DateTime<Utc>>,
+    /// New in v19. When the pedestal's post-release cooldown ends.
+    #[serde(default)]
+    pub cooldown_until: Option<DateTime<Utc>>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -86,6 +116,9 @@ pub struct VisitorDto {
     pub last_pos_y: f32,
     #[serde(default)]
     pub gift_inbox: Vec<GiftRecordDto>,
+    /// New in v17. Permission bit set the host granted this visitor (e.g. sell).
+    #[serde(default)]
+    pub permissions: u32,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]

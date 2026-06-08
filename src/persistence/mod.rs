@@ -111,6 +111,7 @@ pub fn snapshot_from_zoo(zoo: &Zoo) -> ZooSnapshot {
                         dropped_at: g.dropped_at,
                     })
                     .collect(),
+                permissions: v.permissions.0,
             })
             .collect(),
         world_seed: zoo.world_seed,
@@ -143,6 +144,21 @@ pub fn snapshot_from_zoo(zoo: &Zoo) -> ZooSnapshot {
                 count: *c,
             })
             .collect(),
+        zoo_level: zoo.zoo_level,
+        zoo_upgrade_finishes_at: zoo.zoo_upgrade_finishes_at,
+        pedestals: zoo
+            .pedestals
+            .iter()
+            .map(|p| PedestalDto {
+                id: p.id,
+                tile_x: p.tile.0,
+                tile_y: p.tile.1,
+                animal: p.animal,
+                dedicated_at: p.dedicated_at,
+                cooldown_until: p.cooldown_until,
+            })
+            .collect(),
+        unplaced_pedestals: zoo.unplaced_pedestals,
     }
 }
 
@@ -224,6 +240,22 @@ pub fn parse_snapshot_with_notes(bytes: &[u8]) -> Result<(ZooSnapshot, Migration
             14 => {
                 migrate_v14_to_v15(&mut value);
                 version = 15;
+            }
+            15 => {
+                migrate_v15_to_v16(&mut value);
+                version = 16;
+            }
+            16 => {
+                migrate_v16_to_v17(&mut value);
+                version = 17;
+            }
+            17 => {
+                migrate_v17_to_v18(&mut value);
+                version = 18;
+            }
+            18 => {
+                migrate_v18_to_v19(&mut value);
+                version = 19;
             }
             v => bail!("no migration path from schema version {v}"),
         }
@@ -535,6 +567,53 @@ fn migrate_v14_to_v15(value: &mut Value) {
     }
 }
 
+/// v16 adds the upgradable zoo: a `zoo_level` (0 = base plot) and an optional
+/// in-flight expansion timer. Old saves default to the starting plot.
+fn migrate_v15_to_v16(value: &mut Value) {
+    if let Value::Object(map) = value {
+        map.insert("schema_version".into(), Value::from(16u64));
+        map.entry("zoo_level".to_string()).or_insert(Value::from(0u64));
+        map.entry("zoo_upgrade_finishes_at".to_string())
+            .or_insert(Value::Null);
+    }
+}
+
+/// v17 adds per-visitor `permissions` (co-op grants like selling). Old visitor
+/// records default to no special permissions; `serde(default)` also covers any
+/// records without the field, so the bump is effectively a version label.
+fn migrate_v16_to_v17(value: &mut Value) {
+    if let Value::Object(map) = value {
+        map.insert("schema_version".into(), Value::from(17u64));
+        if let Some(Value::Array(visitors)) = map.get_mut("visitors") {
+            for v in visitors.iter_mut() {
+                if let Some(obj) = v.as_object_mut() {
+                    obj.entry("permissions".to_string()).or_insert(Value::from(0u64));
+                }
+            }
+        }
+    }
+}
+
+/// v18 adds placeable pedestals. Old saves have none, so an empty list (also
+/// covered by `serde(default)`) — the bump is effectively a version label.
+fn migrate_v17_to_v18(value: &mut Value) {
+    if let Value::Object(map) = value {
+        map.insert("schema_version".into(), Value::from(18u64));
+        map.entry("pedestals".to_string())
+            .or_insert(Value::Array(Vec::new()));
+    }
+}
+
+/// v19 adds the unplaced-pedestal hotbar inventory (and per-pedestal lock /
+/// cooldown timestamps, handled by `serde(default)`). Old saves default to 0.
+fn migrate_v18_to_v19(value: &mut Value) {
+    if let Value::Object(map) = value {
+        map.insert("schema_version".into(), Value::from(19u64));
+        map.entry("unplaced_pedestals".to_string())
+            .or_insert(Value::from(0u64));
+    }
+}
+
 /// v11 introduces isometric grid placement: each habitat gains `tile_x`/`tile_y`.
 /// Pre-v11 saves have no coordinates, so auto-layout the habitats onto the grid
 /// deterministically — row-major, stepping by the 2×2 footprint so nothing
@@ -737,6 +816,7 @@ pub fn zoo_from_snapshot(s: ZooSnapshot) -> Result<LoadedZoo> {
                 last_visited_at: v.last_visited_at,
                 last_pos: vec2(v.last_pos_x, v.last_pos_y),
                 gift_inbox: inbox,
+                permissions: crate::game::visitor::PermissionSet(v.permissions),
             },
         );
     }
@@ -745,6 +825,23 @@ pub fn zoo_from_snapshot(s: ZooSnapshot) -> Result<LoadedZoo> {
             "dropped {n} gift(s) of unknown species '{species_id}'"
         ));
     }
+
+    // Rebuild pedestals, dropping any dedication whose animal no longer exists.
+    let pedestals: Vec<crate::game::pedestal::Pedestal> = s
+        .pedestals
+        .into_iter()
+        .map(|p| {
+            let animal = p.animal.filter(|aid| animals.contains_key(aid));
+            crate::game::pedestal::Pedestal {
+                id: p.id,
+                tile: (p.tile_x, p.tile_y),
+                // Drop the lock if the dedicated animal vanished.
+                dedicated_at: animal.and(p.dedicated_at),
+                cooldown_until: p.cooldown_until,
+                animal,
+            }
+        })
+        .collect();
 
     let zoo = Zoo {
         player: Player {
@@ -795,10 +892,17 @@ pub fn zoo_from_snapshot(s: ZooSnapshot) -> Result<LoadedZoo> {
             .into_iter()
             .map(|w| Waypoint { id: w.id, name: w.name, pos: vec2(w.x, w.y) })
             .collect(),
+        zoo_level: s.zoo_level.min(crate::game::zoo::MAX_ZOO_LEVEL),
+        zoo_upgrade_finishes_at: s.zoo_upgrade_finishes_at,
+        pedestals,
+        unplaced_pedestals: s.unplaced_pedestals,
         last_saved_at: s.last_saved_at,
     };
     let mut zoo = zoo;
     zoo.relink_breeding_nests();
+    // Point the global plot geometry at this save's expansion level so the
+    // fence, collision, and spawn-exclusion all match the loaded zoo.
+    crate::game::world_chunks::set_zoo_level(zoo.zoo_level);
 
     Ok(LoadedZoo { zoo, warnings })
 }
@@ -818,6 +922,12 @@ mod tests {
         zoo.buy_animal("field_mouse", now).unwrap();
         zoo.buy_animal("field_mouse", now).unwrap();
         zoo.claimed_gifts.insert(Uuid::new_v4());
+        // Expand the zoo with an in-flight build so both expansion fields persist.
+        zoo.coins += 50_000;
+        zoo.start_zoo_upgrade(now).unwrap();
+        let ready = zoo.zoo_upgrade_finishes_at.unwrap() + chrono::Duration::seconds(1);
+        zoo.claim_zoo_upgrade(ready).unwrap();
+        zoo.start_zoo_upgrade(ready).unwrap();
 
         let snap = snapshot_from_zoo(&zoo);
         let json = serde_json::to_vec(&snap).unwrap();
@@ -834,6 +944,57 @@ mod tests {
         assert_eq!(zoo2.animals.len(), zoo.animals.len());
         assert_eq!(zoo2.structures.len(), zoo.structures.len());
         assert_eq!(zoo2.claimed_gifts, zoo.claimed_gifts);
+        assert_eq!(zoo2.zoo_level, 1);
+        assert_eq!(zoo2.zoo_upgrade_finishes_at, zoo.zoo_upgrade_finishes_at);
+    }
+
+    #[test]
+    fn v15_save_migrates_to_v16_with_zoo_expansion_defaults() {
+        // A minimal v15 save object; the migrator should add v16 expansion
+        // fields defaulting to a base, un-upgraded plot.
+        let v15 = serde_json::json!({
+            "schema_version": 15,
+            "player": { "id": Uuid::new_v4(), "name": "Old" },
+            "last_saved_at": Utc.with_ymd_and_hms(2026, 1, 1, 12, 0, 0).unwrap(),
+            "coins": 10, "food": 0, "dna_helix": 0,
+            "habitats": [], "animals": [], "structures": [],
+            "claimed_gifts": [], "discovered_recipes": [],
+            "nest_count": 1, "exotic_skip_window": null,
+            "visitors": [], "world_seed": 42, "chunk_deltas": [],
+            "waypoints": [], "species_dupes": [],
+        });
+        let bytes = serde_json::to_vec(&v15).unwrap();
+        let snap = parse_snapshot(&bytes).unwrap();
+        assert_eq!(snap.schema_version, SCHEMA_VERSION);
+        assert_eq!(snap.zoo_level, 0);
+        assert_eq!(snap.zoo_upgrade_finishes_at, None);
+    }
+
+    #[test]
+    fn v18_save_migrates_to_v19_with_empty_hotbar() {
+        // A minimal v18 save (with one pre-lock pedestal) should migrate to v19
+        // with `unplaced_pedestals` defaulting to 0 and the pedestal's new lock
+        // fields defaulting to null.
+        let v18 = serde_json::json!({
+            "schema_version": 18,
+            "player": { "id": Uuid::new_v4(), "name": "Old" },
+            "last_saved_at": Utc.with_ymd_and_hms(2026, 1, 1, 12, 0, 0).unwrap(),
+            "coins": 10, "food": 0, "dna_helix": 0,
+            "habitats": [], "animals": [], "structures": [],
+            "claimed_gifts": [], "discovered_recipes": [],
+            "nest_count": 1, "exotic_skip_window": null,
+            "visitors": [], "world_seed": 42, "chunk_deltas": [],
+            "waypoints": [], "species_dupes": [],
+            "zoo_level": 0, "zoo_upgrade_finishes_at": null,
+            "pedestals": [{ "id": Uuid::new_v4(), "tile_x": 1, "tile_y": 2, "animal": null }],
+        });
+        let bytes = serde_json::to_vec(&v18).unwrap();
+        let snap = parse_snapshot(&bytes).unwrap();
+        assert_eq!(snap.schema_version, SCHEMA_VERSION);
+        assert_eq!(snap.unplaced_pedestals, 0);
+        assert_eq!(snap.pedestals.len(), 1);
+        assert_eq!(snap.pedestals[0].dedicated_at, None);
+        assert_eq!(snap.pedestals[0].cooldown_until, None);
     }
 
     #[test]
@@ -899,6 +1060,34 @@ mod tests {
         let d = zoo2.chunk_deltas.get(&(12, -7)).expect("delta present");
         assert_eq!(d.removed, vec![0, 2]);
         assert_eq!(d.partial, vec![(1, 3)]);
+    }
+
+    #[test]
+    fn snapshot_roundtrip_preserves_pedestals() {
+        let now = Utc.with_ymd_and_hms(2026, 1, 1, 12, 0, 0).unwrap();
+        let mut zoo = Zoo::new(now);
+        zoo.dna_helix = 100_000;
+        zoo.coins = 100_000;
+        // One placed pedestal with a dedicated (locked) animal, one placed empty,
+        // plus some unplaced stock in the hotbar.
+        zoo.unplaced_pedestals = 3;
+        let ped = zoo.place_pedestal((1, -2)).unwrap();
+        zoo.purchase_animal("field_mouse", now).unwrap();
+        let animal = *zoo.animals.keys().next().unwrap();
+        zoo.dedicate_animal(ped, animal, now).unwrap();
+        zoo.place_pedestal((-3, 1)).unwrap();
+
+        let snap = snapshot_from_zoo(&zoo);
+        let json = serde_json::to_vec(&snap).unwrap();
+        let zoo2 = zoo_from_snapshot(parse_snapshot(&json).unwrap()).unwrap().zoo;
+
+        assert_eq!(zoo2.pedestals.len(), 2);
+        assert_eq!(zoo2.unplaced_pedestals, 1);
+        let p = zoo2.pedestals.iter().find(|p| p.id == ped).expect("pedestal present");
+        assert_eq!(p.tile, (1, -2));
+        assert_eq!(p.animal, Some(animal));
+        assert_eq!(p.dedicated_at, Some(now), "lock timestamp round-trips");
+        assert!(zoo2.pedestals.iter().any(|p| p.tile == (-3, 1) && p.animal.is_none()));
     }
 
     #[test]

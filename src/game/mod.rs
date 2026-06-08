@@ -1,3 +1,4 @@
+pub mod action;
 pub mod animal;
 pub mod avatar;
 pub mod avatar_system;
@@ -5,6 +6,9 @@ pub mod biome;
 pub mod economy;
 pub mod exotic_shop;
 pub mod habitat;
+pub mod merchant;
+pub mod npc;
+pub mod pedestal;
 pub mod player;
 pub mod rank;
 pub mod species;

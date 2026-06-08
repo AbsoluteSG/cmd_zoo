@@ -10,6 +10,7 @@
 //! Chunk coordinates: integer grid derived by flooring world / CHUNK_SIZE.
 
 use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicI32, Ordering};
 
 use macroquad::math::{Vec2, vec2};
 
@@ -38,12 +39,39 @@ pub const CULL_RADIUS: i32 = 3;
 
 // ── Zoo plot geometry ─────────────────────────────────────────────────────────
 
-/// The player's home zoo is an enclosed square plot of this many tiles per side,
-/// centred on the world. Wild animals never spawn inside it (+ a buffer), and
-/// tame animals stay within it.
-pub const ZOO_TILES: i32 = 9;
+/// The player's home zoo is an enclosed square plot, centred on the world. Wild
+/// animals never spawn inside it (+ a buffer), and tame animals stay within it.
+/// This is the plot's *base* (un-upgraded) edge length in tiles; each zoo
+/// expansion grows it by [`ZOO_GROWTH_PER_SIDE`] tiles on every side.
+pub const ZOO_TILES_BASE: i32 = 9;
+/// Tiles added to *each* side of the plot per expansion level — so one level
+/// grows the edge length by `2 * ZOO_GROWTH_PER_SIDE` tiles while staying
+/// centred. The matching capacity bump lives in `zoo.rs`.
+pub const ZOO_GROWTH_PER_SIDE: i32 = 2;
 /// World units per tile — must match `avatar_system::TILE_W` and the render grid.
 pub const ZOO_TILE_W: f32 = 128.0;
+
+/// Current plot edge length in tiles, derived from the active zoo's expansion
+/// level. The zoo plot is a global world singleton (the free functions below
+/// assume one home plot), so the level is mirrored here as a process global and
+/// kept in sync by `Zoo` on construction, load, and expansion-claim.
+static CUR_ZOO_TILES: AtomicI32 = AtomicI32::new(ZOO_TILES_BASE);
+
+/// Plot edge length (tiles) for a given expansion `level` (0 = base).
+pub fn zoo_tiles_for_level(level: u8) -> i32 {
+    ZOO_TILES_BASE + level as i32 * 2 * ZOO_GROWTH_PER_SIDE
+}
+
+/// Point the global plot geometry at expansion `level`. Called by `Zoo` whenever
+/// the active zoo's level is established or changes.
+pub fn set_zoo_level(level: u8) {
+    CUR_ZOO_TILES.store(zoo_tiles_for_level(level), Ordering::Relaxed);
+}
+
+/// The active plot's edge length in tiles.
+pub fn zoo_tiles() -> i32 {
+    CUR_ZOO_TILES.load(Ordering::Relaxed)
+}
 
 /// World-space centre of the zoo plot.
 pub fn zoo_center() -> Vec2 {
@@ -51,9 +79,9 @@ pub fn zoo_center() -> Vec2 {
 }
 
 /// Half the zoo plot's edge length, in world units (so the plot spans
-/// `center ± zoo_half_extent` on each axis).
+/// `center ± zoo_half_extent` on each axis). Grows as the zoo is expanded.
 pub fn zoo_half_extent() -> f32 {
-    ZOO_TILES as f32 * ZOO_TILE_W * 0.5
+    zoo_tiles() as f32 * ZOO_TILE_W * 0.5
 }
 
 /// True when `pos` lies inside the zoo plot plus a no-spawn buffer beyond the

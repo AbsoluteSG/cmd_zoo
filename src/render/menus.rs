@@ -11,7 +11,10 @@ use crate::game::exotic_shop::{self, Price};
 use crate::game::species::{self, IncomeKind, SpeciesId};
 use crate::game::vendor;
 use crate::game::zoo::NestStatus;
-use crate::render::ui::{self, ACCENT, PANEL, PANEL_EDGE, TEXT, TEXT_DIM, ease_out_back, fade};
+use crate::render::ui::{
+    self, ACCENT, PANEL, PANEL_EDGE, STATUS_AMBER, TEXT, TEXT_DIM, ease_out_back, fade,
+};
+use crate::render::view;
 
 const BTN: Color = color_u8!(46, 52, 64, 255);
 const BTN_HOVER: Color = color_u8!(70, 80, 98, 255);
@@ -35,6 +38,19 @@ impl Ctx {
     }
 }
 
+/// Shift a menu's pivot to one side so the panel pops up on the screen edge
+/// *opposite* the player (mirroring the inspect panel), keeping the NPC the
+/// player is talking to visible. Used by the NPC interaction shops.
+fn side_ctx(app: &GameApp, mut ctx: Ctx) -> Ctx {
+    let apos = app.session.my_avatar().pos;
+    let screen = view::world_to_screen(apos, &app.camera);
+    // Player on the left half → panel on the right, and vice versa.
+    let to_right = screen.x < screen_width() * 0.5;
+    let off = screen_width() * 0.22;
+    ctx.center.x = screen_width() * 0.5 + if to_right { off } else { -off };
+    ctx
+}
+
 pub fn draw(app: &mut GameApp, now: DateTime<Utc>) {
     if app.menu_t <= 0.001 {
         return;
@@ -54,11 +70,90 @@ pub fn draw(app: &mut GameApp, now: DateTime<Utc>) {
     };
     match app.shown_menu {
         Screen::Shop => draw_shop(app, now, ctx),
+        Screen::Upgrades => draw_upgrades(app, now, ctx),
         Screen::Settings => draw_settings(app, now, ctx),
         Screen::Waypoints => draw_waypoints(app, now, ctx),
         Screen::Nest => draw_nest(app, now, ctx),
         Screen::Structure => draw_structure(app, now, ctx),
+        Screen::Pedestal => draw_pedestal(app, now, ctx),
+        Screen::Merchant => draw_merchant(app, now, ctx),
+        Screen::ExoticShop => draw_exotic_shop(app, now, ctx),
+        Screen::Disconnected => draw_disconnected(app, now, ctx),
+        Screen::Player => draw_player(app, now, ctx),
         Screen::World => {}
+    }
+}
+
+// ─────────────────────────── Player (co-op) ───────────────────────────
+
+/// Press-E-on-a-player panel. The host can grant/revoke a visitor's sell
+/// permission here; a visitor sees a read-only view of another player.
+fn draw_player(app: &mut GameApp, now: DateTime<Utc>, ctx: Ctx) {
+    use crate::game::action::Action;
+    use crate::game::visitor::PermissionSet;
+
+    let Some(target) = app.active_player else {
+        app.set_screen(Screen::World);
+        return;
+    };
+
+    let pw = 440.0;
+    let ph = 200.0;
+    let (px, py) = (ctx.center.x - pw * 0.5, ctx.center.y - ph * 0.5);
+    panel(&ctx, px, py, pw, ph);
+
+    // Look up the target's name + permissions from the (shared) visitors map.
+    let rec = app.zoo.visitors.get(&target);
+    let name = rec.map(|r| r.display_name.clone()).unwrap_or_else(|| "Player".to_string());
+    let has_sell = rec.is_some_and(|r| r.permissions.has(PermissionSet::SELL));
+
+    title(&ctx, px + 26.0, py + 34.0, &name);
+
+    // Only the host (not a guest) can manage permissions, and only for a player
+    // that has a visitor record (i.e. an actual visitor, not the host itself).
+    if !app.is_guest() && rec.is_some() {
+        label(&ctx, px + 26.0, py + 70.0, "Permissions", 16.0, ACCENT);
+        let lbl = if has_sell { "Revoke sell permission" } else { "Grant sell permission" };
+        if button(&ctx, px + 26.0, py + 84.0, pw - 52.0, 32.0, lbl, true) {
+            app.dispatch(Action::GrantPermission { target, bit: PermissionSet::SELL, grant: !has_sell }, now);
+        }
+        label(
+            &ctx,
+            px + 26.0,
+            py + 128.0,
+            "Visitors can do everything except sell unless granted.",
+            13.0,
+            TEXT_DIM,
+        );
+    } else {
+        let status = if has_sell { "Can sell here." } else { "Cannot sell here." };
+        label(&ctx, px + 26.0, py + 74.0, status, 15.0, TEXT_DIM);
+    }
+
+    if button(&ctx, px + pw - 26.0 - 120.0, py + ph - 42.0, 120.0, 30.0, "Close  [Esc]", true) {
+        app.active_player = None;
+        app.set_screen(Screen::World);
+    }
+}
+
+// ─────────────────────────── Disconnected ───────────────────────────
+
+/// Shown to a visitor when the host's zoo goes away. Offers to return to the
+/// player's own zoo (the only action — the world behind is a frozen mirror).
+fn draw_disconnected(app: &mut GameApp, now: DateTime<Utc>, ctx: Ctx) {
+    let pw = 460.0;
+    let ph = 180.0;
+    let (px, py) = (ctx.center.x - pw * 0.5, ctx.center.y - ph * 0.5);
+    panel(&ctx, px, py, pw, ph);
+    title(&ctx, px + 26.0, py + 34.0, "DISCONNECTED");
+    let msg = app
+        .disconnect_reason
+        .map(|r| r.message())
+        .unwrap_or("Lost connection to the host.");
+    label(&ctx, px + 26.0, py + 70.0, msg, 16.0, TEXT_DIM);
+    label(&ctx, px + 26.0, py + 92.0, "Your own zoo kept running while you were away.", 14.0, TEXT_DIM);
+    if button(&ctx, px + (pw - 240.0) * 0.5, py + ph - 50.0, 240.0, 34.0, "Return to your zoo", true) {
+        app.end_visiting(now);
     }
 }
 
@@ -159,7 +254,8 @@ fn draw_settings(app: &mut GameApp, now: DateTime<Utc>, ctx: Ctx) {
         0.0
     };
     let online_block_h = 170.0 + gifts_block_h;
-    let ph = 130.0 + effects.len() as f32 * 40.0 + online_block_h + 30.0;
+    // +56 for the Grass quality row.
+    let ph = 130.0 + effects.len() as f32 * 40.0 + 56.0 + online_block_h + 30.0;
     let (px, py) = (ctx.center.x - pw * 0.5, ctx.center.y - ph * 0.5);
 
     panel(&ctx, px, py, pw, ph);
@@ -185,6 +281,19 @@ fn draw_settings(app: &mut GameApp, now: DateTime<Utc>, ctx: Ctx) {
     y += 8.0;
     label(&ctx, px + 26.0, y, "Online", 18.0, ACCENT);
     y += 18.0;
+    // While visiting someone else's zoo, the only online control is "Leave".
+    if app.is_guest() {
+        label(&ctx, px + 26.0, y + 6.0, "You're visiting another player's zoo.", 15.0, TEXT_DIM);
+        y += 28.0;
+        if button(&ctx, px + 26.0, y, pw - 52.0, 30.0, "Leave zoo", true) {
+            app.end_visiting(now);
+            return;
+        }
+        if button(&ctx, px + pw - 26.0 - 120.0, py + ph - 42.0, 120.0, 30.0, "Close  [Esc]", true) {
+            app.set_screen(Screen::World);
+        }
+        return;
+    }
     let hosting = app.is_hosting();
     let toggle_label = if hosting { "Stop hosting" } else { "Open Zoo (Steam)" };
     if button(&ctx, px + 26.0, y, pw - 52.0, 30.0, toggle_label, true) {
@@ -198,14 +307,13 @@ fn draw_settings(app: &mut GameApp, now: DateTime<Utc>, ctx: Ctx) {
             .map(|c| c.as_str().to_string())
             .unwrap_or_else(|| "—".to_string());
         let peers = app.session.peer_count();
-        label(
-            &ctx,
-            px + 26.0,
-            y + 14.0,
-            &format!("join code: {code}     visitors: {peers}/3"),
-            16.0,
-            TEXT_DIM,
-        );
+        // Prominent: "Your code" caption + the code itself large in accent, so
+        // the host reads off the code to share — visually distinct from the
+        // "join a friend" input box below.
+        label(&ctx, px + 26.0, y + 10.0, "Your code (share to invite):", 14.0, TEXT_DIM);
+        label(&ctx, px + 26.0, y + 36.0, &code, 26.0, ACCENT);
+        label(&ctx, px + 26.0 + 200.0, y + 36.0, &format!("{peers}/3 visitors"), 16.0, TEXT_DIM);
+        y += 18.0; // a touch more room for the larger code line
     } else {
         label(
             &ctx,
@@ -233,11 +341,8 @@ fn draw_settings(app: &mut GameApp, now: DateTime<Utc>, ctx: Ctx) {
     let p = ctx.pt(field_x, y);
     let s = vec2(field_w, field_h) * ctx.scale;
     ui::rrect(p.x, p.y, s.x, s.y, 6.0 * ctx.scale, fade(BTN, ctx.alpha));
-    let shown = if app.join_code_buffer.is_empty() {
-        "______".to_string()
-    } else {
-        format!("{:_<6}", app.join_code_buffer)
-    };
+    let code_len = crate::net::protocol::CODE_LEN;
+    let shown = format!("{:_<width$}", app.join_code_buffer, width = code_len);
     draw_text(
         &shown,
         p.x + 10.0,
@@ -245,7 +350,7 @@ fn draw_settings(app: &mut GameApp, now: DateTime<Utc>, ctx: Ctx) {
         18.0 * ctx.scale,
         fade(TEXT, ctx.alpha),
     );
-    let join_enabled = app.join_code_buffer.len() == 6 && !hosting;
+    let join_enabled = app.join_code_buffer.len() == code_len && !hosting;
     if button(
         &ctx,
         field_x + field_w + 8.0,
@@ -377,17 +482,14 @@ fn draw_shop(app: &mut GameApp, now: DateTime<Utc>, ctx: Ctx) {
             y += 34.0;
         }
         if button(&ctx, bx, y, col_w, 28.0, lbl, *afford) {
-            match app.zoo.purchase_animal(*id, now) {
-                Ok(_) => {
-                    app.sync_critters();
-                    app.save_under_lock(now);
-                    app.push_notification(
-                        species::get(*id).display_name,
-                        "Purchased",
-                        crate::app::NotifIcon::Animal(*id),
-                    );
-                }
-                Err(e) => app.set_status(format!("{e}")),
+            let outcome = app.dispatch(crate::game::action::Action::Purchase(id.to_string()), now);
+            if outcome.is_some() {
+                // Host applied it (visitor sees the buy via the next snapshot).
+                app.push_notification(
+                    species::get(*id).display_name,
+                    "Purchased",
+                    crate::app::NotifIcon::Animal(*id),
+                );
             }
         }
     }
@@ -413,9 +515,8 @@ fn draw_shop(app: &mut GameApp, now: DateTime<Utc>, ctx: Ctx) {
             &format!("Skip wait · {skip_cost} DNA"),
             dna >= skip_cost,
         ) {
-            match app.zoo.skip_exotic_wait(now) {
-                Ok(()) => app.set_status("opened the exotic shop early!"),
-                Err(e) => app.set_status(format!("{e}")),
+            if app.dispatch(crate::game::action::Action::SkipExoticWait, now).is_some() {
+                app.set_status("opened the exotic shop early!");
             }
         }
     } else {
@@ -447,7 +548,97 @@ fn draw_shop(app: &mut GameApp, now: DateTime<Utc>, ctx: Ctx) {
     }
 }
 
+// ───────────────────────────── Upgrades ─────────────────────────────
+
+/// The UPGRADES menu (key 1). Currently houses the zoo expansion; more
+/// player/zoo upgrades will join it here. The animal Shop is reached via NPCs.
+fn draw_upgrades(app: &mut GameApp, now: DateTime<Utc>, ctx: Ctx) {
+    use crate::game::world_chunks::zoo_tiles_for_level;
+    use crate::game::zoo::{MAX_ZOO_LEVEL, ZOO_CAPACITY_PER_LEVEL, zoo_upgrade_duration};
+
+    let coins = app.zoo.coins;
+
+    let pw = 560.0;
+    let ph = 260.0;
+    let (px, py) = (ctx.center.x - pw * 0.5, ctx.center.y - ph * 0.5);
+
+    panel(&ctx, px, py, pw, ph);
+    title(&ctx, px + 26.0, py + 30.0, "UPGRADES");
+    right_text(&ctx, px + pw - 26.0, py + 30.0, &format!("{coins} coins"));
+
+    // ── Zoo expansion ──────────────────────────────────────────────────────
+    let lvl = app.zoo.zoo_level;
+    let used = app.zoo.animals.len();
+    let cap = app.zoo.max_animal_capacity();
+    let tiles = zoo_tiles_for_level(lvl);
+
+    let sx = px + 26.0;
+    label(&ctx, sx, py + 74.0, "Zoo Expansion", 18.0, ACCENT);
+    label(
+        &ctx,
+        sx,
+        py + 98.0,
+        &format!("{used}/{cap} animals  ·  plot {tiles}×{tiles} tiles  ·  level {lvl}"),
+        15.0,
+        TEXT_DIM,
+    );
+
+    let bw = pw - 52.0;
+    let by = py + 120.0;
+    if let Some(ends_at) = app.zoo.zoo_upgrade_finishes_at {
+        let remaining = (ends_at - now).num_seconds().max(0);
+        if remaining == 0 {
+            if button(&ctx, sx, by, bw, 32.0, "Claim expansion", true)
+                && app.dispatch(crate::game::action::Action::ClaimZooUpgrade, now).is_some()
+            {
+                app.set_status("Zoo expanded!");
+            }
+        } else {
+            label(
+                &ctx,
+                sx,
+                by + 16.0,
+                &format!("building · {} remaining", fmt_secs(remaining)),
+                16.0,
+                TEXT_DIM,
+            );
+        }
+    } else if lvl >= MAX_ZOO_LEVEL {
+        label(&ctx, sx, by + 16.0, "Zoo is at its maximum size.", 16.0, TEXT_DIM);
+    } else {
+        let cost = app.zoo.zoo_upgrade_cost().unwrap_or(0);
+        let secs = zoo_upgrade_duration(lvl).map(|d| d.num_seconds()).unwrap_or(0);
+        let next_tiles = zoo_tiles_for_level(lvl + 1);
+        label(
+            &ctx,
+            sx,
+            by - 2.0,
+            &format!("Next: plot {next_tiles}×{next_tiles}  ·  +{ZOO_CAPACITY_PER_LEVEL} capacity  ·  builds in {}",
+                fmt_secs(secs)),
+            14.0,
+            TEXT_DIM,
+        );
+        let lbl = format!("Expand  ·  {cost} coins");
+        if button(&ctx, sx, by + 18.0, bw, 32.0, &lbl, coins >= cost)
+            && app.dispatch(crate::game::action::Action::StartZooUpgrade, now).is_some()
+        {
+            app.set_status("Zoo expansion under way");
+        }
+    }
+
+    if button(&ctx, px + pw - 26.0 - 120.0, py + ph - 42.0, 120.0, 30.0, "Close  [Esc]", true) {
+        app.set_screen(Screen::World);
+    }
+}
+
 fn buy_exotic(app: &mut GameApp, sp: SpeciesId, price: Price, now: DateTime<Utc>) {
+    // The exotic shop charges a window-specific price, which isn't expressible as
+    // a plain `Action` yet — so for co-op v1 it stays host/solo only. (Visitors
+    // can still buy from the regular shop.)
+    if app.is_guest() {
+        app.set_status("the exotic shop is host-only in co-op for now");
+        return;
+    }
     let ok = match price {
         Price::Coins(c) if app.zoo.coins >= c => {
             app.zoo.coins -= c;
@@ -464,8 +655,7 @@ fn buy_exotic(app: &mut GameApp, sp: SpeciesId, price: Price, now: DateTime<Utc>
         return;
     }
     if app.zoo.spawn_animal_freeform(sp, 1, now).is_ok() {
-        app.sync_critters();
-        app.save_under_lock(now);
+        app.after_zoo_mutation(now);
         app.push_notification(
             species::get(sp).display_name,
             "Purchased",
@@ -526,16 +716,17 @@ fn draw_nest(app: &mut GameApp, now: DateTime<Utc>, ctx: Ctx) {
 
         let act_y = py + ph - 42.0;
         if button(&ctx, px + 26.0, act_y, 180.0, 30.0, "Collect", true) {
-            match app.zoo.nest_collect(nest_id, now) {
-                Ok((species, is_hybrid)) => {
-                    app.sync_critters();
-                    app.save_under_lock(now);
+            use crate::game::action::{Action, ActionOutcome};
+            match app.dispatch(Action::NestCollect(nest_id), now) {
+                Some(ActionOutcome::Offspring { species, is_hybrid }) => {
                     let dname = species::get(species).display_name;
                     let amount = if is_hybrid { "Hybrid! +1 DNA" } else { "Collected" };
                     app.push_notification(dname, amount, crate::app::NotifIcon::Animal(species));
                     app.set_screen(Screen::World);
                 }
-                Err(e) => app.set_status(format!("{e}")),
+                // Visitor: forwarded; the offspring lands via the host snapshot.
+                None if app.is_guest() => app.set_screen(Screen::World),
+                _ => {}
             }
         }
         if button(&ctx, px + pw - 26.0 - 120.0, act_y, 120.0, 30.0, "Close  [Esc]", true) {
@@ -681,26 +872,16 @@ fn draw_nest(app: &mut GameApp, now: DateTime<Utc>, ctx: Ctx) {
     }
 
     // ── Apply the chosen action (after all draws / hit-tests). ──
+    use crate::game::action::Action;
     if let Some(slot) = remove_slot {
-        match app.zoo.remove_from_nest(nest_id, slot) {
-            Ok(_) => {
-                app.sync_critters();
-                app.save_under_lock(now);
-                app.set_status("removed from nest");
-            }
-            Err(e) => app.set_status(format!("{e}")),
+        if app.dispatch(Action::RemoveFromNest { nest: nest_id, slot }, now).is_some() {
+            app.set_status("removed from nest");
         }
     } else if do_deposit {
         // Hand off to the full-screen spotlight picker.
         app.enter_deposit_mode(nest_id);
-    } else if do_breed {
-        match app.zoo.nest_breed(nest_id, now) {
-            Ok(_) => {
-                app.save_under_lock(now);
-                app.set_status("breeding started");
-            }
-            Err(e) => app.set_status(format!("{e}")),
-        }
+    } else if do_breed && app.dispatch(Action::NestBreed(nest_id), now).is_some() {
+        app.set_status("breeding started");
     }
 }
 
@@ -761,18 +942,278 @@ fn draw_structure(app: &mut GameApp, now: DateTime<Utc>, ctx: Ctx) {
         app.set_screen(Screen::World);
     }
 
+    use crate::game::action::{Action, ActionOutcome};
     if do_collect {
-        let g = app.zoo.collect_food_structure(sid, now);
-        app.save_under_lock(now);
-        app.set_status(format!("collected {g} food"));
-    } else if do_upgrade {
-        match app.zoo.upgrade_structure(sid, now) {
-            Ok(l) => {
-                app.save_under_lock(now);
-                app.set_status(format!("upgraded to level {l}"));
-            }
-            Err(e) => app.set_status(format!("{e}")),
+        match app.dispatch(Action::CollectFoodStructure(sid), now) {
+            Some(ActionOutcome::Food(g)) => app.set_status(format!("collected {g} food")),
+            None if app.is_guest() => app.set_status("collecting…"),
+            _ => {}
         }
+    } else if do_upgrade && app.dispatch(Action::UpgradeStructure(sid), now).is_some() {
+        app.set_status("upgraded the structure");
+    }
+}
+
+// ─────────────────────────── Pedestal ───────────────────────────
+
+/// Panel for a placed pedestal: shows its dedicated animal's auto-income (if
+/// any) and offers Dedicate / Release / Move / Remove. Unlike the host-gated
+/// Sell, every co-op player may manage pedestals.
+fn draw_pedestal(app: &mut GameApp, now: DateTime<Utc>, ctx: Ctx) {
+    use crate::game::action::Action;
+    use crate::game::species::{self, IncomeKind};
+
+    let Some(pid) = app.active_pedestal else {
+        app.set_screen(Screen::World);
+        return;
+    };
+    let Some(ped) = app.zoo.pedestals.iter().find(|p| p.id == pid) else {
+        app.set_screen(Screen::World);
+        return;
+    };
+    let dedicated = ped.animal;
+    // Lock/cooldown remaining seconds (None when neither applies).
+    let lock_secs = ped.lock_until().filter(|_| ped.is_locked(now)).map(|t| (t - now).num_seconds());
+    let cooldown_secs = ped.cooldown_until.filter(|_| ped.on_cooldown(now)).map(|t| (t - now).num_seconds());
+
+    let pw = 440.0;
+    let ph = 250.0;
+    let (px, py) = (ctx.center.x - pw * 0.5, ctx.center.y - ph * 0.5);
+
+    panel(&ctx, px, py, pw, ph);
+    title(&ctx, px + 26.0, py + 30.0, "PEDESTAL");
+
+    let mut y = py + 72.0;
+    match dedicated.and_then(|aid| app.zoo.animals.get(&aid)) {
+        Some(a) => {
+            let def = species::get(a.species);
+            let cur = match def.income_kind {
+                IncomeKind::Coin => "coins",
+                IncomeKind::DnaHelix => "DNA",
+            };
+            right_text(&ctx, px + pw - 26.0, py + 30.0, &format!("Lv {}", a.level));
+            for (lbl, val) in [
+                ("Dedicated".to_string(), def.display_name.to_string()),
+                (format!("{cur} / sec"), format!("{:.2}", a.rate_per_sec())),
+                ("Stored".to_string(), format!("{} / {}", a.stored_at(now), a.storage_cap())),
+            ] {
+                label(&ctx, px + 26.0, y, &lbl, 18.0, TEXT_DIM);
+                right_text(&ctx, px + pw - 26.0, y, &val);
+                y += 30.0;
+            }
+            let note = match lock_secs {
+                Some(s) => format!("Locked to pedestal · {} left", fmt_secs(s)),
+                None => "Auto-collects when full (10× offline). Income only.".to_string(),
+            };
+            label(&ctx, px + 26.0, y, &note, 15.0, TEXT_DIM);
+        }
+        None => {
+            label(
+                &ctx,
+                px + 26.0,
+                y,
+                "No animal yet. Dedicate one of your",
+                17.0,
+                TEXT_DIM,
+            );
+            label(
+                &ctx,
+                px + 26.0,
+                y + 24.0,
+                "followers to auto-collect its income.",
+                17.0,
+                TEXT_DIM,
+            );
+            if let Some(s) = cooldown_secs {
+                label(&ctx, px + 26.0, y + 50.0, &format!("Cooling down · {} left", fmt_secs(s)), 15.0, STATUS_AMBER);
+            }
+        }
+    }
+
+    let act_y = py + ph - 42.0;
+    let mut do_dedicate = false;
+    let mut do_release = false;
+    let mut do_move = false;
+    let mut do_remove = false;
+    if dedicated.is_some() {
+        // Release is locked out during the 48h lock.
+        if button(&ctx, px + 26.0, act_y, 110.0, 30.0, "Release", lock_secs.is_none()) {
+            do_release = true;
+        }
+    } else if button(
+        &ctx,
+        px + 26.0,
+        act_y,
+        140.0,
+        30.0,
+        "Dedicate animal",
+        !app.following.is_empty() && cooldown_secs.is_none(),
+    ) {
+        do_dedicate = true;
+    }
+    if button(&ctx, px + pw - 26.0 - 290.0, act_y, 90.0, 30.0, "Move", true) {
+        do_move = true;
+    }
+    // Removing is blocked while a locked animal sits on the pedestal.
+    if button(&ctx, px + pw - 26.0 - 190.0, act_y, 90.0, 30.0, "Remove", lock_secs.is_none()) {
+        do_remove = true;
+    }
+    if button(&ctx, px + pw - 26.0 - 90.0, act_y, 90.0, 30.0, "Close  [Esc]", true) {
+        app.set_screen(Screen::World);
+    }
+
+    if do_dedicate {
+        app.enter_dedicate_mode(pid);
+    } else if do_release && app.dispatch(Action::UndedicateAnimal(pid), now).is_some() {
+        app.set_status("released the animal");
+    } else if do_move {
+        app.begin_move_pedestal(pid);
+    } else if do_remove && app.dispatch(Action::RemovePedestal(pid), now).is_some() {
+        app.set_status("removed the pedestal");
+        app.set_screen(Screen::World);
+    }
+}
+
+// ─────────────────────────── Merchant ───────────────────────────
+
+/// Structure-merchant shop: buys placeable structures into the hotbar. Today
+/// one offer (pedestals); the catalog is future-proofed via `merchant::offers`.
+fn draw_merchant(app: &mut GameApp, now: DateTime<Utc>, ctx: Ctx) {
+    use crate::game::action::Action;
+    use crate::game::merchant::{self, StructureItemKind};
+    use crate::game::pedestal::{MAX_PEDESTALS, pedestal_cost};
+
+    // NPC shop: pop up on the side opposite the player, like the inspect panel.
+    let ctx = side_ctx(app, ctx);
+    let pw = 480.0;
+    let ph = 250.0;
+    let (px, py) = (ctx.center.x - pw * 0.5, ctx.center.y - ph * 0.5);
+
+    panel(&ctx, px, py, pw, ph);
+    title(&ctx, px + 26.0, py + 30.0, "STRUCTURE MERCHANT");
+    right_text(&ctx, px + pw - 26.0, py + 30.0, &format!("{} DNA", app.zoo.dna_helix));
+
+    let mut y = py + 78.0;
+    let mut buy_pedestal = false;
+    for offer in merchant::offers() {
+        label(&ctx, px + 26.0, y, offer.name, 19.0, ACCENT);
+        label(&ctx, px + 26.0, y + 22.0, offer.blurb, 14.0, TEXT_DIM);
+        match offer.kind {
+            StructureItemKind::Pedestal => {
+                let owned = app.zoo.pedestals_owned();
+                label(
+                    &ctx,
+                    px + 26.0,
+                    y + 42.0,
+                    &format!("Owned {owned}/{MAX_PEDESTALS}"),
+                    14.0,
+                    TEXT_DIM,
+                );
+                match pedestal_cost(owned) {
+                    Some(cost) => {
+                        let lbl = format!("Buy · {cost} DNA");
+                        if button(&ctx, px + pw - 26.0 - 150.0, y + 4.0, 150.0, 32.0, &lbl, app.zoo.dna_helix >= cost) {
+                            buy_pedestal = true;
+                        }
+                    }
+                    None => {
+                        label(&ctx, px + pw - 26.0 - 150.0, y + 24.0, "Max owned", 16.0, TEXT_DIM);
+                    }
+                }
+            }
+        }
+        y += 76.0;
+    }
+
+    if button(&ctx, px + pw - 26.0 - 120.0, py + ph - 42.0, 120.0, 30.0, "Close  [Esc]", true) {
+        app.set_screen(Screen::World);
+    }
+
+    if buy_pedestal {
+        match app.dispatch(Action::BuyPedestalItem, now) {
+            Some(_) => app.set_status("bought a pedestal — find it in your hotbar"),
+            None if app.is_guest() => app.set_status("buying…"),
+            None => {}
+        }
+    }
+}
+
+/// Exotic-merchant shop: the time-windowed exotic-animal catalog (reuses the
+/// `exotic_shop` window logic + the shared `buy_exotic` path). When the window is
+/// closed, offers the DNA "skip wait" to open it early. Pops up on the side
+/// opposite the player, like the other NPC shops.
+fn draw_exotic_shop(app: &mut GameApp, now: DateTime<Utc>, ctx: Ctx) {
+    let ctx = side_ctx(app, ctx);
+    let coins = app.zoo.coins;
+    let dna = app.zoo.dna_helix;
+
+    // Resolve the current (or paid-skip) window's offerings.
+    let window = exotic_shop::effective_window(now, app.zoo.exotic_skip_window);
+    let exotics: Vec<(SpeciesId, String, Price, bool)> = window
+        .as_ref()
+        .map(|w| {
+            w.offerings
+                .iter()
+                .map(|o| {
+                    let def = species::get(o.species);
+                    let (label, afford) = match o.price {
+                        Price::Coins(c) => (format!("{}  ·  {} c", def.display_name, c), coins >= c),
+                        Price::Dna(d) => (format!("{}  ·  {} DNA", def.display_name, d), dna >= d),
+                    };
+                    (o.species, label, o.price, afford)
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let closed_secs = window
+        .is_none()
+        .then(|| exotic_shop::seconds_until_state_change(now));
+    let skip_cost = exotic_shop::SKIP_WAIT_DNA_COST;
+
+    let pw = 480.0;
+    let rows = exotics.len().max(1) as f32;
+    let ph = 150.0 + rows * 34.0;
+    let (px, py) = (ctx.center.x - pw * 0.5, ctx.center.y - ph * 0.5);
+
+    panel(&ctx, px, py, pw, ph);
+    title(&ctx, px + 26.0, py + 30.0, "EXOTIC MERCHANT");
+    right_text(&ctx, px + pw - 26.0, py + 30.0, &format!("{coins} coins    {dna} DNA"));
+
+    let mut y = py + 74.0;
+    if let Some(secs) = closed_secs {
+        label(
+            &ctx,
+            px + 26.0,
+            y + 6.0,
+            &format!("Sold out · restocks in {}", fmt_secs(secs)),
+            16.0,
+            TEXT_DIM,
+        );
+        y += 36.0;
+        if button(
+            &ctx,
+            px + 26.0,
+            y,
+            pw - 52.0,
+            32.0,
+            &format!("Restock now · {skip_cost} DNA"),
+            dna >= skip_cost,
+        ) {
+            if app.dispatch(crate::game::action::Action::SkipExoticWait, now).is_some() {
+                app.set_status("restocked the exotic merchant early!");
+            }
+        }
+    } else {
+        for (id, lbl, price, afford) in &exotics {
+            if button(&ctx, px + 26.0, y, pw - 52.0, 30.0, lbl, *afford) {
+                buy_exotic(app, *id, *price, now);
+            }
+            y += 34.0;
+        }
+    }
+
+    if button(&ctx, px + pw - 26.0 - 120.0, py + ph - 42.0, 120.0, 30.0, "Close  [Esc]", true) {
+        app.set_screen(Screen::World);
     }
 }
 
@@ -836,8 +1277,10 @@ fn button(ctx: &Ctx, x: f32, y: f32, w: f32, h: f32, text: &str, enabled: bool) 
 
 fn fmt_secs(secs: i64) -> String {
     let s = secs.max(0);
-    let (h, m, sec) = (s / 3600, (s % 3600) / 60, s % 60);
-    if h > 0 {
+    let (d, h, m, sec) = (s / 86_400, (s % 86_400) / 3600, (s % 3600) / 60, s % 60);
+    if d > 0 {
+        format!("{d}d {h}h")
+    } else if h > 0 {
         format!("{h}h {m}m")
     } else if m > 0 {
         format!("{m}m {sec}s")

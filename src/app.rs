@@ -495,6 +495,13 @@ pub struct GameApp {
     /// full authoritative `HashMap<player_id, Zoo>` arrives with the SpacetimeDB
     /// model in Phase 4. Populated today only by the F4 debug neighbour.
     pub peer_zoos: HashMap<Uuid, Zoo>,
+    /// The player's active biome expedition (Phase 3), if they've launched one
+    /// from the hub. `None` while at the hub. Drives the new target→engage catch
+    /// loop; see [`crate::expedition::Expedition`].
+    pub expedition: Option<crate::expedition::Expedition>,
+    /// Equipped catch loadout (in-memory starter kit for now; persistence lands
+    /// with the wider gear economy). Feeds the engagement's catch stats.
+    pub loadout: crate::game::gear::Loadout,
 }
 
 /// Far-out zoom floor allowed only in biome-debug mode, so the whole 500k
@@ -595,6 +602,102 @@ impl GameApp {
             disconnect_reason: None,
             active_player: None,
             peer_zoos: HashMap::new(),
+            expedition: None,
+            loadout: crate::game::gear::Loadout::starter(),
+        }
+    }
+
+    /// The local player's current catch stats, summed from their equipped
+    /// loadout and owned-collection bonuses (distinct species + total Rank).
+    /// Fed to the active expedition's engagement each frame.
+    pub fn catch_stats(&self) -> crate::game::catch::CatchStats {
+        let distinct = self.zoo.animals.len();
+        let rank_sum: u32 = self.zoo.animals.values().map(|a| a.stage as u32).sum();
+        crate::game::gear::catch_stats(&self.loadout, distinct, rank_sum)
+    }
+
+    /// Launch (or, if already out, return from) a biome expedition. F6 — the
+    /// stand-in for the hub's expedition board until the board UI lands.
+    fn toggle_expedition(&mut self) {
+        if self.expedition.is_some() {
+            self.expedition = None;
+            self.set_status("Returned to the hub");
+            return;
+        }
+        let seed = ((rand::rand() as u64) << 32) | rand::rand() as u64;
+        let exp = crate::expedition::Expedition::launch(
+            crate::game::species::HabitatTheme::Forest,
+            seed,
+        );
+        let n = exp.instance.remaining();
+        self.expedition = Some(exp);
+        self.set_status(format!(
+            "Expedition: Forest ({n} animals) — T target · 1 net · 2 lure · 3 trap · Space skill-check · F6 leave"
+        ));
+    }
+
+    /// Per-frame update for an active expedition: target the nearest spawn on
+    /// `T`, fire abilities/skill-checks, tick the engagement, and grant any
+    /// capture into the hub zoo.
+    fn update_expedition(&mut self, now: DateTime<Utc>) {
+        use crate::game::catch::AbilityKind;
+        if self.expedition.is_none() {
+            return;
+        }
+        let stats = self.catch_stats();
+        let dt = get_frame_time();
+
+        // Input (keyboard harness — in-world click targeting follows with the
+        // instance renderer).
+        if is_key_pressed(KeyCode::T) {
+            if let Some(exp) = self.expedition.as_mut() {
+                if exp.engage_first_live().is_some() {
+                    self.set_status("Engaging — deplete its catch bar");
+                } else {
+                    self.set_status("Expedition cleared — F6 to return to the hub");
+                }
+            }
+        }
+        if let Some(exp) = self.expedition.as_mut() {
+            if is_key_pressed(KeyCode::Key1) {
+                exp.use_ability(AbilityKind::Net, &stats);
+            }
+            if is_key_pressed(KeyCode::Key2) {
+                exp.use_ability(AbilityKind::Lure, &stats);
+            }
+            if is_key_pressed(KeyCode::Key3) {
+                exp.use_ability(AbilityKind::Trap, &stats);
+            }
+            if is_key_pressed(KeyCode::Space) {
+                exp.hit_skill_check(&stats);
+            }
+        }
+
+        // Advance the engagement and finalize a capture into the zoo.
+        let captured = self.expedition.as_mut().and_then(|e| e.tick(dt, &stats));
+        if let Some(species) = captured {
+            self.grant_expedition_capture(species, now);
+        }
+    }
+
+    /// Tame an expedition catch into the hub zoo (mirrors `resolve_catch`'s zoo
+    /// side): capacity-guard new species, then spawn it freeform and notify.
+    fn grant_expedition_capture(&mut self, species: species::SpeciesId, now: DateTime<Utc>) {
+        let name = species::get(species).display_name;
+        if !self.zoo.owns_species(species) && self.zoo.at_animal_capacity() {
+            self.set_status("Zoo at capacity — expand it to capture more animals");
+            return;
+        }
+        match self.zoo.spawn_animal_freeform(species, 1, now) {
+            Ok(_) => {
+                self.sounds.play("income_sfx");
+                self.sync_critters();
+                self.save_under_lock(now);
+                self.push_notification(name, "Captured!", NotifIcon::Animal(species));
+                let left = self.expedition.as_ref().map_or(0, |e| e.instance.remaining());
+                self.set_status(format!("Captured {name}! {left} left in the expedition"));
+            }
+            Err(e) => self.set_status(format!("Capture failed: {e}")),
         }
     }
 
@@ -1158,6 +1261,16 @@ impl GameApp {
             } else {
                 "Tile-grid overlay off"
             });
+        }
+        // F6 launches / returns from a biome expedition (Phase 3). While one is
+        // active it captures the catch keys and suppresses normal world input;
+        // avatar movement (sampled by the controller) keeps working.
+        if is_key_pressed(KeyCode::F6) {
+            self.toggle_expedition();
+        }
+        if self.expedition.is_some() {
+            self.update_expedition(now);
+            return;
         }
 
         let mp = mouse_position();
@@ -2451,6 +2564,9 @@ impl GameApp {
         }
         if self.depositing.is_some() || self.dedicating.is_some() {
             world::draw_deposit_overlay(self);
+        }
+        if self.expedition.is_some() {
+            world::draw_expedition_hud(self);
         }
         self.draw_cursor();
     }

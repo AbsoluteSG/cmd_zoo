@@ -684,6 +684,69 @@ fn draw_tile_grid_overlay(app: &GameApp) {
     }
 }
 
+/// Minimal expedition HUD (Phase 3 harness): the instance summary, the live
+/// targets, and — while engaging — the catch-resistance bar, ability hints, and
+/// the skill-check prompt. A keyboard-driven stand-in until the in-world
+/// instance renderer + click targeting land.
+pub fn draw_expedition_hud(app: &GameApp) {
+    let Some(exp) = app.expedition.as_ref() else { return };
+    let inst = &exp.instance;
+    let cx = screen_width() * 0.5;
+    let pw = 380.0;
+    let px = cx - pw * 0.5;
+    let live: Vec<&crate::game::biome_instance::WildSpawn> = inst.live().collect();
+    let rows = live.len().min(8);
+    let top = 40.0;
+    let ph = 150.0 + rows as f32 * 20.0;
+    draw_rectangle(px, top, pw, ph, color_u8!(18, 22, 30, 210));
+    draw_rectangle_lines(px, top, pw, ph, 2.0, color_u8!(120, 200, 255, 180));
+
+    let mut y = top + 24.0;
+    let title = format!("EXPEDITION · {:?} · {} left", inst.theme, inst.remaining());
+    let tw = measure_text(&title, None, 20, 1.0).width;
+    text_shadow(&title, cx - tw * 0.5, y, 20.0, COIN_GOLD);
+    y += 28.0;
+
+    if let Some(eng) = exp.engagement.as_ref() {
+        let name = crate::game::species::get(eng.target.species).display_name;
+        text_shadow(&format!("Engaging {name} (T{})", eng.target.tier), px + 14.0, y, 18.0, TEXT);
+        y += 14.0;
+        let bw = pw - 28.0;
+        let bx = px + 14.0;
+        draw_rectangle(bx, y, bw, 14.0, color_u8!(40, 44, 52, 255));
+        // The bar shows *remaining* catch-resistance, emptying toward capture.
+        let remaining = (1.0 - eng.progress()).clamp(0.0, 1.0);
+        draw_rectangle(bx, y, bw * remaining, 14.0, color_u8!(225, 110, 110, 255));
+        draw_rectangle_lines(bx, y, bw, 14.0, 1.5, color_u8!(255, 255, 255, 90));
+        y += 26.0;
+        text_shadow("[1] Net    [2] Lure    [3] Trap", px + 14.0, y, 16.0, TEXT_DIM);
+        y += 22.0;
+        if let Some(sc) = eng.skill_check {
+            let pulse = (get_time() as f32 * 8.0).sin() * 0.5 + 0.5;
+            let col = Color::new(1.0, 0.9, 0.3, 0.6 + 0.4 * pulse);
+            text_shadow("SKILL CHECK!  press [SPACE]", px + 14.0, y, 18.0, col);
+            let gw = pw - 28.0;
+            let frac = (sc.remaining / sc.window).clamp(0.0, 1.0);
+            draw_rectangle(px + 14.0, y + 6.0, gw * frac, 5.0, col);
+            y += 24.0;
+        } else {
+            y += 24.0;
+        }
+    } else {
+        text_shadow("Press [T] to target the next animal", px + 14.0, y, 18.0, TEXT);
+        y += 36.0;
+    }
+
+    for s in live.iter().take(rows) {
+        let nm = crate::game::species::get(s.species).display_name;
+        let is_target = exp.target == Some(s.id);
+        let col = if is_target { COIN_GOLD } else { TEXT_DIM };
+        let mark = if is_target { ">" } else { "-" };
+        text_shadow(&format!("{mark} {nm} (T{})", s.tier), px + 18.0, y, 16.0, col);
+        y += 20.0;
+    }
+}
+
 /// Draw each neighbouring plot on the shared hub (Phase 2 additive de-risk):
 /// the plot rectangle plus representative nest/food/pedestal markers and a
 /// placeholder avatar, all resolved from the peer zoo's own `plot_origin` via

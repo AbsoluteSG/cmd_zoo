@@ -12,6 +12,7 @@ pub use cmd_zoo_core::{game, persistence, share};
 pub mod app;
 pub mod audio;
 pub mod catching;
+pub mod expedition;
 pub mod input;
 pub mod net;
 pub mod render;

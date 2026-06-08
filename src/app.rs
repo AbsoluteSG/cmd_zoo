@@ -480,6 +480,10 @@ pub struct GameApp {
     /// zooming far past the gameplay limit. Toggled with F3. Used to record
     /// clean biome-layout showcases.
     pub debug_biome: bool,
+    /// Debug tile-grid overlay (F5): draws the per-plot tile grid for the home
+    /// zoo and any neighbours, filling tiles occupied by a structure (nest, food
+    /// structure, or pedestal). A placement-debugging aid; off by default.
+    pub debug_grid: bool,
     /// Why the host disconnected, shown on the `Screen::Disconnected` overlay.
     pub disconnect_reason: Option<crate::net::protocol::ByeReason>,
     /// The other player (`player_id`) whose interaction panel (`Screen::Player`)
@@ -587,6 +591,7 @@ impl GameApp {
             npcs: crate::game::npc::default_npcs(),
             grass_quality: crate::render::grass::GrassQuality::from_env(),
             debug_biome: false,
+            debug_grid: false,
             disconnect_reason: None,
             active_player: None,
             peer_zoos: HashMap::new(),
@@ -1144,6 +1149,15 @@ impl GameApp {
         // F4 toggles a simulated neighbouring plot on the hub (Phase 2 de-risk).
         if is_key_pressed(KeyCode::F4) {
             self.toggle_debug_neighbor(now);
+        }
+        // F5 toggles the tile-grid placement overlay.
+        if is_key_pressed(KeyCode::F5) {
+            self.debug_grid = !self.debug_grid;
+            self.set_status(if self.debug_grid {
+                "Tile-grid overlay on (F5)"
+            } else {
+                "Tile-grid overlay off"
+            });
         }
 
         let mp = mouse_position();

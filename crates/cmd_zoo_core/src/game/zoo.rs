@@ -431,20 +431,25 @@ impl Zoo {
         tile.0.abs() <= r && tile.1.abs() <= r
     }
 
-    /// Spread `N` items evenly across the plot's tile row at `row_y`, inset one
-    /// tile from each side fence, returning centre-relative tile coords
-    /// left→right. Shared by the nest and food-structure rows.
+    /// Lay `N` items in an **equidistant** row at `row_y`, centred on the plot.
+    /// Uses a single integer tile `step` (the largest that still fits within one
+    /// tile of each fence), so every gap is identical — no float rounding, no
+    /// clustering at the ends. Shared by the nest and food-structure rows.
     fn row_tiles<const N: usize>(&self, row_y: i32) -> [(i32, i32); N] {
         let edge = (self.plot_tile_radius() - 1).max(0);
         let mut out = [(0, 0); N];
+        if N <= 1 {
+            if let Some(p) = out.first_mut() {
+                *p = (0, row_y);
+            }
+            return out;
+        }
+        let n = N as i32;
+        // Largest uniform step keeping the half-span (step·(n-1)/2) within `edge`.
+        let step = ((2 * edge) / (n - 1)).max(1);
+        let start = -(step * (n - 1)) / 2;
         for (i, p) in out.iter_mut().enumerate() {
-            let x = if N <= 1 {
-                0
-            } else {
-                let t = i as f32 / (N as f32 - 1.0);
-                (-(edge as f32) + 2.0 * edge as f32 * t).round() as i32
-            };
-            *p = (x, row_y);
+            *p = (start + i as i32 * step, row_y);
         }
         out
     }
@@ -1880,6 +1885,13 @@ mod tests {
         assert!(food.iter().all(|t| zoo.tile_in_bounds(*t)));
         assert!(nests.first().unwrap().0 < nests.last().unwrap().0);
         assert!(food.first().unwrap().0 < food.last().unwrap().0);
+        // Equidistant: every adjacent gap is identical (no 2-1-2 clustering).
+        let gaps: Vec<i32> = nests.windows(2).map(|w| w[1].0 - w[0].0).collect();
+        assert!(gaps.iter().all(|g| *g == gaps[0]), "nest spacing not uniform: {gaps:?}");
+        let fgaps: Vec<i32> = food.windows(2).map(|w| w[1].0 - w[0].0).collect();
+        assert!(fgaps.iter().all(|g| *g == fgaps[0]), "food spacing not uniform: {fgaps:?}");
+        // The row is centred on the plot.
+        assert_eq!(nests[nests.len() / 2].0, 0);
     }
 
     #[test]

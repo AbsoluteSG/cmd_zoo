@@ -84,6 +84,11 @@ pub fn draw_scene(app: &mut GameApp, now: DateTime<Utc>) {
     draw_pedestals(app, now);
     draw_npcs(app);
 
+    // --- Debug: tile-grid placement overlay (F5) ---------------------------
+    if app.debug_grid {
+        draw_tile_grid_overlay(app);
+    }
+
     // --- Waypoint beacons: glowing beams on the ground ---------------------
     draw_waypoint_beams(app);
 
@@ -633,6 +638,50 @@ fn draw_zoo_plot(cam: &Camera, center: Vec2, half: f32) {
         (thick * 0.5).max(1.0),
         color_u8!(160, 120, 78, 200),
     );
+}
+
+/// Debug overlay (F5): draw the per-plot tile grid for the home zoo and every
+/// neighbour, outlining each tile and filling those occupied by a structure
+/// (owned nest, owned food structure, or placed pedestal). A placement aid for
+/// verifying the tile layout — note habitats live on a separate isometric grid
+/// and are intentionally not shown here.
+fn draw_tile_grid_overlay(app: &GameApp) {
+    use crate::game::structure::MAX_FOOD_STRUCTURES;
+    use crate::game::world_chunks::ZOO_TILE_W;
+    use std::collections::HashSet;
+    let cam = app.camera;
+    let half = ZOO_TILE_W * 0.5;
+    for zoo in std::iter::once(&app.zoo).chain(app.peer_zoos.values()) {
+        // Tiles reserved by a structure.
+        let mut occ: HashSet<(i32, i32)> = HashSet::new();
+        let nests = zoo.nest_tiles();
+        for t in nests.iter().take(zoo.nest_count as usize) {
+            occ.insert(*t);
+        }
+        let foods = zoo.food_structure_tiles();
+        for t in foods.iter().take(zoo.structures.len().min(MAX_FOOD_STRUCTURES)) {
+            occ.insert(*t);
+        }
+        for p in &zoo.pedestals {
+            occ.insert(p.tile);
+        }
+
+        let r = zoo.plot_tile_radius();
+        let s = ZOO_TILE_W * cam.zoom;
+        for ty in -r..=r {
+            for tx in -r..=r {
+                let c = zoo.tile_to_world((tx, ty));
+                let tl = view::world_to_screen(vec2(c.x - half, c.y - half), &cam);
+                if occ.contains(&(tx, ty)) {
+                    draw_rectangle(tl.x, tl.y, s, s, color_u8!(225, 90, 80, 90));
+                }
+                draw_rectangle_lines(tl.x, tl.y, s, s, 1.0, color_u8!(255, 255, 255, 48));
+            }
+        }
+        // Mark the plot origin (tile 0,0 centre) so the grid is easy to orient.
+        let o = view::world_to_screen(zoo.tile_to_world((0, 0)), &cam);
+        draw_circle(o.x, o.y, 3.0 * cam.zoom.max(1.0), color_u8!(120, 200, 255, 220));
+    }
 }
 
 /// Draw each neighbouring plot on the shared hub (Phase 2 additive de-risk):

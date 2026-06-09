@@ -654,14 +654,11 @@ impl GameApp {
         let stats = self.catch_stats();
         let dt = get_frame_time();
 
-        // Advance the roaming wild animals (and keep the avatar inside the arena).
+        // Advance the roaming wild animals (the avatar is moved + clamped to the
+        // arena in `handle_input`'s expedition movement block).
         let avatar_pos = self.session.my_avatar().pos;
         if let Some(exp) = self.expedition.as_mut() {
             exp.update_world(dt, avatar_pos);
-            let size = exp.instance.size;
-            let a = self.session.my_avatar_mut();
-            a.pos.x = a.pos.x.clamp(0.0, size.x);
-            a.pos.y = a.pos.y.clamp(0.0, size.y);
         }
 
         // Click an animal to target + engage it (the core flow). T still targets
@@ -1244,13 +1241,47 @@ impl GameApp {
             });
         }
         // F6 launches / returns from a biome expedition (Phase 3). While one is
-        // active it captures the catch keys and suppresses normal world input;
-        // avatar movement (sampled by the controller) keeps working.
+        // active it's just free-roam in a biome instance: the catch keys + the
+        // avatar movement and camera run here, and the rest of `handle_input`
+        // (hub-only interactions) is skipped.
         if is_key_pressed(KeyCode::F6) {
             self.toggle_expedition();
         }
         if self.expedition.is_some() {
             self.update_expedition(now);
+
+            // Free-roam movement + camera (same path the hub uses, inlined so we
+            // don't also run hub interactions like inspect/redeem/hotbar).
+            let dt = get_frame_time();
+            let local_intent = {
+                let ctx = ControllerCtx {
+                    dt,
+                    avatar: self.session.my_avatar(),
+                    menu_open: false,
+                };
+                self.controller.sample(&ctx)
+            };
+            {
+                let world = avatar_system::World { habitats: &self.zoo.habitats };
+                let id = self.session.local_player_id;
+                if let Some(a) = self.session.avatars.get_mut(&id) {
+                    avatar_system::step(a, &local_intent, &world, dt, &self.behaviors);
+                }
+            }
+            // Keep the avatar inside the arena (clamp after the move).
+            if let Some(exp) = self.expedition.as_ref() {
+                let size = exp.instance.size;
+                let a = self.session.my_avatar_mut();
+                a.pos.x = a.pos.x.clamp(0.0, size.x);
+                a.pos.y = a.pos.y.clamp(0.0, size.y);
+            }
+            self.apply_smooth_zoom(dt);
+            self.camera.follow(
+                self.session.my_avatar().pos,
+                vec2(screen_width(), screen_height()),
+                dt,
+                8.0,
+            );
             return;
         }
 

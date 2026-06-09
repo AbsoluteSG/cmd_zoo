@@ -147,8 +147,15 @@ pub struct CatchEngagement {
     pub contribution: f32,
     /// Seconds until the next skill-check window may spawn.
     next_check_in: f32,
+    /// Accumulated time toward the next discrete depletion tick.
+    tick_accum: f32,
     rng: LcgRng,
 }
+
+/// Cadence of the stat-roll depletion. The bar steps down once per tick rather
+/// than draining continuously, so progress reads as increments — and it mirrors
+/// an authoritative server tick when this runs inside a SpacetimeDB reducer.
+pub const CATCH_TICK_SECS: f32 = 0.5;
 
 /// Base resistance a landed skill check removes, before tier and `skill_bonus`
 /// scaling. Tuned so a well-timed check is a meaningful chunk of a low-tier bar.
@@ -170,6 +177,7 @@ impl CatchEngagement {
             skill_check: None,
             contribution: 0.0,
             next_check_in,
+            tick_accum: 0.0,
             rng,
         }
     }
@@ -191,9 +199,17 @@ impl CatchEngagement {
         }
         self.decay_debuffs(dt);
 
-        // Stat-roll loop: baseline catch power, amplified by any `weaken` debuff.
+        // Stat-roll loop, stepped: accumulate time and deplete one increment per
+        // discrete tick, so the bar drops in chunks rather than draining smooth.
         let effective_dps = stats.catch_power * (1.0 + self.debuffs.weaken);
-        self.deplete(effective_dps * dt);
+        self.tick_accum += dt;
+        while self.tick_accum >= CATCH_TICK_SECS {
+            self.tick_accum -= CATCH_TICK_SECS;
+            self.deplete(effective_dps * CATCH_TICK_SECS);
+            if self.is_captured() {
+                break;
+            }
+        }
 
         // Skill-check lifecycle: expire a live window, or count down to the next.
         if let Some(sc) = &mut self.skill_check {
@@ -335,6 +351,18 @@ mod tests {
         assert!(e.is_captured());
         // Contribution never exceeds the bar depth (clamped at the kill).
         assert!(e.contribution <= 100.0 + f32::EPSILON);
+    }
+
+    #[test]
+    fn depletion_is_stepped_not_continuous() {
+        let mut e = CatchEngagement::new(profile(1000.0), 11);
+        let stats = CatchStats { catch_power: 20.0, ..Default::default() };
+        // A small sub-tick step shouldn't move the bar yet.
+        e.tick(CATCH_TICK_SECS * 0.4, &stats);
+        assert_eq!(e.resistance, 1000.0, "no depletion within a tick");
+        // Crossing the tick boundary applies exactly one increment.
+        e.tick(CATCH_TICK_SECS * 0.7, &stats);
+        assert!((e.resistance - (1000.0 - 20.0 * CATCH_TICK_SECS)).abs() < 0.01);
     }
 
     #[test]

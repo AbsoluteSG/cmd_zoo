@@ -40,6 +40,12 @@ pub fn draw(app: &mut GameApp, now: DateTime<Utc>) {
 
 /// The world scene — ground + critters. No text (render-target safe).
 pub fn draw_scene(app: &mut GameApp, now: DateTime<Utc>) {
+    // An active expedition renders its own bounded biome scene instead of the
+    // hub world (Phase 3).
+    if app.expedition.is_some() {
+        draw_expedition_scene(app, now);
+        return;
+    }
     clear_background(BG);
     let cam = app.camera;
 
@@ -650,7 +656,6 @@ fn draw_tile_grid_overlay(app: &GameApp) {
     use crate::game::world_chunks::ZOO_TILE_W;
     use std::collections::HashSet;
     let cam = app.camera;
-    let half = ZOO_TILE_W * 0.5;
     for zoo in std::iter::once(&app.zoo).chain(app.peer_zoos.values()) {
         // Tiles reserved by a structure.
         let mut occ: HashSet<(i32, i32)> = HashSet::new();
@@ -667,21 +672,103 @@ fn draw_tile_grid_overlay(app: &GameApp) {
         }
 
         let r = zoo.plot_tile_radius();
-        let s = ZOO_TILE_W * cam.zoom;
+        // Tile screen size is squashed on the depth axis by the oblique TILT,
+        // matching `world_to_screen` — drawing a full square here is what made
+        // adjacent rows overlap.
+        let s = vec2(ZOO_TILE_W, ZOO_TILE_W * view::TILT) * cam.zoom;
         for ty in -r..=r {
             for tx in -r..=r {
-                let c = zoo.tile_to_world((tx, ty));
-                let tl = view::world_to_screen(vec2(c.x - half, c.y - half), &cam);
+                let center = view::world_to_screen(zoo.tile_to_world((tx, ty)), &cam);
+                let tl = center - s * 0.5;
                 if occ.contains(&(tx, ty)) {
-                    draw_rectangle(tl.x, tl.y, s, s, color_u8!(225, 90, 80, 90));
+                    draw_rectangle(tl.x, tl.y, s.x, s.y, color_u8!(225, 90, 80, 90));
                 }
-                draw_rectangle_lines(tl.x, tl.y, s, s, 1.0, color_u8!(255, 255, 255, 48));
+                draw_rectangle_lines(tl.x, tl.y, s.x, s.y, 1.0, color_u8!(255, 255, 255, 48));
             }
         }
         // Mark the plot origin (tile 0,0 centre) so the grid is easy to orient.
         let o = view::world_to_screen(zoo.tile_to_world((0, 0)), &cam);
         draw_circle(o.x, o.y, 3.0 * cam.zoom.max(1.0), color_u8!(120, 200, 255, 220));
     }
+}
+
+/// Render the in-world expedition scene (Phase 3): the bounded biome ground
+/// plus every live wild spawn as a clickable critter, the engaged target ringed
+/// and showing a depleting catch bar overhead. The hub world is not drawn while
+/// an expedition is active.
+fn draw_expedition_scene(app: &mut GameApp, now: DateTime<Utc>) {
+    let _ = now;
+    clear_background(BG);
+    let cam = app.camera;
+    let Some(exp) = app.expedition.as_ref() else { return };
+    let inst = &exp.instance;
+
+    // Ground: the bounded map, tinted by the biome theme, with a fence border.
+    let ground = biome_color(crate::game::biome::biome_color(inst.theme));
+    let tl = view::world_to_screen(vec2(0.0, 0.0), &cam);
+    let br = view::world_to_screen(vec2(inst.size.x, inst.size.y), &cam);
+    draw_rectangle(tl.x, tl.y, br.x - tl.x, br.y - tl.y, ground);
+    draw_rectangle_lines(tl.x, tl.y, br.x - tl.x, br.y - tl.y, 3.0, color_u8!(20, 24, 18, 220));
+
+    // Collect spawn render data first (ends the immutable borrow before textures).
+    struct Draw {
+        species: &'static str,
+        pos: macroquad::math::Vec2,
+        tier: u8,
+        targeted: bool,
+    }
+    let target = exp.target;
+    let mut spawns: Vec<Draw> = inst
+        .live()
+        .map(|s| Draw {
+            species: s.species,
+            pos: vec2(s.pos.x, s.pos.y),
+            tier: s.tier,
+            targeted: target == Some(s.id),
+        })
+        .collect();
+    spawns.sort_by(|a, b| a.pos.y.partial_cmp(&b.pos.y).unwrap_or(std::cmp::Ordering::Equal));
+    // The engaged bar fraction (remaining), read once.
+    let bar_remaining = exp.engagement.as_ref().map(|e| 1.0 - e.progress());
+
+    for d in &spawns {
+        let screen = view::world_to_screen(d.pos, &cam);
+        // Targeting ring on the engaged spawn.
+        if d.targeted {
+            let pulse = (get_time() as f32 * 4.0).sin() * 0.5 + 0.5;
+            draw_circle_lines(screen.x, screen.y, (34.0 + pulse * 5.0) * cam.zoom, 3.0, COIN_GOLD);
+        }
+        let tex = app.textures.animal(d.species);
+        draw_critter(
+            d.pos,
+            vec2(-1.0, 1.0),
+            tex.as_ref(),
+            None,
+            COIN_GOLD,
+            false,
+            1.0,
+            WHITE,
+            0.0,
+            0.0,
+            &cam,
+        );
+        // Overhead catch bar on the engaged target.
+        if d.targeted {
+            if let Some(rem) = bar_remaining {
+                let bw = 56.0 * cam.zoom;
+                let bx = screen.x - bw * 0.5;
+                let by = screen.y - 92.0 * cam.zoom;
+                draw_rectangle(bx, by, bw, 7.0 * cam.zoom, color_u8!(40, 44, 52, 230));
+                draw_rectangle(bx, by, bw * rem.clamp(0.0, 1.0), 7.0 * cam.zoom, color_u8!(225, 110, 110, 255));
+                draw_rectangle_lines(bx, by, bw, 7.0 * cam.zoom, 1.0, color_u8!(255, 255, 255, 110));
+            }
+        }
+        // Tier pip label.
+        let lbl = format!("T{}", d.tier);
+        text_shadow(&lbl, screen.x - 8.0, screen.y - 70.0 * cam.zoom, 15.0, TEXT_DIM);
+    }
+
+    app.particles.draw(&cam);
 }
 
 /// Minimal expedition HUD (Phase 3 harness): the instance summary, the live

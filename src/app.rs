@@ -359,6 +359,10 @@ pub struct InspectState {
 /// World-units reach within which pressing E inspects the nearest owned animal.
 pub const INTERACT_RANGE: f32 = 170.0;
 
+/// Screen-pixel radius around a wild spawn within which a click targets it for
+/// engagement in an expedition.
+const EXPEDITION_CLICK_RADIUS: f32 = 60.0;
+
 /// Most animals that can trail the avatar on the follow chain at once.
 pub const MAX_FOLLOWERS: usize = 10;
 
@@ -619,8 +623,10 @@ impl GameApp {
     /// Launch (or, if already out, return from) a biome expedition. F6 — the
     /// stand-in for the hub's expedition board until the board UI lands.
     fn toggle_expedition(&mut self) {
+        let screen = vec2(screen_width(), screen_height());
         if self.expedition.is_some() {
             self.expedition = None;
+            self.camera.snap_to(self.session.my_avatar().pos, screen);
             self.set_status("Returned to the hub");
             return;
         }
@@ -630,9 +636,11 @@ impl GameApp {
             seed,
         );
         let n = exp.instance.remaining();
+        let center = vec2(exp.instance.size.x * 0.5, exp.instance.size.y * 0.5);
         self.expedition = Some(exp);
+        self.camera.snap_to(center, screen);
         self.set_status(format!(
-            "Expedition: Forest ({n} animals) — T target · 1 net · 2 lure · 3 trap · Space skill-check · F6 leave"
+            "Expedition: Forest ({n} animals) — click an animal · 1 net · 2 lure · 3 trap · Space skill-check · F6 leave"
         ));
     }
 
@@ -647,8 +655,30 @@ impl GameApp {
         let stats = self.catch_stats();
         let dt = get_frame_time();
 
-        // Input (keyboard harness — in-world click targeting follows with the
-        // instance renderer).
+        // Click an animal to target + engage it (the core flow). T still targets
+        // the next live spawn as a keyboard fallback.
+        if is_mouse_button_pressed(MouseButton::Left) {
+            let (mx, my) = mouse_position();
+            let mouse = vec2(mx, my);
+            let cam = self.camera;
+            let hit = self.expedition.as_ref().and_then(|exp| {
+                exp.instance
+                    .live()
+                    .map(|s| {
+                        let sc = crate::render::view::world_to_screen(vec2(s.pos.x, s.pos.y), &cam);
+                        ((mouse - sc).length(), s.id)
+                    })
+                    .filter(|(d, _)| *d <= EXPEDITION_CLICK_RADIUS)
+                    .min_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal))
+                    .map(|(_, id)| id)
+            });
+            if let Some(id) = hit {
+                if let Some(exp) = self.expedition.as_mut() {
+                    exp.engage(id);
+                    self.set_status("Engaging — deplete its catch bar");
+                }
+            }
+        }
         if is_key_pressed(KeyCode::T) {
             if let Some(exp) = self.expedition.as_mut() {
                 if exp.engage_first_live().is_some() {
@@ -1395,15 +1425,8 @@ impl GameApp {
             }
         }
 
-        // C toggles catch mode (only when no menu is open).
-        if !modal && is_key_pressed(KeyCode::C) && self.menu_t < 0.02 {
-            self.catch_state.toggle();
-            if self.catch_state.active {
-                self.set_status("Catch mode — hover over a wild animal");
-            } else {
-                self.set_status("Catch mode off");
-            }
-        }
+        // Hover-to-catch (the old C-mode) is retired — catching now happens via
+        // the target→engage loop inside a biome expedition (F6).
 
         // Ease the open/close animation; remember which menu to keep drawing
         // while it tweens closed.
@@ -1625,14 +1648,14 @@ impl GameApp {
             }
         }
 
-        // 6. Camera: ease the zoom toward its target, then track the local avatar.
+        // 6. Camera: ease the zoom toward its target, then track the local
+        // avatar — or, during an expedition, the centre of the biome instance.
         self.apply_smooth_zoom(dt);
-        self.camera.follow(
-            self.session.my_avatar().pos,
-            vec2(screen_width(), screen_height()),
-            dt,
-            8.0,
-        );
+        let cam_target = match self.expedition.as_ref() {
+            Some(exp) => vec2(exp.instance.size.x * 0.5, exp.instance.size.y * 0.5),
+            None => self.session.my_avatar().pos,
+        };
+        self.camera.follow(cam_target, vec2(screen_width(), screen_height()), dt, 8.0);
 
         // Camera shake: decay and add a per-frame jitter scaled by how much
         // shake remains, so it tapers off smoothly.

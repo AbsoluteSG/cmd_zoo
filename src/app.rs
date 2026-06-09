@@ -361,6 +361,9 @@ pub const INTERACT_RANGE: f32 = 170.0;
 /// engagement in an expedition.
 const EXPEDITION_CLICK_RADIUS: f32 = 60.0;
 
+/// Catch-stamina regenerated per second while not actively engaging a target.
+const STAMINA_REGEN_PER_SEC: f32 = 45.0;
+
 /// Most animals that can trail the avatar on the follow chain at once.
 pub const MAX_FOLLOWERS: usize = 10;
 
@@ -496,6 +499,10 @@ pub struct GameApp {
     /// The avatar's hub position saved on expedition launch, restored on return
     /// (the avatar physically enters the instance's coordinate space).
     pub expedition_return_pos: Option<Vec2>,
+    /// Current catch stamina. Each catch tick spends it in proportion to the
+    /// target's resistance; it regenerates between catches. The max comes from
+    /// progression via [`GameApp::catch_stats`]. Running out ends a catch attempt.
+    pub stamina: f32,
     /// Equipped catch loadout (in-memory starter kit for now; persistence lands
     /// with the wider gear economy). Feeds the engagement's catch stats.
     pub loadout: crate::game::gear::Loadout,
@@ -581,6 +588,7 @@ impl GameApp {
             peer_zoos: HashMap::new(),
             expedition: None,
             expedition_return_pos: None,
+            stamina: crate::game::catch::CatchStats::default().max_stamina,
             loadout: crate::game::gear::Loadout::starter(),
         }
     }
@@ -621,6 +629,8 @@ impl GameApp {
         // instance's coordinate space at its centre and roams freely. Remember
         // the hub position so we can put them back on return.
         self.expedition_return_pos = Some(self.session.my_avatar().pos);
+        // Start the run with a full stamina pool (sized by progression).
+        self.stamina = self.catch_stats().max_stamina;
         {
             let a = self.session.my_avatar_mut();
             a.pos = center;
@@ -702,10 +712,28 @@ impl GameApp {
             }
         }
 
-        // Advance the engagement and finalize a capture into the zoo.
-        let captured = self.expedition.as_mut().and_then(|e| e.tick(dt, &stats));
-        if let Some(species) = captured {
-            self.grant_expedition_capture(species, now);
+        // Stamina: regenerate between catches, but not while actively engaging
+        // (the catch tick drains it). Clamp to the progression-scaled max.
+        let max_stamina = stats.max_stamina;
+        let engaging = self.expedition.as_ref().is_some_and(|e| e.is_engaging());
+        if !engaging {
+            self.stamina = (self.stamina + STAMINA_REGEN_PER_SEC * dt).min(max_stamina);
+        }
+        self.stamina = self.stamina.min(max_stamina);
+
+        // Advance the engagement (spending stamina) and resolve the outcome.
+        let result = {
+            let stamina = &mut self.stamina;
+            self.expedition.as_mut().map(|e| e.tick(dt, &stats, stamina))
+        };
+        match result {
+            Some(crate::expedition::CatchResult::Captured(species)) => {
+                self.grant_expedition_capture(species, now);
+            }
+            Some(crate::expedition::CatchResult::Exhausted) => {
+                self.set_status("Out of stamina! Rest, upgrade your collection, or try an easier animal");
+            }
+            _ => {}
         }
     }
 

@@ -17,6 +17,17 @@ use crate::game::biome_instance::BiomeInstance;
 use crate::game::catch::{AbilityKind, CatchEngagement, CatchStats, EngagementOutcome};
 use crate::game::species::{HabitatTheme, SpeciesId};
 
+/// The result of advancing an expedition's engagement one frame.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CatchResult {
+    /// Nothing resolved this frame (idle or still in progress).
+    None,
+    /// The target's bar emptied — captured this species (grant it to the zoo).
+    Captured(SpeciesId),
+    /// The engager ran out of stamina; the attempt ended with no capture.
+    Exhausted,
+}
+
 /// One in-progress expedition: a single bounded biome instance plus the catch
 /// engagement against the currently-targeted spawn (if any).
 pub struct Expedition {
@@ -79,19 +90,27 @@ impl Expedition {
         self.engagement.as_mut().is_some_and(|e| e.hit_skill_check(stats))
     }
 
-    /// Advance the active engagement by `dt`. On capture, marks the spawn caught
-    /// in the instance, clears the engagement, and returns the captured species
-    /// so the caller can grant it to the hub zoo. Returns `None` otherwise.
-    pub fn tick(&mut self, dt: f32, stats: &CatchStats) -> Option<SpeciesId> {
-        let id = self.target?;
-        let outcome = self.engagement.as_mut()?.tick(dt, stats);
-        if outcome == EngagementOutcome::Captured {
-            let species = self.instance.capture(id);
-            self.target = None;
-            self.engagement = None;
-            return species;
+    /// Advance the active engagement by `dt`, spending from the engager's
+    /// `stamina` pool. On capture, removes the animal and reports its species; on
+    /// stamina exhaustion the attempt ends and the animal is left in the world.
+    pub fn tick(&mut self, dt: f32, stats: &CatchStats, stamina: &mut f32) -> CatchResult {
+        let Some(id) = self.target else { return CatchResult::None };
+        let Some(eng) = self.engagement.as_mut() else { return CatchResult::None };
+        match eng.tick(dt, stats, stamina) {
+            EngagementOutcome::Captured => {
+                let species = self.instance.capture(id);
+                self.target = None;
+                self.engagement = None;
+                species.map_or(CatchResult::None, CatchResult::Captured)
+            }
+            EngagementOutcome::Exhausted => {
+                // Ran out of stamina — drop the attempt; the animal stays.
+                self.target = None;
+                self.engagement = None;
+                CatchResult::Exhausted
+            }
+            _ => CatchResult::None,
         }
-        None
     }
 
     /// Whether an engagement is currently in progress.
@@ -137,9 +156,10 @@ mod tests {
         let expected = exp.instance.animals[0].species;
         assert!(exp.engage(first));
         let stats = strong_stats();
+        let mut stamina = 1.0e9_f32;
         // Overwhelming power → captured on the next tick.
-        let captured = exp.tick(1.0, &stats);
-        assert_eq!(captured, Some(expected));
+        let captured = exp.tick(1.0, &stats, &mut stamina);
+        assert_eq!(captured, CatchResult::Captured(expected));
         assert!(exp.target.is_none() && !exp.is_engaging());
         // The instance reflects the capture (the animal is removed).
         assert!(exp.instance.animal(first).is_none());
@@ -151,7 +171,19 @@ mod tests {
         let stats = CatchStats::default();
         exp.use_ability(AbilityKind::Net, &stats); // no panic, no target
         assert!(!exp.hit_skill_check(&stats));
-        assert!(exp.tick(0.5, &stats).is_none());
+        assert_eq!(exp.tick(0.5, &stats, &mut 1.0e9_f32), CatchResult::None);
+    }
+
+    #[test]
+    fn exhausting_stamina_ends_the_attempt_without_capture() {
+        let mut exp = Expedition::launch(HabitatTheme::Forest, 7);
+        let id = exp.instance.animals[0].id;
+        assert!(exp.engage(id));
+        let stats = CatchStats::default();
+        let mut stamina = 1.0; // far too little for even one tick
+        assert_eq!(exp.tick(1.0, &stats, &mut stamina), CatchResult::Exhausted);
+        assert!(!exp.is_engaging(), "attempt dropped");
+        assert!(exp.instance.animal(id).is_some(), "the animal stays in the world");
     }
 
     #[test]

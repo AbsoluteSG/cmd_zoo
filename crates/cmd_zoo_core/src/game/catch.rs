@@ -71,12 +71,18 @@ pub struct CatchStats {
     pub skill_bonus: f32,
     /// Multiplier on how strongly abilities debuff the target.
     pub debuff_power: f32,
+    /// Maximum catch **stamina**. Each catch tick spends stamina in proportion
+    /// to the target's resistance, so a bigger pool (earned through progression)
+    /// is what lets a player sustain catching deeper-bar, rarer animals — the
+    /// difficulty-scaling gate. Drained on the engager's side, not here.
+    pub max_stamina: f32,
 }
 
 impl Default for CatchStats {
-    /// Bare-handed baseline (no gear, empty collection): catchable but slow.
+    /// Bare-handed baseline (no gear, empty collection): catchable but slow, and
+    /// a starter stamina pool that comfortably handles low-tier catches only.
     fn default() -> Self {
-        Self { catch_power: 14.0, skill_bonus: 1.0, debuff_power: 1.0 }
+        Self { catch_power: 14.0, skill_bonus: 1.0, debuff_power: 1.0, max_stamina: 200.0 }
     }
 }
 
@@ -129,6 +135,9 @@ pub enum EngagementOutcome {
     Captured,
     /// The target fled (reserved for the flee model; not yet emitted by `tick`).
     Fled,
+    /// The engager ran out of stamina mid-catch — the attempt ends without a
+    /// capture (the animal is left in the world to try again later).
+    Exhausted,
 }
 
 /// A single in-flight catch engagement against one target. Owns the resistance
@@ -156,6 +165,13 @@ pub struct CatchEngagement {
 /// than draining continuously, so progress reads as increments — and it mirrors
 /// an authoritative server tick when this runs inside a SpacetimeDB reducer.
 pub const CATCH_TICK_SECS: f32 = 0.5;
+
+/// Stamina spent **per catch tick, per point of the target's `resistance_max`**.
+/// Cost-per-tick = this × resistance, so rarer/deeper-bar animals burn the pool
+/// faster: a player whose `max_stamina` can't cover the whole catch is exhausted
+/// before the bar empties. Tuned with [`CatchStats::default`]'s pool so a fresh
+/// player handles low tiers and must progress to sustain the high ones.
+pub const STAMINA_PER_TICK_PER_RESISTANCE: f32 = 0.1;
 
 /// Base resistance a landed skill check removes, before tier and `skill_bonus`
 /// scaling. Tuned so a well-timed check is a meaningful chunk of a low-tier bar.
@@ -191,9 +207,11 @@ impl CatchEngagement {
     }
 
     /// Advance the engagement by `dt` seconds under the engager's `stats`,
-    /// running the stat-roll depletion, decaying debuffs, and spawning/expiring
-    /// skill-check windows. Returns the resulting outcome.
-    pub fn tick(&mut self, dt: f32, stats: &CatchStats) -> EngagementOutcome {
+    /// spending from the engager's `stamina` pool. Runs the stepped stat-roll
+    /// depletion, decays debuffs, and spawns/expires skill-check windows. Each
+    /// catch tick costs stamina proportional to the target's resistance; if the
+    /// pool can't cover a tick the attempt ends [`EngagementOutcome::Exhausted`].
+    pub fn tick(&mut self, dt: f32, stats: &CatchStats, stamina: &mut f32) -> EngagementOutcome {
         if dt <= 0.0 {
             return self.outcome();
         }
@@ -201,10 +219,16 @@ impl CatchEngagement {
 
         // Stat-roll loop, stepped: accumulate time and deplete one increment per
         // discrete tick, so the bar drops in chunks rather than draining smooth.
+        // Each tick also spends stamina ∝ the target's resistance.
         let effective_dps = stats.catch_power * (1.0 + self.debuffs.weaken);
+        let stamina_cost = STAMINA_PER_TICK_PER_RESISTANCE * self.target.resistance_max;
         self.tick_accum += dt;
         while self.tick_accum >= CATCH_TICK_SECS {
             self.tick_accum -= CATCH_TICK_SECS;
+            if *stamina < stamina_cost {
+                return EngagementOutcome::Exhausted;
+            }
+            *stamina -= stamina_cost;
             self.deplete(effective_dps * CATCH_TICK_SECS);
             if self.is_captured() {
                 break;
@@ -342,7 +366,7 @@ mod tests {
         // 50/s vs 100 → captured after ~2s. Step in small ticks.
         let mut outcome = EngagementOutcome::Ongoing;
         for _ in 0..240 {
-            outcome = e.tick(1.0 / 60.0, &stats);
+            outcome = e.tick(1.0 / 60.0, &stats, &mut 1.0e9_f32);
             if outcome == EngagementOutcome::Captured {
                 break;
             }
@@ -358,10 +382,10 @@ mod tests {
         let mut e = CatchEngagement::new(profile(1000.0), 11);
         let stats = CatchStats { catch_power: 20.0, ..Default::default() };
         // A small sub-tick step shouldn't move the bar yet.
-        e.tick(CATCH_TICK_SECS * 0.4, &stats);
+        e.tick(CATCH_TICK_SECS * 0.4, &stats, &mut 1.0e9_f32);
         assert_eq!(e.resistance, 1000.0, "no depletion within a tick");
         // Crossing the tick boundary applies exactly one increment.
-        e.tick(CATCH_TICK_SECS * 0.7, &stats);
+        e.tick(CATCH_TICK_SECS * 0.7, &stats, &mut 1.0e9_f32);
         assert!((e.resistance - (1000.0 - 20.0 * CATCH_TICK_SECS)).abs() < 0.01);
     }
 
@@ -382,8 +406,8 @@ mod tests {
         let mut trapped = CatchEngagement::new(profile(500.0), 3);
         trapped.use_ability(AbilityKind::Trap, &stats);
         for _ in 0..30 {
-            plain.tick(0.1, &stats);
-            trapped.tick(0.1, &stats);
+            plain.tick(0.1, &stats, &mut 1.0e9_f32);
+            trapped.tick(0.1, &stats, &mut 1.0e9_f32);
         }
         assert!(
             trapped.resistance < plain.resistance,
@@ -398,7 +422,7 @@ mod tests {
         // Run until a window appears.
         let mut spawned = false;
         for _ in 0..600 {
-            e.tick(0.05, &stats);
+            e.tick(0.05, &stats, &mut 1.0e9_f32);
             if e.skill_check.is_some() {
                 spawned = true;
                 break;
@@ -416,7 +440,7 @@ mod tests {
         let mut e = CatchEngagement::new(profile(100.0), 5);
         e.use_ability(AbilityKind::Lure, &CatchStats::default());
         assert!(e.debuffs.flee_lock_secs > 0.0);
-        e.tick(1.0, &CatchStats::default());
+        e.tick(1.0, &CatchStats::default(), &mut 1.0e9_f32);
         assert!(e.debuffs.flee_lock_secs > 0.0, "lock persists a few seconds");
     }
 
@@ -427,7 +451,7 @@ mod tests {
             let stats = CatchStats::default();
             let mut checks = 0;
             for _ in 0..400 {
-                e.tick(0.1, &stats);
+                e.tick(0.1, &stats, &mut 1.0e9_f32);
                 if e.skill_check.is_some() {
                     checks += 1;
                     e.miss_skill_check();
@@ -446,5 +470,33 @@ mod tests {
         // Build a synthetic tier-5 to compare the derivation monotonicity.
         let t5 = TargetProfile { tier: 5, resistance_max: 60.0 + 40.0 * 5.0, ..mouse.clone() };
         assert!(t5.resistance_max > mouse.resistance_max);
+    }
+
+    #[test]
+    fn running_out_of_stamina_exhausts_the_attempt() {
+        // Deep bar (1000) → 100 stamina per tick; a 30-pool can't cover one tick.
+        let mut e = CatchEngagement::new(profile(1000.0), 1);
+        let stats = CatchStats { catch_power: 20.0, ..Default::default() };
+        let mut stamina = 30.0;
+        let outcome = e.tick(CATCH_TICK_SECS, &stats, &mut stamina);
+        assert_eq!(outcome, EngagementOutcome::Exhausted);
+        assert!(!e.is_captured(), "no capture on exhaustion");
+        assert_eq!(stamina, 30.0, "an unaffordable tick spends nothing");
+    }
+
+    #[test]
+    fn stamina_is_spent_proportionally_and_a_big_pool_captures() {
+        let mut e = CatchEngagement::new(profile(100.0), 2);
+        let stats = CatchStats { catch_power: 50.0, ..Default::default() };
+        let mut stamina = 10_000.0;
+        let mut outcome = EngagementOutcome::Ongoing;
+        for _ in 0..240 {
+            outcome = e.tick(1.0 / 60.0, &stats, &mut stamina);
+            if outcome == EngagementOutcome::Captured {
+                break;
+            }
+        }
+        assert_eq!(outcome, EngagementOutcome::Captured);
+        assert!(stamina < 10_000.0, "stamina was spent during the catch");
     }
 }

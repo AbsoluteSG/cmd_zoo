@@ -143,6 +143,10 @@ pub fn collection_bonus(distinct_species: usize, rank_sum: u32) -> CatchStats {
         // Breadth sharpens skill-check payoff a touch (+1% each, capped).
         skill_bonus: (0.01 * distinct_species as f32).min(0.5),
         debuff_power: 0.0,
+        // Stamina pool grows with breadth + depth — the main difficulty gate, so
+        // a fuller, higher-Rank collection lets you sustain catching rarer
+        // animals. +15 per distinct species, +12 per accumulated Rank.
+        max_stamina: 15.0 * distinct_species as f32 + 12.0 * rank_sum as f32,
     }
 }
 
@@ -156,6 +160,8 @@ pub fn catch_stats(loadout: &Loadout, distinct_species: usize, rank_sum: u32) ->
         catch_power: base.catch_power + coll.catch_power,
         skill_bonus: base.skill_bonus + coll.skill_bonus,
         debuff_power: base.debuff_power + coll.debuff_power,
+        // Base pool + collection growth (gear doesn't add stamina for now).
+        max_stamina: base.max_stamina + coll.max_stamina,
     };
     for g in loadout.items() {
         out.catch_power += g.catch_power;

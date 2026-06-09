@@ -737,7 +737,7 @@ pub fn draw_expedition_hud(app: &GameApp) {
     let live: Vec<&crate::game::wild_animal::WildAnimal> = inst.live().collect();
     let rows = live.len().min(8);
     let top = 40.0;
-    let ph = 150.0 + rows as f32 * 20.0;
+    let ph = 184.0 + rows as f32 * 20.0;
     draw_rectangle(px, top, pw, ph, color_u8!(18, 22, 30, 210));
     draw_rectangle_lines(px, top, pw, ph, 2.0, color_u8!(120, 200, 255, 180));
 
@@ -745,7 +745,31 @@ pub fn draw_expedition_hud(app: &GameApp) {
     let title = format!("EXPEDITION · {:?} · {} left", inst.theme, inst.remaining());
     let tw = measure_text(&title, None, 20, 1.0).width;
     text_shadow(&title, cx - tw * 0.5, y, 20.0, COIN_GOLD);
-    y += 28.0;
+    y += 26.0;
+
+    // Stamina meter — the catch resource. Each tick spends it ∝ target
+    // resistance; it regenerates between catches. A bigger pool (progression) is
+    // what lets you sustain catching rarer animals.
+    {
+        let max = app.catch_stats().max_stamina.max(1.0);
+        let frac = (app.stamina / max).clamp(0.0, 1.0);
+        let bw = pw - 28.0;
+        let bx = px + 14.0;
+        text_shadow(
+            &format!("Stamina  {} / {}", app.stamina as i32, max as i32),
+            bx, y, 15.0, TEXT_DIM,
+        );
+        y += 8.0;
+        draw_rectangle(bx, y, bw, 10.0, color_u8!(40, 44, 52, 255));
+        let col = if frac < 0.25 {
+            color_u8!(225, 110, 110, 255)
+        } else {
+            color_u8!(120, 210, 130, 255)
+        };
+        draw_rectangle(bx, y, bw * frac, 10.0, col);
+        draw_rectangle_lines(bx, y, bw, 10.0, 1.5, color_u8!(255, 255, 255, 90));
+        y += 22.0;
+    }
 
     if let Some(eng) = exp.engagement.as_ref() {
         let name = crate::game::species::get(eng.target.species).display_name;

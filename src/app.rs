@@ -493,6 +493,9 @@ pub struct GameApp {
     /// from the hub. `None` while at the hub. Drives the new target→engage catch
     /// loop; see [`crate::expedition::Expedition`].
     pub expedition: Option<crate::expedition::Expedition>,
+    /// The avatar's hub position saved on expedition launch, restored on return
+    /// (the avatar physically enters the instance's coordinate space).
+    pub expedition_return_pos: Option<Vec2>,
     /// Equipped catch loadout (in-memory starter kit for now; persistence lands
     /// with the wider gear economy). Feeds the engagement's catch stats.
     pub loadout: crate::game::gear::Loadout,
@@ -577,6 +580,7 @@ impl GameApp {
             active_player: None,
             peer_zoos: HashMap::new(),
             expedition: None,
+            expedition_return_pos: None,
             loadout: crate::game::gear::Loadout::starter(),
         }
     }
@@ -595,7 +599,13 @@ impl GameApp {
     fn toggle_expedition(&mut self) {
         let screen = vec2(screen_width(), screen_height());
         if self.expedition.is_some() {
+            // Return to the hub: drop the instance and teleport the avatar back.
             self.expedition = None;
+            if let Some(pos) = self.expedition_return_pos.take() {
+                let a = self.session.my_avatar_mut();
+                a.pos = pos;
+                a.vel = vec2(0.0, 0.0);
+            }
             self.camera.snap_to(self.session.my_avatar().pos, screen);
             self.set_status("Returned to the hub");
             return;
@@ -607,10 +617,19 @@ impl GameApp {
         );
         let n = exp.instance.remaining();
         let center = vec2(exp.instance.size.x * 0.5, exp.instance.size.y * 0.5);
+        // The expedition is a mini open world: the avatar physically enters the
+        // instance's coordinate space at its centre and roams freely. Remember
+        // the hub position so we can put them back on return.
+        self.expedition_return_pos = Some(self.session.my_avatar().pos);
+        {
+            let a = self.session.my_avatar_mut();
+            a.pos = center;
+            a.vel = vec2(0.0, 0.0);
+        }
         self.expedition = Some(exp);
         self.camera.snap_to(center, screen);
         self.set_status(format!(
-            "Expedition: Forest ({n} animals) — click an animal · 1 net · 2 lure · 3 trap · Space skill-check · F6 leave"
+            "Expedition: Forest ({n} animals) — walk freely · left-click an animal to engage · 1 net · 2 lure · 3 trap · Space skill-check · F6 leave"
         ));
     }
 
@@ -624,6 +643,16 @@ impl GameApp {
         }
         let stats = self.catch_stats();
         let dt = get_frame_time();
+
+        // Advance the roaming wild animals (and keep the avatar inside the arena).
+        let avatar_pos = self.session.my_avatar().pos;
+        if let Some(exp) = self.expedition.as_mut() {
+            exp.update_world(dt, avatar_pos);
+            let size = exp.instance.size;
+            let a = self.session.my_avatar_mut();
+            a.pos.x = a.pos.x.clamp(0.0, size.x);
+            a.pos.y = a.pos.y.clamp(0.0, size.y);
+        }
 
         // Click an animal to target + engage it (the core flow). T still targets
         // the next live spawn as a keyboard fallback.
@@ -1545,13 +1574,10 @@ impl GameApp {
         }
 
         // 6. Camera: ease the zoom toward its target, then track the local
-        // avatar — or, during an expedition, the centre of the biome instance.
+        // avatar (on the hub and inside an expedition alike — the avatar walks
+        // the instance like a small open world).
         self.apply_smooth_zoom(dt);
-        let cam_target = match self.expedition.as_ref() {
-            Some(exp) => vec2(exp.instance.size.x * 0.5, exp.instance.size.y * 0.5),
-            None => self.session.my_avatar().pos,
-        };
-        self.camera.follow(cam_target, vec2(screen_width(), screen_height()), dt, 8.0);
+        self.camera.follow(self.session.my_avatar().pos, vec2(screen_width(), screen_height()), dt, 8.0);
 
         // Camera shake: decay and add a per-frame jitter scaled by how much
         // shake remains, so it tapers off smoothly.

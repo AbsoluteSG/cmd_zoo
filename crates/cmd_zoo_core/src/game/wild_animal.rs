@@ -231,6 +231,7 @@ impl Moveset {
 
 // ── WildAnimal ────────────────────────────────────────────────────────────────
 
+#[derive(Clone, Debug)]
 pub struct WildAnimal {
     /// Stable identity used by the catch system to track the target across frames.
     pub id: Uuid,

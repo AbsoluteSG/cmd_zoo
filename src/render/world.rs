@@ -664,62 +664,61 @@ fn draw_expedition_scene(app: &mut GameApp, now: DateTime<Utc>) {
     draw_rectangle(tl.x, tl.y, br.x - tl.x, br.y - tl.y, ground);
     draw_rectangle_lines(tl.x, tl.y, br.x - tl.x, br.y - tl.y, 3.0, color_u8!(20, 24, 18, 220));
 
-    // Collect spawn render data first (ends the immutable borrow before textures).
+    // Collect roaming-animal render data first (ends the immutable borrow on
+    // `exp` before we touch `app.textures`/`app.session` below).
     struct Draw {
         species: &'static str,
         pos: macroquad::math::Vec2,
+        dir: macroquad::math::Vec2,
         tier: u8,
         targeted: bool,
     }
     let target = exp.target;
-    let mut spawns: Vec<Draw> = inst
+    let mut animals: Vec<Draw> = inst
         .live()
-        .map(|s| Draw {
-            species: s.species,
-            pos: vec2(s.pos.x, s.pos.y),
-            tier: s.tier,
-            targeted: target == Some(s.id),
+        .map(|a| Draw {
+            species: a.species,
+            pos: vec2(a.pos.x, a.pos.y),
+            // Face the way it's moving (art faces left by default).
+            dir: if a.vel.x > 0.0 { vec2(1.0, 1.0) } else { vec2(-1.0, 1.0) },
+            tier: crate::game::catch::catch_tier(a.species),
+            targeted: target == Some(a.id),
         })
         .collect();
-    spawns.sort_by(|a, b| a.pos.y.partial_cmp(&b.pos.y).unwrap_or(std::cmp::Ordering::Equal));
-    // The engaged bar fraction (remaining), read once.
+    animals.sort_by(|a, b| a.pos.y.partial_cmp(&b.pos.y).unwrap_or(std::cmp::Ordering::Equal));
     let bar_remaining = exp.engagement.as_ref().map(|e| 1.0 - e.progress());
+    let target_pos = exp.target_pos().map(|p| vec2(p.x, p.y));
+    let avatar_y = app.session.my_avatar().pos.y;
 
-    for d in &spawns {
-        let screen = view::world_to_screen(d.pos, &cam);
-        // Targeting ring on the engaged spawn.
-        if d.targeted {
-            let pulse = (get_time() as f32 * 4.0).sin() * 0.5 + 0.5;
-            draw_circle_lines(screen.x, screen.y, (34.0 + pulse * 5.0) * cam.zoom, 3.0, COIN_GOLD);
+    // Depth-sorted pass: roaming animals + the avatar, painter's-algorithm by
+    // feet-Y so the avatar occludes / is occluded correctly as it walks.
+    let mut avatar_drawn = false;
+    for d in &animals {
+        if !avatar_drawn && d.pos.y > avatar_y {
+            draw_avatar(app.session.my_avatar(), &cam);
+            avatar_drawn = true;
         }
         let tex = app.textures.animal(d.species);
-        draw_critter(
-            d.pos,
-            vec2(-1.0, 1.0),
-            tex.as_ref(),
-            None,
-            COIN_GOLD,
-            false,
-            1.0,
-            WHITE,
-            0.0,
-            0.0,
-            &cam,
-        );
-        // Overhead catch bar on the engaged target.
-        if d.targeted {
-            if let Some(rem) = bar_remaining {
-                let bw = 56.0 * cam.zoom;
-                let bx = screen.x - bw * 0.5;
-                let by = screen.y - 92.0 * cam.zoom;
-                draw_rectangle(bx, by, bw, 7.0 * cam.zoom, color_u8!(40, 44, 52, 230));
-                draw_rectangle(bx, by, bw * rem.clamp(0.0, 1.0), 7.0 * cam.zoom, color_u8!(225, 110, 110, 255));
-                draw_rectangle_lines(bx, by, bw, 7.0 * cam.zoom, 1.0, color_u8!(255, 255, 255, 110));
-            }
-        }
-        // Tier pip label.
-        let lbl = format!("T{}", d.tier);
-        text_shadow(&lbl, screen.x - 8.0, screen.y - 70.0 * cam.zoom, 15.0, TEXT_DIM);
+        draw_critter(d.pos, d.dir, tex.as_ref(), None, COIN_GOLD, false, 1.0, WHITE, 0.0, 0.0, &cam);
+        // Tier pip label above each animal.
+        let screen = view::world_to_screen(d.pos, &cam);
+        text_shadow(&format!("T{}", d.tier), screen.x - 8.0, screen.y - 70.0 * cam.zoom, 15.0, TEXT_DIM);
+    }
+    if !avatar_drawn {
+        draw_avatar(app.session.my_avatar(), &cam);
+    }
+
+    // Top pass: the engaged target's ring + overhead catch bar at its live pos.
+    if let (Some(tp), Some(rem)) = (target_pos, bar_remaining) {
+        let screen = view::world_to_screen(tp, &cam);
+        let pulse = (get_time() as f32 * 4.0).sin() * 0.5 + 0.5;
+        draw_circle_lines(screen.x, screen.y, (34.0 + pulse * 5.0) * cam.zoom, 3.0, COIN_GOLD);
+        let bw = 56.0 * cam.zoom;
+        let bx = screen.x - bw * 0.5;
+        let by = screen.y - 92.0 * cam.zoom;
+        draw_rectangle(bx, by, bw, 7.0 * cam.zoom, color_u8!(40, 44, 52, 230));
+        draw_rectangle(bx, by, bw * rem.clamp(0.0, 1.0), 7.0 * cam.zoom, color_u8!(225, 110, 110, 255));
+        draw_rectangle_lines(bx, by, bw, 7.0 * cam.zoom, 1.0, color_u8!(255, 255, 255, 110));
     }
 
     app.particles.draw(&cam);
@@ -735,7 +734,7 @@ pub fn draw_expedition_hud(app: &GameApp) {
     let cx = screen_width() * 0.5;
     let pw = 380.0;
     let px = cx - pw * 0.5;
-    let live: Vec<&crate::game::biome_instance::WildSpawn> = inst.live().collect();
+    let live: Vec<&crate::game::wild_animal::WildAnimal> = inst.live().collect();
     let rows = live.len().min(8);
     let top = 40.0;
     let ph = 150.0 + rows as f32 * 20.0;
@@ -783,7 +782,8 @@ pub fn draw_expedition_hud(app: &GameApp) {
         let is_target = exp.target == Some(s.id);
         let col = if is_target { COIN_GOLD } else { TEXT_DIM };
         let mark = if is_target { ">" } else { "-" };
-        text_shadow(&format!("{mark} {nm} (T{})", s.tier), px + 18.0, y, 16.0, col);
+        let tier = crate::game::catch::catch_tier(s.species);
+        text_shadow(&format!("{mark} {nm} (T{tier})"), px + 18.0, y, 16.0, col);
         y += 20.0;
     }
 }

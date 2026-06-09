@@ -98,6 +98,18 @@ impl Expedition {
     pub fn is_engaging(&self) -> bool {
         self.engagement.is_some()
     }
+
+    /// Advance the roaming wild animals by `dt`. `avatar_pos` lets aggressive
+    /// movesets react to the player once the in-expedition flee model lands.
+    pub fn update_world(&mut self, dt: f32, avatar_pos: Vec2) {
+        self.instance.update(dt, avatar_pos);
+    }
+
+    /// World position of the currently engaged target (it keeps roaming), for
+    /// the renderer's ring + overhead bar.
+    pub fn target_pos(&self) -> Option<Vec2> {
+        self.instance.animal(self.target?).map(|a| a.pos)
+    }
 }
 
 #[cfg(test)]
@@ -112,7 +124,7 @@ mod tests {
     #[test]
     fn engage_nearest_targets_a_spawn() {
         let mut exp = Expedition::launch(HabitatTheme::Forest, 1);
-        let pos = exp.instance.spawns[0].pos;
+        let pos = exp.instance.animals[0].pos;
         let id = exp.engage_nearest(pos).expect("a spawn is targeted");
         assert_eq!(exp.target, Some(id));
         assert!(exp.is_engaging());
@@ -121,16 +133,16 @@ mod tests {
     #[test]
     fn tick_to_capture_returns_species_and_clears() {
         let mut exp = Expedition::launch(HabitatTheme::Forest, 2);
-        let first = exp.instance.spawns[0].id;
-        let expected = exp.instance.spawns[0].species;
+        let first = exp.instance.animals[0].id;
+        let expected = exp.instance.animals[0].species;
         assert!(exp.engage(first));
         let stats = strong_stats();
         // Overwhelming power → captured on the next tick.
         let captured = exp.tick(1.0, &stats);
         assert_eq!(captured, Some(expected));
         assert!(exp.target.is_none() && !exp.is_engaging());
-        // The instance reflects the capture.
-        assert!(exp.instance.spawn(first).unwrap().captured);
+        // The instance reflects the capture (the animal is removed).
+        assert!(exp.instance.animal(first).is_none());
     }
 
     #[test]
@@ -145,10 +157,10 @@ mod tests {
     #[test]
     fn cancel_drops_engagement_but_keeps_spawn() {
         let mut exp = Expedition::launch(HabitatTheme::Forest, 4);
-        let id = exp.instance.spawns[0].id;
+        let id = exp.instance.animals[0].id;
         exp.engage(id);
         exp.cancel();
         assert!(!exp.is_engaging());
-        assert!(!exp.instance.spawn(id).unwrap().captured, "cancel never captures");
+        assert!(exp.instance.animal(id).is_some(), "cancel keeps the animal in the instance");
     }
 }

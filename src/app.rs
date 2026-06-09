@@ -1313,10 +1313,13 @@ impl GameApp {
                     self.active_pedestal = Some(id);
                     self.set_screen(Screen::Pedestal);
                 }
-                // No pad nearby: the nearest NPC merchant, then a nearby player,
-                // otherwise fall back to inspecting an animal under the cursor.
+                // No pad nearby: the expedition board launches an expedition;
+                // else the nearest NPC merchant, then a nearby player, otherwise
+                // fall back to inspecting an animal under the cursor.
                 None => {
-                    if let Some(screen) = self.nearest_npc_screen() {
+                    if self.nearest_npc_kind() == Some(crate::game::npc::NpcKind::ExpeditionBoard) {
+                        self.toggle_expedition();
+                    } else if let Some(screen) = self.nearest_npc_screen() {
                         self.set_screen(screen);
                     } else if let Some(pid) = self.nearest_player() {
                         self.active_player = Some(pid);
@@ -1671,26 +1674,44 @@ impl GameApp {
     /// The interaction screen a given NPC kind opens. The single source of truth
     /// for the NPC ↔ screen mapping — used both to open an NPC's panel and to
     /// drive its speaking-sprite swap.
-    fn npc_screen(kind: crate::game::npc::NpcKind) -> Screen {
+    fn npc_screen(kind: crate::game::npc::NpcKind) -> Option<Screen> {
         use crate::game::npc::NpcKind;
         match kind {
-            NpcKind::StructureMerchant => Screen::Merchant,
-            NpcKind::ExoticMerchant => Screen::ExoticShop,
+            NpcKind::StructureMerchant => Some(Screen::Merchant),
+            NpcKind::ExoticMerchant => Some(Screen::ExoticShop),
+            // The board launches an expedition rather than opening a panel.
+            NpcKind::ExpeditionBoard => None,
         }
     }
 
     /// The screen to open for the NPC nearest the local avatar within
-    /// `INTERACT_RANGE`, if any. Drives the E-to-interact path.
+    /// `INTERACT_RANGE`, if any. Drives the E-to-interact path. NPCs that don't
+    /// open a panel (the expedition board) are skipped here.
     fn nearest_npc_screen(&self) -> Option<Screen> {
         let apos = self.session.my_avatar().pos;
         let mut best: Option<(f32, Screen)> = None;
         for npc in &self.npcs {
+            let Some(screen) = Self::npc_screen(npc.kind) else { continue };
             let d = (npc.world - apos).length_squared();
             if d <= INTERACT_RANGE * INTERACT_RANGE && best.map_or(true, |(bd, _)| d < bd) {
-                best = Some((d, Self::npc_screen(npc.kind)));
+                best = Some((d, screen));
             }
         }
         best.map(|(_, s)| s)
+    }
+
+    /// The kind of NPC nearest the local avatar within `INTERACT_RANGE`, if any
+    /// — including panel-less ones like the expedition board.
+    fn nearest_npc_kind(&self) -> Option<crate::game::npc::NpcKind> {
+        let apos = self.session.my_avatar().pos;
+        let mut best: Option<(f32, crate::game::npc::NpcKind)> = None;
+        for npc in &self.npcs {
+            let d = (npc.world - apos).length_squared();
+            if d <= INTERACT_RANGE * INTERACT_RANGE && best.map_or(true, |(bd, _)| d < bd) {
+                best = Some((d, npc.kind));
+            }
+        }
+        best.map(|(_, k)| k)
     }
 
     /// Per-frame NPC tick: advance idle bob / pop, then sync speaking state to the
@@ -1701,7 +1722,7 @@ impl GameApp {
         let mut events: Vec<(&'static str, crate::game::npc::NpcEvent)> = Vec::new();
         for npc in &mut self.npcs {
             npc.animate(dt);
-            let talking = Self::npc_screen(npc.kind) == screen;
+            let talking = Self::npc_screen(npc.kind) == Some(screen);
             if let Some(ev) = npc.set_speaking(talking) {
                 events.push((npc.id, ev));
             }

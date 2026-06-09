@@ -31,6 +31,8 @@ pub enum NpcKind {
     StructureMerchant,
     /// The time-windowed exotic-animal shop.
     ExoticMerchant,
+    /// The expedition board — launches a bounded biome expedition (Phase 3).
+    ExpeditionBoard,
 }
 
 /// A placed, interactive NPC.
@@ -113,12 +115,24 @@ pub const BOB_AMP: f32 = 3.0;
 /// Sprite id (and `assets/npcs/` filename) for the exotic merchant.
 pub const EXOTIC_MERCHANT_SPRITE_ID: &str = "exotic_merchant";
 
+/// Sprite id for the expedition board. Falls back to a primitive if no art is
+/// bundled (the renderer handles missing sprites).
+pub const EXPEDITION_BOARD_SPRITE_ID: &str = "expedition_board";
+
 /// Fixed world position of the exotic merchant — inset near the top-right of the
 /// plot, mirroring the structure merchant on the left.
 pub fn exotic_merchant_pos() -> Vec2 {
     let c = zoo_center();
     let half = zoo_half_extent();
     vec2(c.x + half * 0.55, c.y - half * 0.30)
+}
+
+/// Fixed world position of the expedition board — just outside the plot's
+/// right edge, the gateway out to the biomes.
+pub fn expedition_board_pos() -> Vec2 {
+    let c = zoo_center();
+    let half = zoo_half_extent();
+    vec2(c.x + half * 1.25, c.y)
 }
 
 /// The NPCs placed in every world: the structure merchant and the exotic
@@ -137,6 +151,12 @@ pub fn default_npcs() -> Vec<Npc> {
             EXOTIC_MERCHANT_SPRITE_ID,
             "Exotics",
             exotic_merchant_pos(),
+        ),
+        Npc::new(
+            NpcKind::ExpeditionBoard,
+            EXPEDITION_BOARD_SPRITE_ID,
+            "Expedition",
+            expedition_board_pos(),
         ),
     ]
 }

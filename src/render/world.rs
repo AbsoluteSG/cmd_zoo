@@ -671,9 +671,7 @@ fn draw_expedition_scene(app: &mut GameApp, now: DateTime<Utc>) {
         pos: macroquad::math::Vec2,
         dir: macroquad::math::Vec2,
         tier: u8,
-        targeted: bool,
     }
-    let target = exp.target;
     let mut animals: Vec<Draw> = inst
         .live()
         .map(|a| Draw {
@@ -682,7 +680,6 @@ fn draw_expedition_scene(app: &mut GameApp, now: DateTime<Utc>) {
             // Face the way it's moving (art faces left by default).
             dir: if a.vel.x > 0.0 { vec2(1.0, 1.0) } else { vec2(-1.0, 1.0) },
             tier: crate::game::catch::catch_tier(a.species),
-            targeted: target == Some(a.id),
         })
         .collect();
     animals.sort_by(|a, b| a.pos.y.partial_cmp(&b.pos.y).unwrap_or(std::cmp::Ordering::Equal));
@@ -724,92 +721,44 @@ fn draw_expedition_scene(app: &mut GameApp, now: DateTime<Utc>) {
     app.particles.draw(&cam);
 }
 
-/// Minimal expedition HUD (Phase 3 harness): the instance summary, the live
-/// targets, and — while engaging — the catch-resistance bar, ability hints, and
-/// the skill-check prompt. A keyboard-driven stand-in until the in-world
-/// instance renderer + click targeting land.
-pub fn draw_expedition_hud(app: &GameApp) {
+/// Bottom-centre expedition bars — they take the place of the item hotbar while
+/// on an expedition (which is otherwise just free-roam in a biome instance). The
+/// **stamina** bar is always shown; the **catch** bar (with the engaged animal's
+/// name + a skill-check prompt) appears above it only while engaging.
+fn draw_expedition_bars(app: &GameApp) {
     let Some(exp) = app.expedition.as_ref() else { return };
-    let inst = &exp.instance;
-    let cx = screen_width() * 0.5;
-    let pw = 380.0;
-    let px = cx - pw * 0.5;
-    let live: Vec<&crate::game::wild_animal::WildAnimal> = inst.live().collect();
-    let rows = live.len().min(8);
-    let top = 40.0;
-    let ph = 184.0 + rows as f32 * 20.0;
-    draw_rectangle(px, top, pw, ph, color_u8!(18, 22, 30, 210));
-    draw_rectangle_lines(px, top, pw, ph, 2.0, color_u8!(120, 200, 255, 180));
+    let w = 360.0;
+    let bx = (screen_width() - w) * 0.5;
+    let stamina_y = screen_height() - 38.0;
+    let catch_y = stamina_y - 34.0;
 
-    let mut y = top + 24.0;
-    let title = format!("EXPEDITION · {:?} · {} left", inst.theme, inst.remaining());
-    let tw = measure_text(&title, None, 20, 1.0).width;
-    text_shadow(&title, cx - tw * 0.5, y, 20.0, COIN_GOLD);
-    y += 26.0;
-
-    // Stamina meter — the catch resource. Each tick spends it ∝ target
-    // resistance; it regenerates between catches. A bigger pool (progression) is
-    // what lets you sustain catching rarer animals.
-    {
-        let max = app.catch_stats().max_stamina.max(1.0);
-        let frac = (app.stamina / max).clamp(0.0, 1.0);
-        let bw = pw - 28.0;
-        let bx = px + 14.0;
-        text_shadow(
-            &format!("Stamina  {} / {}", app.stamina as i32, max as i32),
-            bx, y, 15.0, TEXT_DIM,
-        );
-        y += 8.0;
-        draw_rectangle(bx, y, bw, 10.0, color_u8!(40, 44, 52, 255));
-        let col = if frac < 0.25 {
-            color_u8!(225, 110, 110, 255)
-        } else {
-            color_u8!(120, 210, 130, 255)
-        };
-        draw_rectangle(bx, y, bw * frac, 10.0, col);
-        draw_rectangle_lines(bx, y, bw, 10.0, 1.5, color_u8!(255, 255, 255, 90));
-        y += 22.0;
-    }
-
+    // Catch bar — only while engaging a target.
     if let Some(eng) = exp.engagement.as_ref() {
         let name = crate::game::species::get(eng.target.species).display_name;
-        text_shadow(&format!("Engaging {name} (T{})", eng.target.tier), px + 14.0, y, 18.0, TEXT);
-        y += 14.0;
-        let bw = pw - 28.0;
-        let bx = px + 14.0;
-        draw_rectangle(bx, y, bw, 14.0, color_u8!(40, 44, 52, 255));
-        // The bar shows *remaining* catch-resistance, emptying toward capture.
+        text_shadow(&format!("Catching {name}  (T{})", eng.target.tier), bx, catch_y - 6.0, 15.0, TEXT);
+        draw_rectangle(bx, catch_y, w, 13.0, color_u8!(40, 44, 52, 235));
+        // Remaining catch-resistance, emptying toward capture.
         let remaining = (1.0 - eng.progress()).clamp(0.0, 1.0);
-        draw_rectangle(bx, y, bw * remaining, 14.0, color_u8!(225, 110, 110, 255));
-        draw_rectangle_lines(bx, y, bw, 14.0, 1.5, color_u8!(255, 255, 255, 90));
-        y += 26.0;
-        text_shadow("[1] Net    [2] Lure    [3] Trap", px + 14.0, y, 16.0, TEXT_DIM);
-        y += 22.0;
-        if let Some(sc) = eng.skill_check {
+        draw_rectangle(bx, catch_y, w * remaining, 13.0, color_u8!(225, 110, 110, 255));
+        draw_rectangle_lines(bx, catch_y, w, 13.0, 1.5, color_u8!(255, 255, 255, 90));
+        // Skill-check prompt, centred above the catch bar.
+        if eng.skill_check.is_some() {
             let pulse = (get_time() as f32 * 8.0).sin() * 0.5 + 0.5;
             let col = Color::new(1.0, 0.9, 0.3, 0.6 + 0.4 * pulse);
-            text_shadow("SKILL CHECK!  press [SPACE]", px + 14.0, y, 18.0, col);
-            let gw = pw - 28.0;
-            let frac = (sc.remaining / sc.window).clamp(0.0, 1.0);
-            draw_rectangle(px + 14.0, y + 6.0, gw * frac, 5.0, col);
-            y += 24.0;
-        } else {
-            y += 24.0;
+            let msg = "SKILL CHECK!  [SPACE]";
+            let mw = measure_text(msg, None, 16, 1.0).width;
+            text_shadow(msg, bx + (w - mw) * 0.5, catch_y - 24.0, 16.0, col);
         }
-    } else {
-        text_shadow("Press [T] to target the next animal", px + 14.0, y, 18.0, TEXT);
-        y += 36.0;
     }
 
-    for s in live.iter().take(rows) {
-        let nm = crate::game::species::get(s.species).display_name;
-        let is_target = exp.target == Some(s.id);
-        let col = if is_target { COIN_GOLD } else { TEXT_DIM };
-        let mark = if is_target { ">" } else { "-" };
-        let tier = crate::game::catch::catch_tier(s.species);
-        text_shadow(&format!("{mark} {nm} (T{tier})"), px + 18.0, y, 16.0, col);
-        y += 20.0;
-    }
+    // Stamina bar — always shown on an expedition.
+    let max = app.catch_stats().max_stamina.max(1.0);
+    let frac = (app.stamina / max).clamp(0.0, 1.0);
+    text_shadow(&format!("Stamina  {} / {}", app.stamina as i32, max as i32), bx, stamina_y - 6.0, 14.0, TEXT_DIM);
+    draw_rectangle(bx, stamina_y, w, 11.0, color_u8!(40, 44, 52, 235));
+    let col = if frac < 0.25 { color_u8!(225, 110, 110, 255) } else { color_u8!(120, 210, 130, 255) };
+    draw_rectangle(bx, stamina_y, w * frac, 11.0, col);
+    draw_rectangle_lines(bx, stamina_y, w, 11.0, 1.5, color_u8!(255, 255, 255, 90));
 }
 
 /// Draw each neighbouring plot on the shared hub (Phase 2 additive de-risk):
@@ -1284,7 +1233,13 @@ pub fn draw_hud(app: &mut GameApp, now_utc: DateTime<Utc>) {
     }
 
     draw_notifications(app);
-    draw_hotbar(app);
+    // In an expedition the bottom-centre slot row is replaced by the catch +
+    // stamina bars; otherwise it's the normal item hotbar.
+    if app.expedition.is_some() {
+        draw_expedition_bars(app);
+    } else {
+        draw_hotbar(app);
+    }
     draw_inspect_panel(app, now_utc);
 }
 

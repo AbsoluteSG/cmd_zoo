@@ -688,15 +688,6 @@ impl GameApp {
                 }
             }
         }
-        if is_key_pressed(KeyCode::T) {
-            if let Some(exp) = self.expedition.as_mut() {
-                if exp.engage_first_live().is_some() {
-                    self.set_status("Engaging — deplete its catch bar");
-                } else {
-                    self.set_status("Expedition cleared — F6 to return to the hub");
-                }
-            }
-        }
         if let Some(exp) = self.expedition.as_mut() {
             if is_key_pressed(KeyCode::Key1) {
                 exp.use_ability(AbilityKind::Net, &stats);
@@ -2384,9 +2375,6 @@ impl GameApp {
         }
         if self.depositing.is_some() || self.dedicating.is_some() {
             world::draw_deposit_overlay(self);
-        }
-        if self.expedition.is_some() {
-            world::draw_expedition_hud(self);
         }
         self.draw_cursor();
     }

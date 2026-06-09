@@ -5,7 +5,6 @@ use chrono::{DateTime, Utc};
 use macroquad::prelude::*;
 
 use crate::app::GameApp;
-use crate::catching;
 use crate::game::avatar::PlayerAvatar;
 use uuid::Uuid;
 use crate::game::biome;
@@ -122,9 +121,6 @@ pub fn draw_scene(app: &mut GameApp, now: DateTime<Utc>) {
     }
     order.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
 
-    // Wild animals render behind tame critters / avatars.
-    draw_wild_animals(app);
-
     for (_, item) in order {
         match item {
             Item::Critter(i) => {
@@ -203,48 +199,6 @@ pub fn draw_biome_debug(app: &GameApp) {
             let (pos, size) = view::tile_rect(tx, ty, btile, &cam);
             // +1 px overlap prevents seams between tiles.
             draw_rectangle(pos.x, pos.y, size.x + 1.0, size.y + 1.0, color);
-        }
-    }
-
-    // Per-chunk flag markers: a small dot at each flagged chunk centre, tinted
-    // by its headline flag. Only drawn when zoomed in enough that the chunk
-    // count stays bounded (flags are rare, but iterating every chunk at full
-    // zoom-out would be millions of lookups).
-    {
-        use crate::game::world_chunks::CHUNK_SIZE;
-        let cx0 = (tl.x / CHUNK_SIZE).floor() as i32;
-        let cx1 = (br.x / CHUNK_SIZE).ceil()  as i32;
-        let cy0 = (tl.y / CHUNK_SIZE).floor() as i32;
-        let cy1 = (br.y / CHUNK_SIZE).ceil()  as i32;
-        let chunk_count = (cx1 - cx0 + 1) as i64 * (cy1 - cy0 + 1) as i64;
-        if chunk_count <= 40_000 {
-            for cy in cy0..=cy1 {
-                for cx in cx0..=cx1 {
-                    let f = app.world.chunk_flags((cx, cy));
-                    if f.is_empty() {
-                        continue;
-                    }
-                    // Headline colour: pick the rarest set flag for contrast.
-                    let col = if f.meteor_site {
-                        color_u8!(255, 120, 60, 255)
-                    } else if f.exotic_merchant {
-                        color_u8!(255, 215, 90, 255)
-                    } else if f.ancient_ruins {
-                        color_u8!(200, 180, 255, 255)
-                    } else if f.albino_surge {
-                        color_u8!(240, 240, 255, 255)
-                    } else if f.dna_rich {
-                        color_u8!(196, 120, 220, 255)
-                    } else if f.dense_pack {
-                        color_u8!(255, 90, 90, 255)
-                    } else {
-                        color_u8!(120, 235, 200, 255) // biome_agnostic_spawns
-                    };
-                    let world_c = vec2((cx as f32 + 0.5) * CHUNK_SIZE, (cy as f32 + 0.5) * CHUNK_SIZE);
-                    let p = view::world_to_screen(world_c, &cam);
-                    draw_circle(p.x, p.y, 3.0, col);
-                }
-            }
         }
     }
 
@@ -1253,126 +1207,6 @@ fn draw_beam(feet: Vec2, zoom: f32, pulse: f32) {
     );
 }
 
-// ── Wild animals + catch circle ───────────────────────────────────────────────
-
-/// Draw wild animals visible in the camera frustum and, in catch mode, the
-/// capture circle.  Only chunks overlapping the screen are queried — this is
-/// the primary render-side optimisation from the chunk system.
-fn draw_wild_animals(app: &mut GameApp) {
-    let cam = app.camera;
-    let (cam_tl, cam_br) = view::camera_world_rect(&cam, screen_width(), screen_height());
-    let catch_active = app.catch_state.active;
-    let catch_target = app.catch_state.target;
-    let catch_fill   = app.catch_state.fill;
-
-    // Unified wild source: host/solo read the live world, a visitor reads the
-    // host's stream. Owned copies so the borrow ends before we touch textures.
-    // Cull to the camera rect and skip mid-teleport (hidden) animals.
-    let visible: Vec<(&'static str, macroquad::math::Vec2, macroquad::math::Vec2, uuid::Uuid, u32)> = app
-        .wild_views()
-        .into_iter()
-        .filter(|v| {
-            !v.hidden
-                && v.pos.x >= cam_tl.x
-                && v.pos.x <= cam_br.x
-                && v.pos.y >= cam_tl.y
-                && v.pos.y <= cam_br.y
-        })
-        .map(|v| (v.species, v.pos, v.vel, v.id, v.catches))
-        .collect();
-
-    for (species, pos, vel, id, catches) in visible {
-        let feet     = view::world_to_screen(pos, &cam);
-        let sprite_h = CRITTER_H * cam.zoom;
-        let sink     = sprite_h * FOOT_SINK;
-        let bottom   = feet.y + sink;
-        let top      = bottom - sprite_h;
-        let flip_x   = vel.x > 0.0;
-
-        // Shadow.
-        draw_ellipse(feet.x, feet.y, sprite_h * 0.30, sprite_h * 0.10, 0.0, SHADOW);
-
-        // Sprite drawn at full colour (no wild tint).
-        let tex = app.textures.animal(species);
-        match tex {
-            Some(ref t) => {
-                let aspect = if t.height() > 0.0 { t.width() / t.height() } else { 1.0 };
-                let w = sprite_h * aspect;
-                draw_texture_ex(
-                    t,
-                    feet.x - w * 0.5,
-                    top,
-                    WHITE,
-                    DrawTextureParams {
-                        dest_size: Some(vec2(w, sprite_h)),
-                        flip_x,
-                        ..Default::default()
-                    },
-                );
-            }
-            None => {
-                draw_circle(feet.x, bottom - sprite_h * 0.4, sprite_h * 0.3,
-                            color_u8!(200, 200, 200, 220));
-            }
-        }
-
-        // Catch-progress badge — shown only once this exact animal has been
-        // caught at least once; never above unattempted animals (catches 0).
-        if catches >= 1 {
-            let required = species::captures_required(species);
-            let label = format!("{catches}/{required}");
-            let fs = (sprite_h * 0.20).clamp(12.0, 22.0);
-            let dim = measure_text(&label, None, fs as u16, 1.0);
-            draw_text(&label, feet.x - dim.width * 0.5, top - 4.0, fs, TEXT);
-        }
-
-        // Catch circle — shown when catch mode is active.
-        if catch_active {
-            let center  = catching::animal_screen_center(pos, &cam);
-            let outer_r = crate::game::wild_animal::CATCH_SCREEN_RADIUS_BASE * cam.zoom;
-            let ring_w  = (outer_r * 0.14).max(3.0);
-            let inner_r = outer_r - ring_w;
-
-            // Dim background ring.
-            draw_ring_arc(center.x, center.y, inner_r, outer_r, 1.0,
-                          color_u8!(255, 255, 255, 30));
-            draw_circle_lines(center.x, center.y, outer_r, 1.2,
-                              color_u8!(255, 255, 255, 60));
-
-            // Progress arc for the targeted animal.
-            if catch_target == Some(id) && catch_fill > 0.0 {
-                draw_ring_arc(center.x, center.y, inner_r, outer_r, catch_fill,
-                              color_u8!(180, 255, 80, 230));
-                draw_circle_lines(center.x, center.y, outer_r, 1.5,
-                                  color_u8!(200, 255, 100, 190));
-            }
-        }
-    }
-}
-
-/// Draw a filled arc as a ring strip (inner_r → outer_r, clockwise from top).
-/// Each segment is a quad built from two triangles.
-fn draw_ring_arc(cx: f32, cy: f32, inner_r: f32, outer_r: f32, fill: f32, color: Color) {
-    if fill <= 0.0 { return; }
-    const N: usize = 48;
-    let filled = ((fill * N as f32).ceil() as usize).min(N);
-    let start  = -std::f32::consts::FRAC_PI_2;
-    let center = vec2(cx, cy);
-    for i in 0..filled {
-        let t0 = i as f32 / N as f32;
-        let t1 = ((i + 1) as f32 / N as f32).min(fill);
-        let a0 = start + t0 * std::f32::consts::TAU;
-        let a1 = start + t1 * std::f32::consts::TAU;
-        let (s0, c0) = a0.sin_cos();
-        let (s1, c1) = a1.sin_cos();
-        let oi = center + vec2(c0, s0) * inner_r;
-        let oo = center + vec2(c0, s0) * outer_r;
-        let ni = center + vec2(c1, s1) * inner_r;
-        let no = center + vec2(c1, s1) * outer_r;
-        draw_triangle(oo, no, ni, color);
-        draw_triangle(oo, ni, oi, color);
-    }
-}
 
 // ── HUD ───────────────────────────────────────────────────────────────────────
 
@@ -1397,11 +1231,7 @@ pub fn draw_hud(app: &mut GameApp, now_utc: DateTime<Utc>) {
 
     // Hint line below the chips, with a soft drop shadow so it stays legible
     // over the world (the old letterbox bar is gone).
-    let hint = if app.catch_state.active {
-        "C exit catch · hover a wild animal to catch it"
-    } else {
-        "WASD move · Shift sprint · Space dash · E inspect / nest · C catch · 1–5 hotbar · U Upgrades O Settings M Waypoints"
-    };
+    let hint = "WASD move · Shift sprint · Space dash · E inspect / nest · 1–5 hotbar · F6 expedition · U Upgrades O Settings M Waypoints";
     text_shadow(hint, 16.0, 62.0, 18.0, TEXT_DIM);
 
     // While hosting, always show our own join code so it's readable without
@@ -1412,14 +1242,6 @@ pub fn draw_hud(app: &mut GameApp, now_utc: DateTime<Utc>) {
             let line = format!("● Online — share code  {}   ·   {peers}/3 visitors", code.as_str());
             text_shadow(&line, 16.0, 84.0, 18.0, color_u8!(123, 207, 167, 255));
         }
-    }
-
-    if app.catch_state.active {
-        text_shadow(
-            "CATCH MODE",
-            screen_width() * 0.5 - 48.0, 30.0, 22.0,
-            color_u8!(180, 255, 80, 230),
-        );
     }
 
     // ── Bottom-left stack: errors (red) then status (amber), as pills ────

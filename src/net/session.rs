@@ -14,7 +14,7 @@ use crate::game::avatar_system::{PLANE_H, PLANE_W};
 use crate::game::visitor::VisitorRecord;
 use crate::game::zoo::Zoo;
 
-use super::protocol::{AvatarPose, ByeReason, JoinCode, NetMessage, PeerId, WildAnimalPose, WireIntent};
+use super::protocol::{AvatarPose, ByeReason, JoinCode, NetMessage, PeerId, WireIntent};
 use super::transport::{NetEvent, NetTransport};
 
 pub const MAX_PEERS: usize = 3; // up to 3 visitors → 4-player zoo (host + 3)
@@ -56,9 +56,6 @@ pub struct Session {
     /// Set on the visitor when the host goes away (sent us `Bye`, or the
     /// transport dropped). `GameApp` reads this to show the disconnect screen.
     pub host_gone: Option<ByeReason>,
-    /// Visitor-side: the host's latest streamed wild animals. Replaces the
-    /// visitor's own (unrun) wild simulation for rendering and catching.
-    pub remote_wild: Vec<WildAnimalPose>,
 }
 
 impl Session {
@@ -72,7 +69,6 @@ impl Session {
             transport: None,
             tick: 0,
             host_gone: None,
-            remote_wild: Vec::new(),
         }
     }
 
@@ -142,7 +138,6 @@ impl Session {
             transport: Some(transport),
             tick: 0,
             host_gone: None,
-            remote_wild: Vec::new(),
         }
     }
 
@@ -239,9 +234,6 @@ impl Session {
                     match msg {
                         // Visitor-only host→client streams handled here so the
                         // free `handle_message` can stay zoo/avatar focused.
-                        NetMessage::WildDelta { animals, .. } if from_host => {
-                            self.remote_wild = animals;
-                        }
                         NetMessage::Bye(reason) if from_host => {
                             self.host_gone = Some(reason);
                         }
@@ -280,18 +272,6 @@ impl Session {
         };
         let snapshot = crate::persistence::snapshot_from_zoo(zoo);
         t.broadcast(NetMessage::WorldSnapshot(snapshot), None);
-    }
-
-    /// Broadcast the host's nearby wild animals to all peers. Host-only.
-    pub fn broadcast_wild(&mut self, animals: Vec<WildAnimalPose>) {
-        let SessionRole::Host { .. } = &self.role else {
-            return;
-        };
-        let Some(t) = self.transport.as_mut() else {
-            return;
-        };
-        self.tick = self.tick.wrapping_add(1);
-        t.broadcast(NetMessage::WildDelta { tick: self.tick, animals }, None);
     }
 
     /// Broadcast the current avatar poses to all connected peers. Host-only.

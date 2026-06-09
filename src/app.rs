@@ -16,12 +16,10 @@ use uuid::Uuid;
 use std::collections::HashMap;
 
 use crate::audio::Sounds;
-use crate::catching::{CatchState, WildView};
 use crate::game::action::{Action, ActionOutcome};
 use crate::game::avatar_system::{self, Behavior};
 use crate::game::{Zoo, economy, species};
-use crate::game::wild_animal::AiHit;
-use crate::game::world_chunks::{WorldChunks, WORLD_W, WORLD_H};
+use crate::game::world_chunks::{WORLD_W, WORLD_H};
 use crate::input::{AvatarController, ControllerCtx, KeyboardController, RemoteController};
 use crate::net::Session;
 use crate::persistence::json_file::JsonFileRepository;
@@ -381,11 +379,6 @@ pub struct GameApp {
     pub textures: Textures,
     pub sounds: Sounds,
     pub critters: Vec<Critter>,
-    /// Chunk-streamed wild world.  Owns all wild animal state and manages
-    /// load / cull / cache based on the player's position.
-    pub world: WorldChunks,
-    /// Catch-mode state (C key toggle, fill progress, hover target).
-    pub catch_state: CatchState,
     /// Active overlay screen (World / Shop / Breeding).
     pub screen: Screen,
     /// Menu open/close animation (0 = closed, 1 = open), eased each frame.
@@ -425,9 +418,6 @@ pub struct GameApp {
     /// to ~`SNAPSHOT_BROADCAST_INTERVAL` so visitors see currency/animal
     /// changes without flooding the wire on every frame.
     snapshot_broadcast_t: f32,
-    /// Seconds since the host last streamed wild animals (`WildDelta`),
-    /// throttled to ~`WILD_BROADCAST_INTERVAL`.
-    wild_broadcast_t: f32,
     /// Currently-being-typed join code in the Settings join-friend field.
     /// 6 chars max; uppercase Crockford base32 (matches `JoinCode::random`).
     pub join_code_buffer: String,
@@ -519,20 +509,9 @@ const ZOOM_STIFFNESS: f32 = 16.0;
 const ZOOM_MIN: f32 = 0.3;
 const ZOOM_MAX: f32 = 3.0;
 
-/// Hitstop duration applied when a Basher lands a hit.
-const BASH_HITSTOP: f32 = 0.12;
-/// Camera-shake duration applied when a Basher lands a hit.
+/// Camera-shake duration applied when a Basher lands a hit. Retained as the
+/// reference magnitude for the shake decay even though wild bashers are gone.
 const BASH_SHAKE: f32 = 0.35;
-
-/// Fuse (seconds) on a Thrower's object before it lands.
-const THROW_FUSE: f32 = 1.1;
-/// Impact radius (world units) of a thrown object — stand outside this to dodge.
-const THROW_RADIUS: f32 = 95.0;
-/// Camera-shake duration applied when a throw connects.
-const THROW_SHAKE: f32 = 0.3;
-/// Random-vector knockback impulse (world units/s) added to the avatar on a
-/// throw hit; the avatar's accel-damped motion bleeds it off over ~0.4s.
-const KNOCKBACK_SPEED: f32 = 520.0;
 /// Duration (seconds) of the venom screen effect (red vignette + brief blur).
 const VENOM_FX_DURATION: f32 = 0.55;
 /// Peak camera-shake amplitude in screen pixels.
@@ -542,9 +521,6 @@ const SHAKE_AMPLITUDE: f32 = 14.0;
 /// Two seconds is fast enough that purchases feel live without saturating
 /// the loopback / Steam relay bandwidth budget.
 const SNAPSHOT_BROADCAST_INTERVAL: f32 = 2.0;
-/// Host wild-animal streaming cadence (seconds) — ~10 Hz, smooth enough to
-/// lerp on the visitor without flooding the relay.
-const WILD_BROADCAST_INTERVAL: f32 = 0.1;
 
 impl GameApp {
     pub fn new(zoo: Zoo, repo: Arc<JsonFileRepository>, last_modtime: SystemTime) -> Self {
@@ -553,9 +529,6 @@ impl GameApp {
         let session = Session::solo(zoo.player.id, spawn);
         let mut camera = default_camera();
         camera.snap_to(spawn, vec2(screen_width(), screen_height()));
-        // Seed the wild world from the save (regenerated on the fly; only the
-        // chunk deltas come from disk).
-        let world = WorldChunks::new(zoo.world_seed, zoo.chunk_deltas.clone());
         Self {
             zoo,
             repo,
@@ -566,8 +539,6 @@ impl GameApp {
             textures: Textures::new(),
             sounds: Sounds::default(),
             critters,
-            world,
-            catch_state: CatchState::default(),
             screen: Screen::World,
             menu_t: 0.0,
             shown_menu: Screen::World,
@@ -582,7 +553,6 @@ impl GameApp {
             remotes: HashMap::new(),
             behaviors: avatar_system::default_behaviors(),
             snapshot_broadcast_t: 0.0,
-            wild_broadcast_t: 0.0,
             join_code_buffer: String::new(),
             notifications: Vec::new(),
             hitstop: 0.0,
@@ -964,76 +934,11 @@ impl GameApp {
             crate::net_log!("HOST: rejected command from {player_id} (insufficient permission)");
             return;
         }
-        // Catch resolution mutates the wild world + zoo together, so it goes
-        // through `resolve_catch` rather than the zoo-only `apply_action`.
-        if let Action::RegisterCatch(id) = action {
-            self.resolve_catch(id, now, false);
-            return;
-        }
         if let Ok(_outcome) = crate::game::action::apply_action(&mut self.zoo, action, now) {
             self.after_zoo_mutation(now);
         }
         // Rejected commands simply produce no change; the visitor's snapshot
         // already reflects the unchanged state, so nothing to undo.
-    }
-
-    /// Wild animals to render and catch this frame, unified across modes:
-    /// host/solo read the live procedural world; a visitor reads the host's
-    /// streamed `WildDelta`. Both feed the same catch/render path.
-    pub fn wild_views(&self) -> Vec<WildView> {
-        if self.is_guest() {
-            self.session
-                .remote_wild
-                .iter()
-                .filter_map(|p| {
-                    let species = species::try_get(&p.species)?.id;
-                    Some(WildView {
-                        id: p.id,
-                        species,
-                        pos: vec2(p.x, p.y),
-                        vel: vec2(p.vx, p.vy),
-                        catches: p.catches,
-                        hidden: p.hidden,
-                        fill_speed: p.fill_speed,
-                    })
-                })
-                .collect()
-        } else {
-            self.world
-                .active_animals()
-                .into_iter()
-                .map(|a| WildView {
-                    id: a.id,
-                    species: a.species,
-                    pos: a.pos,
-                    vel: a.vel,
-                    catches: a.catches,
-                    hidden: a.hidden,
-                    fill_speed: a.fill_speed(),
-                })
-                .collect()
-        }
-    }
-
-    /// Host: snapshot the live wild animals into wire poses for streaming. (The
-    /// loaded chunks track the host's avatar, so co-op hunting works best when
-    /// players stay near each other — multi-focal loading is a future step.)
-    fn wild_poses(&self) -> Vec<crate::net::protocol::WildAnimalPose> {
-        self.world
-            .active_animals()
-            .into_iter()
-            .map(|a| crate::net::protocol::WildAnimalPose {
-                id: a.id,
-                species: a.species.to_string(),
-                x: a.pos.x,
-                y: a.pos.y,
-                vx: a.vel.x,
-                vy: a.vel.y,
-                catches: a.catches,
-                hidden: a.hidden,
-                fill_speed: a.fill_speed(),
-            })
-            .collect()
     }
 
     /// Shared post-mutation bookkeeping for the host/solo authoritative path:
@@ -1111,7 +1016,6 @@ impl GameApp {
 
         // Rebuild all state derived from our own zoo (mirrors `GameApp::new`).
         crate::game::world_chunks::set_zoo_level(self.zoo.zoo_level);
-        self.world = WorldChunks::new(self.zoo.world_seed, self.zoo.chunk_deltas.clone());
         self.critters = critters_from_zoo(&self.zoo);
         let spawn = vec2(WORLD_W * 0.5, WORLD_H * 0.5);
         self.session = Session::solo(self.zoo.player.id, spawn);
@@ -1227,7 +1131,6 @@ impl GameApp {
         let hatched = self.zoo.advance_nests(now);
         if !hatched.is_empty() {
             self.sync_critters();
-            self.sync_world_to_zoo();
             for (idx, _species) in &hatched {
                 // Birth sparkle at the nest where it hatched.
                 self.particles.birth(self.zoo.nest_pos(*idx));
@@ -1494,10 +1397,6 @@ impl GameApp {
             }
         }
 
-        // 0. Stream world chunks around the player's current position.
-        let player_pos = self.session.my_avatar().pos;
-        self.world.update(player_pos);
-
         // 1. Pump the net transport (no-op in Solo). Inbound visitor intents
         //    are surfaced keyed by their player_id; push them into the matching
         //    RemoteController so the avatar pipeline reads identical shape
@@ -1604,12 +1503,6 @@ impl GameApp {
                 self.snapshot_broadcast_t = 0.0;
                 self.session.broadcast_world_snapshot(&self.zoo);
             }
-            self.wild_broadcast_t += dt;
-            if self.wild_broadcast_t >= WILD_BROADCAST_INTERVAL {
-                self.wild_broadcast_t = 0.0;
-                let poses = self.wild_poses();
-                self.session.broadcast_wild(poses);
-            }
         }
 
         // Visitor: a recent host snapshot may have replaced our local zoo —
@@ -1715,113 +1608,14 @@ impl GameApp {
         // NPC animation + speaking-sprite sync (idle bob, interact pop).
         self.update_npcs(dt);
 
-        // ── Wild animal AI + catch resolution ─────────────────────────────
-        // Skipped during hitstop so the bash freeze actually reads as a pause.
-        if !frozen {
-            let cursor_world = view::screen_to_world(mouse, &self.camera);
-            let avatar_pos = self.session.my_avatar().pos;
-            // Wild AI runs only on the authority (host/solo). A visitor renders
-            // and catches the host-streamed animals instead of simulating.
-            let hits = if self.is_guest() {
-                Vec::new()
-            } else {
-                self.world
-                    .update_animal_ai(dt, cursor_world, avatar_pos, self.catch_state.active)
-            };
-
-            for hit in hits {
-                match hit {
-                    // A connecting Basher staggers the player and resets the timer.
-                    AiHit::Bash => {
-                        self.hitstop = BASH_HITSTOP;
-                        self.camera_shake = BASH_SHAKE;
-                        self.catch_state.fill = 0.0;
-                        self.particles.impact(avatar_pos, Vec2::ZERO);
-                        self.sounds.play("poke_lion_sfx");
-                    }
-                    // A Venomous lunge poisons: hitstop + red vignette + blur.
-                    AiHit::Venom(pos) => {
-                        self.hitstop = BASH_HITSTOP;
-                        self.venom_fx = VENOM_FX_DURATION;
-                        self.camera_shake = BASH_SHAKE * 0.6;
-                        self.catch_state.fill = 0.0;
-                        self.particles.venom(pos);
-                        self.sounds.play("poke_lion_sfx");
-                    }
-                    // A Thrower release drops a timed danger zone (resolved below).
-                    AiHit::Throw(target) => {
-                        self.danger_zones.push(DangerZone {
-                            center: target,
-                            fuse: THROW_FUSE,
-                            remaining: THROW_FUSE,
-                            radius: THROW_RADIUS,
-                        });
-                        // Bound the queue so a swarm can't grow it without limit.
-                        while self.danger_zones.len() > 16 {
-                            self.danger_zones.remove(0);
-                        }
-                    }
-                }
-            }
-
-            // Run the catch against the unified wild view (host world or the
-            // host's stream). On completion: host/solo resolve locally; a
-            // visitor sends the catch to the host to apply authoritatively.
-            let views = self.wild_views();
-            let caught_id = self.catch_state.update(mouse, avatar_pos, &views, &self.camera, dt);
-            if let Some(id) = caught_id {
-                if self.is_guest() {
-                    self.dispatch(Action::RegisterCatch(id), now);
-                } else {
-                    self.resolve_catch(id, now, true);
-                }
-            }
-        }
+        // The open world's wild-animal AI + hover-catch is retired (Phase 3):
+        // wild animals now live only inside biome expeditions, driven by the
+        // target→engage loop (see `update_expedition`).
 
         // Venom screen-effect timer (red vignette + blur) decays independently
         // of hitstop so the flash plays out smoothly after the freeze ends.
         if self.venom_fx > 0.0 {
             self.venom_fx = (self.venom_fx - dt).max(0.0);
-        }
-
-        // Thrown-object zones tick + resolve every frame — even during a venom
-        // hitstop — so a telegraphed throw always lands on schedule.
-        self.update_danger_zones(dt);
-    }
-
-    /// Tick each active throw-impact zone; on landing, kick up dust and, if the
-    /// avatar is inside the radius, stagger them (shake + catch reset + a random
-    /// knockback impulse).
-    fn update_danger_zones(&mut self, dt: f32) {
-        if self.danger_zones.is_empty() {
-            return;
-        }
-        let avatar_pos = self.session.my_avatar().pos;
-        let mut landed_hit = false;
-        let mut i = 0;
-        while i < self.danger_zones.len() {
-            self.danger_zones[i].remaining -= dt;
-            if self.danger_zones[i].remaining <= 0.0 {
-                let z = self.danger_zones.remove(i);
-                self.particles.dust(z.center);
-                if (avatar_pos - z.center).length() < z.radius {
-                    landed_hit = true;
-                }
-            } else {
-                i += 1;
-            }
-        }
-        if landed_hit {
-            self.camera_shake = THROW_SHAKE;
-            self.catch_state.fill = 0.0;
-            // Random-vector knockback added straight to the avatar velocity.
-            let ang = rand::gen_range(0.0f32, std::f32::consts::TAU);
-            let knock = vec2(ang.cos(), ang.sin()) * KNOCKBACK_SPEED;
-            let id = self.session.local_player_id;
-            if let Some(a) = self.session.avatars.get_mut(&id) {
-                a.vel += knock;
-            }
-            self.sounds.play("poke_lion_sfx");
         }
     }
 
@@ -1836,8 +1630,6 @@ impl GameApp {
         if is_key_pressed(KeyCode::R) {
             let new_seed = ((rand::rand() as u64) << 32) | rand::rand() as u64;
             self.zoo.world_seed = new_seed;
-            self.world = WorldChunks::new(new_seed, HashMap::new());
-            self.zoo.chunk_deltas.clear();
             self.set_status(format!("reseeded · {new_seed:#018x}"));
         }
 
@@ -1962,7 +1754,6 @@ impl GameApp {
         }
         self.camera
             .snap_to(pos, vec2(screen_width(), screen_height()));
-        self.world.update(pos);
         self.set_screen(Screen::World);
     }
 
@@ -2454,74 +2245,6 @@ impl GameApp {
         }
     }
 
-    /// Called when the catch circle completes for a wild animal.
-    /// Removes it from the world chunk, adds a tame L1 copy to the zoo.
-    /// Resolve a completed catch. `local` is true for our own catch (so we reset
-    /// our catch ring on a partial multi-catch); false when applying a visitor's
-    /// `RegisterCatch` on the host, where we must not disturb the host's own ring.
-    fn resolve_catch(&mut self, id: uuid::Uuid, now: DateTime<Utc>, local: bool) {
-        // Record the catch on the animal instance; rarer species must be caught
-        // multiple times before they're actually captured.
-        let Some((species, count)) = self.world.register_catch(id) else { return };
-        let name = species::get(species).display_name;
-        let required = species::captures_required(species);
-
-        // Not enough catches yet → the animal stays in the world. Reset the
-        // fill so the player has to fill the ring again for the next catch.
-        if count < required {
-            if local {
-                self.catch_state.fill = 0.0;
-                self.catch_state.target = None;
-            }
-            self.sounds.play("income_sfx");
-            self.set_status(format!(
-                "Caught {}! Needs {} more to capture ({}/{})",
-                name,
-                required - count,
-                count,
-                required
-            ));
-            return;
-        }
-
-        // Threshold met → remove it from the world and tame it into the zoo.
-        // Guard the zoo's animal capacity *before* removing it from the world —
-        // otherwise a full zoo would make the captured animal vanish entirely.
-        // Duplicates of an owned species don't need space (they advance Rank).
-        if !self.zoo.owns_species(species) && self.zoo.at_animal_capacity() {
-            self.set_status("Zoo at capacity — expand it to capture more animals");
-            return;
-        }
-        // Grab its world position first so the capture burst fires where it was.
-        let catch_pos = self
-            .world
-            .active_animals()
-            .into_iter()
-            .find(|a| a.id == id)
-            .map(|a| a.pos);
-        self.world.remove_animal(id);
-        match self.zoo.spawn_animal_freeform(species, 1, now) {
-            Ok(_) => {
-                self.sounds.play("income_sfx");
-                if let Some(pos) = catch_pos {
-                    self.particles.capture(pos);
-                }
-                self.sync_critters();
-                self.save_under_lock(now);
-                self.push_notification(name, "Captured!", NotifIcon::Animal(species));
-            }
-            Err(e) => {
-                self.set_status(format!("Capture failed: {e}"));
-            }
-        }
-    }
-
-    /// Mirror the live wild-world state (seed + accumulated chunk deltas) into
-    /// the zoo so it gets serialized on the next save.
-    fn sync_world_to_zoo(&mut self) {
-        self.zoo.world_seed = self.world.world_seed();
-        self.zoo.chunk_deltas = self.world.export_deltas();
-    }
 
     /// Lock, save, update modtime. Call after any user-driven mutation.
     ///
@@ -2532,7 +2255,6 @@ impl GameApp {
         if self.is_guest() {
             return;
         }
-        self.sync_world_to_zoo();
         self.zoo.last_saved_at = now;
         let repo = self.repo.clone();
         if let Ok(access) = repo.lock() {

@@ -69,22 +69,6 @@ pub struct AvatarPose {
     pub facing: u8,
 }
 
-/// One host-authoritative wild animal, streamed to visitors so everyone sees
-/// (and can catch) the same creatures. Carries `fill_speed` directly so the
-/// visitor's catch ring fills correctly without knowing the animal's moveset.
-#[derive(Serialize, Deserialize, Clone, Debug)]
-pub struct WildAnimalPose {
-    pub id: Uuid,
-    pub species: String,
-    pub x: f32,
-    pub y: f32,
-    pub vx: f32,
-    pub vy: f32,
-    pub catches: u32,
-    pub hidden: bool,
-    pub fill_speed: f32,
-}
-
 /// Reason the host disconnected a visitor.
 #[derive(Serialize, Deserialize, Clone, Copy, Debug)]
 pub enum ByeReason {
@@ -146,13 +130,6 @@ pub enum NetMessage {
     AvatarsDelta {
         tick: u32,
         avatars: Vec<AvatarPose>,
-    },
-    /// Host-authoritative wild animals near the players, streamed at ~10 Hz so
-    /// visitors render and catch the same creatures. Visitors stop simulating
-    /// their own wild world while connected.
-    WildDelta {
-        tick: u32,
-        animals: Vec<WildAnimalPose>,
     },
     /// World-state changes the visitor needs to know about (coins changed,
     /// animal added, etc.). Kept as a tagged enum so it can grow without

@@ -1253,7 +1253,7 @@ impl GameApp {
             // Free-roam movement + camera (same path the hub uses, inlined so we
             // don't also run hub interactions like inspect/redeem/hotbar).
             let dt = get_frame_time();
-            let local_intent = {
+            let mut local_intent = {
                 let ctx = ControllerCtx {
                     dt,
                     avatar: self.session.my_avatar(),
@@ -1261,6 +1261,10 @@ impl GameApp {
                 };
                 self.controller.sample(&ctx)
             };
+            // No dashing while engaged in a catch (it's a stationary stat check).
+            if self.expedition.as_ref().is_some_and(|e| e.is_engaging()) {
+                local_intent.actions.0 &= !crate::input::ActionFlags::DASH.0;
+            }
             {
                 let world = avatar_system::World { habitats: &self.zoo.habitats };
                 let id = self.session.local_player_id;

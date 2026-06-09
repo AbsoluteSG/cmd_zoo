@@ -99,10 +99,10 @@ impl Expedition {
         self.engagement.is_some()
     }
 
-    /// Advance the roaming wild animals by `dt`. `avatar_pos` lets aggressive
-    /// movesets react to the player once the in-expedition flee model lands.
+    /// Advance the roaming wild animals by `dt`. The currently engaged target
+    /// holds still while it's being caught (a pure stat check).
     pub fn update_world(&mut self, dt: f32, avatar_pos: Vec2) {
-        self.instance.update(dt, avatar_pos);
+        self.instance.update(dt, avatar_pos, self.target);
     }
 
     /// World position of the currently engaged target (it keeps roaming), for

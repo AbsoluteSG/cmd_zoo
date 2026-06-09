@@ -78,11 +78,17 @@ impl BiomeInstance {
     }
 
     /// Advance every roaming animal's AI by `dt`, then keep it inside the arena.
-    /// Animals wander calmly (`catch_mode = false`); `avatar_pos` is supplied so
-    /// aggressive movesets can react once the engage/flee model is wired in.
-    pub fn update(&mut self, dt: f32, avatar_pos: Vec2) {
+    /// Animals just wander (catching is a stat check, not an evasion minigame),
+    /// and the **currently engaged** animal (`engaged`) holds completely still
+    /// while it's being caught.
+    pub fn update(&mut self, dt: f32, avatar_pos: Vec2, engaged: Option<Uuid>) {
         let size = self.size;
         for a in &mut self.animals {
+            if Some(a.id) == engaged {
+                // Being caught: sit still (a pure stat check, no fleeing).
+                a.vel = Vec2::ZERO;
+                continue;
+            }
             a.update(dt, avatar_pos, avatar_pos, false);
             a.pos.x = a.pos.x.clamp(0.0, size.x);
             a.pos.y = a.pos.y.clamp(0.0, size.y);
@@ -189,7 +195,7 @@ mod tests {
         let before: Vec<Vec2> = inst.animals.iter().map(|a| a.pos).collect();
         let avatar = inst.size * 0.5;
         for _ in 0..120 {
-            inst.update(1.0 / 60.0, avatar);
+            inst.update(1.0 / 60.0, avatar, None);
         }
         // Every animal stays inside the arena…
         for a in &inst.animals {
@@ -198,6 +204,19 @@ mod tests {
         // …and at least one has actually moved (they roam).
         let moved = inst.animals.iter().zip(&before).any(|(a, p)| (a.pos - *p).length() > 1.0);
         assert!(moved, "animals should roam");
+    }
+
+    #[test]
+    fn engaged_animal_sits_still() {
+        let mut inst = BiomeInstance::new(HabitatTheme::Forest, 88);
+        let id = inst.animals[0].id;
+        let start = inst.animals[0].pos;
+        let avatar = inst.size * 0.5;
+        for _ in 0..120 {
+            inst.update(1.0 / 60.0, avatar, Some(id));
+        }
+        // The engaged target never moves while it's being caught.
+        assert_eq!(inst.animal(id).unwrap().pos, start);
     }
 
     #[test]

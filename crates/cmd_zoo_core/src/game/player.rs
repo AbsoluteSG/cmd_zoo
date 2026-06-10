@@ -12,7 +12,7 @@ pub struct Player {
 impl Player {
     pub fn new_default() -> Self {
         Self {
-            id: Uuid::new_v4(),
+            id: crate::game::ids::new_id(),
             name: DEFAULT_PLAYER_NAME.to_string(),
         }
     }

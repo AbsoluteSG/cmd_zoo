@@ -26,7 +26,7 @@ pub struct Structure {
 impl Structure {
     pub fn new(kind: StructureKindId, now: DateTime<Utc>) -> Self {
         Self {
-            id: Uuid::new_v4(),
+            id: crate::game::ids::new_id(),
             kind,
             level: 1,
             last_collected_at: now,

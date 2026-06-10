@@ -4,6 +4,17 @@ version = "0.1.0"
 edition = "2024"
 description = "Headless simulation core for cmd_zoo (no graphics engine). Runs both in the client (Solo/offline) and, later, inside the SpacetimeDB module (online authority)."
 
+[features]
+# On by default for the desktop client / tests. Disabled for the SpacetimeDB
+# module build, which targets wasm32:
+#   - `file-persistence`: the JSON-file repository + its OS deps (no filesystem
+#     on wasm; the module persists via SpacetimeDB tables instead).
+#   - `std-ids`: random v4 entity ids (needs OS randomness, and would be
+#     non-deterministic in a reducer). The module derives ids host-seeded instead.
+default = ["file-persistence", "std-ids"]
+file-persistence = ["dep:fs2", "dep:directories"]
+std-ids = ["uuid/v4"]
+
 [dependencies]
 # glam pinned to the version macroquad re-exports so Vec2 is the identical type
 # across the client boundary.
@@ -11,14 +22,18 @@ glam = "0.27"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 chrono = { version = "0.4", features = ["serde"] }
-uuid = { version = "1", features = ["v4", "v5", "serde"] }
+# v4 (random ids) is pulled only by the `std-ids` feature; the module build
+# drops it (and getrandom) and derives ids deterministically instead.
+uuid = { version = "1", features = ["v5", "serde"] }
 anyhow = "1"
 once_cell = "1"
 base64 = "0.22"
 flate2 = "1"
 qrcode = { version = "0.14", default-features = false }
-fs2 = "0.4"
-directories = "5"
+# Filesystem deps — only used by `persistence::json_file`, gated behind
+# `file-persistence` so the wasm module build can drop them.
+fs2 = { version = "0.4", optional = true }
+directories = { version = "5", optional = true }
 
 [dev-dependencies]
 tempfile = "3"

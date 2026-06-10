@@ -1,4 +1,5 @@
-﻿pub mod json_file;
+﻿#[cfg(feature = "file-persistence")]
+pub mod json_file;
 pub mod schema;
 
 use std::collections::{HashMap, HashSet};
@@ -280,7 +281,7 @@ fn migrate_v1_to_v2(value: &mut Value) {
         map.insert("schema_version".into(), Value::from(2u64));
         map.entry("player".to_string()).or_insert_with(|| {
             serde_json::json!({
-                "id": Uuid::new_v4().to_string(),
+                "id": crate::game::ids::new_id().to_string(),
                 "name": DEFAULT_PLAYER_NAME,
             })
         });

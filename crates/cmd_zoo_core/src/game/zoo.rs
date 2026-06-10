@@ -59,7 +59,7 @@ pub struct Nest {
 
 impl Nest {
     pub fn new() -> Self {
-        Self { id: Uuid::new_v4(), slots: [None, None], offspring: None }
+        Self { id: crate::game::ids::new_id(), slots: [None, None], offspring: None }
     }
     /// Occupant ids currently in the nest (0–2). Does not include a pending
     /// offspring — only the deposited breeding pair.
@@ -310,7 +310,7 @@ impl Zoo {
         if self.waypoints.len() >= Self::MAX_WAYPOINTS {
             return None;
         }
-        let id = Uuid::new_v4();
+        let id = crate::game::ids::new_id();
         self.waypoints.push(Waypoint { id, name: name.into(), pos });
         Some(id)
     }
@@ -1650,7 +1650,7 @@ impl Zoo {
 
         Ok(GiftPayload {
             version: 1,
-            gift_id: Uuid::new_v4(),
+            gift_id: crate::game::ids::new_id(),
             sender_id: self.player.id,
             sender_name: self.player.name.clone(),
             created_at: now,

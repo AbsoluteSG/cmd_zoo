@@ -54,7 +54,7 @@ pub struct Pedestal {
 
 impl Pedestal {
     pub fn new(tile: (i32, i32)) -> Self {
-        Self { id: Uuid::new_v4(), tile, animal: None, dedicated_at: None, cooldown_until: None }
+        Self { id: crate::game::ids::new_id(), tile, animal: None, dedicated_at: None, cooldown_until: None }
     }
 
     /// True while the dedicated animal is still inside its 48h lock.

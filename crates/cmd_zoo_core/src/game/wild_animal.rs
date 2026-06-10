@@ -37,7 +37,7 @@ pub struct WildAnimal {
 impl WildAnimal {
     pub fn new(species: SpeciesId, pos: Vec2, spawn_index: u16) -> Self {
         Self {
-            id: Uuid::new_v4(),
+            id: crate::game::ids::new_id(),
             species,
             pos,
             vel: vec2(0.0, 0.0),

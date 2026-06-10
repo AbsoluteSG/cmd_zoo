@@ -9,6 +9,7 @@ pub mod economy;
 pub mod gear;
 pub mod exotic_shop;
 pub mod habitat;
+pub mod ids;
 pub mod intent;
 pub mod merchant;
 pub mod npc;

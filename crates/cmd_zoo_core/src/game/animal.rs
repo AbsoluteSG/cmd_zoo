@@ -35,7 +35,7 @@ pub struct Animal {
 impl Animal {
     pub fn new(species: SpeciesId, now: DateTime<Utc>) -> Self {
         Self {
-            id: Uuid::new_v4(),
+            id: crate::game::ids::new_id(),
             species,
             level: 1,
             stage: 0,

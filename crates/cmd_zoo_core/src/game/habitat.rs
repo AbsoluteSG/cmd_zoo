@@ -44,7 +44,7 @@ impl Habitat {
 
     pub fn new_at(theme: HabitatTheme, tile: (i32, i32)) -> Self {
         Self {
-            id: Uuid::new_v4(),
+            id: crate::game::ids::new_id(),
             theme,
             level: 1,
             animal_ids: Vec::new(),

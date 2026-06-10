@@ -15,3 +15,4 @@ pub mod expedition;
 pub mod input;
 pub mod net;
 pub mod render;
+pub mod stdb;

@@ -9,7 +9,9 @@
 //! connect. Linking it to the Steam id (UUIDv5, see `crate::net::steam`) comes
 //! later. Solo / offline play does not touch this module.
 
+use glam::{Vec2, vec2};
 use spacetimedb_sdk::{DbContext, Identity, Table};
+use uuid::Uuid;
 
 use super::bindings::{
     AvatarPoseTableAccess, DbConnection, ZooTableAccess,
@@ -117,6 +119,21 @@ impl OnlineClient {
             .collect()
     }
 
+    /// Other players' avatar targets as `(stable per-identity key, world pos)`,
+    /// excluding our own. The key is a deterministic UUID derived from the
+    /// SpacetimeDB identity, so it's stable across frames (and drives avatar
+    /// colour). Used to drive moving remote avatars on the hub.
+    pub fn peer_avatar_targets(&self) -> Vec<(Uuid, Vec2)> {
+        let me = self.identity();
+        self.conn
+            .db
+            .avatar_pose()
+            .iter()
+            .filter(|p| Some(p.owner) != me)
+            .map(|p| (identity_uuid(&p.owner), vec2(p.x, p.y)))
+            .collect()
+    }
+
     /// All known zoos on the hub.
     pub fn zoos(&self) -> Vec<ZooView> {
         self.conn
@@ -143,4 +160,10 @@ impl OnlineClient {
 /// surfaces in windowed builds too (mirrors `crate::net::diag`).
 fn log_line(msg: String) {
     eprintln!("[stdb] {msg}");
+}
+
+/// A stable UUID derived from a SpacetimeDB [`Identity`] — used as a render-side
+/// key and avatar colour seed for a remote player.
+pub fn identity_uuid(id: &Identity) -> Uuid {
+    Uuid::new_v5(&Uuid::NAMESPACE_OID, id.to_string().as_bytes())
 }

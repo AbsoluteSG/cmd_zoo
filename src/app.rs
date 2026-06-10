@@ -502,6 +502,11 @@ pub struct GameApp {
     pub online: Option<crate::stdb::client::OnlineClient>,
     /// Throttle accumulator for online sync (pose push + peer rebuild).
     pub online_timer: f32,
+    /// Other players' avatars on the hub, keyed by a stable per-identity UUID.
+    /// Their target positions come from the subscribed `avatar_pose` rows
+    /// (refreshed in `sync_online`); each frame they *walk* toward the target via
+    /// the normal avatar system, so remote players animate naturally.
+    pub online_avatars: HashMap<Uuid, crate::game::avatar::PlayerAvatar>,
     /// The player's active biome expedition (Phase 3), if they've launched one
     /// from the hub. `None` while at the hub. Drives the new target→engage catch
     /// loop; see [`crate::expedition::Expedition`].
@@ -599,6 +604,7 @@ impl GameApp {
             peer_zoos: HashMap::new(),
             online: None,
             online_timer: 0.0,
+            online_avatars: HashMap::new(),
             expedition: None,
             expedition_return_pos: None,
             stamina: crate::game::catch::CatchStats::default().max_stamina,
@@ -815,6 +821,7 @@ impl GameApp {
                 o.disconnect();
             }
             self.peer_zoos.clear();
+            self.online_avatars.clear();
             self.set_status("Went offline");
             return;
         }
@@ -868,6 +875,45 @@ impl GameApp {
             peers.insert(zoo.player.id, zoo);
         }
         self.peer_zoos = peers;
+    }
+
+    /// Per-frame: walk each remote avatar toward its latest subscribed pose, so
+    /// other players animate smoothly between the ~5 Hz pose updates. Reuses the
+    /// normal avatar movement system (bob, facing, dash ghosts) for free. No-op
+    /// offline.
+    fn update_online_avatars(&mut self, dt: f32) {
+        let Some(online) = self.online.as_ref() else {
+            if !self.online_avatars.is_empty() {
+                self.online_avatars.clear();
+            }
+            return;
+        };
+        let targets = online.peer_avatar_targets();
+
+        // Drop avatars whose player is no longer present.
+        let live: std::collections::HashSet<Uuid> = targets.iter().map(|(k, _)| *k).collect();
+        self.online_avatars.retain(|k, _| live.contains(k));
+
+        // Remote avatars don't collide against our local habitats.
+        let world = avatar_system::World { habitats: &[] };
+        for (key, target) in targets {
+            let avatar = self
+                .online_avatars
+                .entry(key)
+                .or_insert_with(|| crate::game::avatar::PlayerAvatar::new(key, target));
+            // Big jumps (teleport / expedition return) snap rather than walk.
+            if (target - avatar.pos).length() > 2_000.0 {
+                avatar.pos = target;
+                avatar.vel = vec2(0.0, 0.0);
+            }
+            let to = target - avatar.pos;
+            let move_dir = if to.length() > 8.0 { to.normalize() } else { vec2(0.0, 0.0) };
+            let intent = crate::input::ControllerIntent {
+                move_dir,
+                actions: crate::input::ActionFlags::NONE,
+            };
+            avatar_system::step(avatar, &intent, &world, dt, &self.behaviors);
+        }
     }
 
     /// Attempt to join a friend's hosted zoo by `code`. Today this requires
@@ -1397,6 +1443,7 @@ impl GameApp {
 
         // Hub only: mirror online peers' plots into `peer_zoos` and push our pose.
         self.sync_online(get_frame_time());
+        self.update_online_avatars(get_frame_time());
 
         let mp = mouse_position();
         let mouse = vec2(mp.0, mp.1);

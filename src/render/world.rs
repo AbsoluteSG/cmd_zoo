@@ -113,6 +113,7 @@ pub fn draw_scene(app: &mut GameApp, now: DateTime<Utc>) {
     enum Item {
         Critter(usize),
         Avatar(uuid::Uuid),
+        OnlineAvatar(uuid::Uuid),
         Prop(usize),
     }
     let mut order: Vec<(f32, Item)> = app
@@ -123,6 +124,10 @@ pub fn draw_scene(app: &mut GameApp, now: DateTime<Utc>) {
         .collect();
     for (id, a) in app.session.avatars.iter() {
         order.push((a.pos.y, Item::Avatar(*id)));
+    }
+    // Other players on the shared online hub.
+    for (id, a) in app.online_avatars.iter() {
+        order.push((a.pos.y, Item::OnlineAvatar(*id)));
     }
     for (i, p) in props.iter().enumerate() {
         order.push((p.world.y, Item::Prop(i)));
@@ -150,6 +155,11 @@ pub fn draw_scene(app: &mut GameApp, now: DateTime<Utc>) {
             Item::Avatar(id) => {
                 // Procedural toon-ball avatar (no sprite asset needed).
                 if let Some(a) = app.session.avatars.get(&id) {
+                    draw_avatar(a, &cam);
+                }
+            }
+            Item::OnlineAvatar(id) => {
+                if let Some(a) = app.online_avatars.get(&id) {
                     draw_avatar(a, &cam);
                 }
             }
@@ -809,19 +819,21 @@ fn draw_peer_plots(app: &GameApp) {
             draw_pedestal_shape(p, cam.zoom, color_u8!(150, 150, 165, 255));
         }
 
-        // Placeholder neighbour avatar: a capped pillar just inside the top fence,
-        // so the plot reads as occupied without standing in for the real avatar
-        // rig (which arrives with networked peers in Phase 4).
-        let head = view::world_to_screen(
-            zoo.plot_origin + vec2(0.0, -zoo.plot_half_extent() * 0.25),
-            &cam,
-        );
-        draw_circle(head.x, head.y - 18.0 * cam.zoom, 10.0 * cam.zoom, color_u8!(232, 196, 160, 255));
-        draw_rectangle(
-            head.x - 9.0 * cam.zoom, head.y - 8.0 * cam.zoom,
-            18.0 * cam.zoom, 26.0 * cam.zoom,
-            color_u8!(90, 140, 200, 255),
-        );
+        // Offline (F4 debug neighbour) only: a static placeholder occupant so the
+        // plot reads as lived-in. Online, the real networked avatars walk around
+        // (see `Item::OnlineAvatar`), so the placeholder would just double them up.
+        if app.online.is_none() {
+            let head = view::world_to_screen(
+                zoo.plot_origin + vec2(0.0, -zoo.plot_half_extent() * 0.25),
+                &cam,
+            );
+            draw_circle(head.x, head.y - 18.0 * cam.zoom, 10.0 * cam.zoom, color_u8!(232, 196, 160, 255));
+            draw_rectangle(
+                head.x - 9.0 * cam.zoom, head.y - 8.0 * cam.zoom,
+                18.0 * cam.zoom, 26.0 * cam.zoom,
+                color_u8!(90, 140, 200, 255),
+            );
+        }
     }
 }
 

@@ -11,7 +11,6 @@ use crate::game::player::{DEFAULT_PLAYER_NAME, Player};
 use crate::game::species::SpeciesId;
 use crate::game::structure_kind;
 use crate::game::visitor::{GiftRecord, VisitorRecord};
-use crate::game::world_chunks::ChunkDelta;
 use crate::game::zoo::{Waypoint, world_seed_from_player};
 use crate::game::{Animal, AnimalState, Habitat, HabitatTheme, Structure, Zoo, species};
 use glam::vec2;
@@ -115,17 +114,6 @@ pub fn snapshot_from_zoo(zoo: &Zoo) -> ZooSnapshot {
             })
             .collect(),
         world_seed: zoo.world_seed,
-        chunk_deltas: zoo
-            .chunk_deltas
-            .iter()
-            .filter(|(_, d)| !d.removed.is_empty() || !d.partial.is_empty())
-            .map(|((cx, cy), d)| ChunkDeltaDto {
-                cx: *cx,
-                cy: *cy,
-                removed: d.removed.clone(),
-                partial: d.partial.iter().map(|(i, c)| [*i as u32, *c]).collect(),
-            })
-            .collect(),
         waypoints: zoo
             .waypoints
             .iter()
@@ -256,6 +244,10 @@ pub fn parse_snapshot_with_notes(bytes: &[u8]) -> Result<(ZooSnapshot, Migration
             18 => {
                 migrate_v18_to_v19(&mut value);
                 version = 19;
+            }
+            19 => {
+                migrate_v19_to_v20(&mut value);
+                version = 20;
             }
             v => bail!("no migration path from schema version {v}"),
         }
@@ -614,6 +606,17 @@ fn migrate_v18_to_v19(value: &mut Value) {
     }
 }
 
+/// v20 retires the infinite procedural open world. `chunk_deltas` (the only
+/// persisted wild-world state) is dropped; `world_seed` is kept (it still seeds
+/// the cosmetic terrain/grass scatter and expedition arrangement). The field is
+/// simply removed from the save — the typed `ZooSnapshot` no longer carries it.
+fn migrate_v19_to_v20(value: &mut Value) {
+    if let Value::Object(map) = value {
+        map.insert("schema_version".into(), Value::from(20u64));
+        map.remove("chunk_deltas");
+    }
+}
+
 /// v11 introduces isometric grid placement: each habitat gains `tile_x`/`tile_y`.
 /// Pre-v11 saves have no coordinates, so auto-layout the habitats onto the grid
 /// deterministically — row-major, stepping by the 2×2 footprint so nothing
@@ -874,27 +877,14 @@ pub fn zoo_from_snapshot(s: ZooSnapshot) -> Result<LoadedZoo> {
         } else {
             s.world_seed
         },
-        chunk_deltas: s
-            .chunk_deltas
-            .into_iter()
-            .map(|d| {
-                (
-                    (d.cx, d.cy),
-                    ChunkDelta {
-                        removed: d.removed,
-                        partial: d.partial.iter().map(|p| (p[0] as u16, p[1])).collect(),
-                    },
-                )
-            })
-            .collect(),
         waypoints: s
             .waypoints
             .into_iter()
             .map(|w| Waypoint { id: w.id, name: w.name, pos: vec2(w.x, w.y) })
             .collect(),
-        // Runtime plot origin defaults to the world centre; a hub placement
+        // Runtime plot origin defaults to the hub centre; a hub placement
         // reassigns it after load.
-        plot_origin: crate::game::world_chunks::zoo_center(),
+        plot_origin: crate::game::plot::world_center(),
         zoo_level: s.zoo_level.min(crate::game::zoo::MAX_ZOO_LEVEL),
         zoo_upgrade_finishes_at: s.zoo_upgrade_finishes_at,
         pedestals,
@@ -903,9 +893,6 @@ pub fn zoo_from_snapshot(s: ZooSnapshot) -> Result<LoadedZoo> {
     };
     let mut zoo = zoo;
     zoo.relink_breeding_nests();
-    // Point the global plot geometry at this save's expansion level so the
-    // fence, collision, and spawn-exclusion all match the loaded zoo.
-    crate::game::world_chunks::set_zoo_level(zoo.zoo_level);
 
     Ok(LoadedZoo { zoo, warnings })
 }
@@ -1042,27 +1029,39 @@ mod tests {
     }
 
     #[test]
-    fn snapshot_roundtrip_preserves_world_seed_and_deltas() {
+    fn snapshot_roundtrip_preserves_world_seed() {
         let now = Utc.with_ymd_and_hms(2026, 1, 1, 12, 0, 0).unwrap();
         let mut zoo = Zoo::new(now);
         zoo.world_seed = 0xDEAD_BEEF_1234;
-        zoo.chunk_deltas.insert(
-            (12, -7),
-            ChunkDelta { removed: vec![0, 2], partial: vec![(1, 3)] },
-        );
-        // Empty deltas should be dropped, not serialized.
-        zoo.chunk_deltas
-            .insert((99, 99), ChunkDelta::default());
 
         let snap = snapshot_from_zoo(&zoo);
         let json = serde_json::to_vec(&snap).unwrap();
         let zoo2 = zoo_from_snapshot(parse_snapshot(&json).unwrap()).unwrap().zoo;
 
         assert_eq!(zoo2.world_seed, zoo.world_seed);
-        assert_eq!(zoo2.chunk_deltas.len(), 1, "empty delta should be pruned");
-        let d = zoo2.chunk_deltas.get(&(12, -7)).expect("delta present");
-        assert_eq!(d.removed, vec![0, 2]);
-        assert_eq!(d.partial, vec![(1, 3)]);
+    }
+
+    #[test]
+    fn v19_save_migrates_to_v20_dropping_chunk_deltas() {
+        let v19 = serde_json::json!({
+            "schema_version": 19,
+            "player": { "id": Uuid::new_v4(), "name": "Old" },
+            "last_saved_at": Utc.with_ymd_and_hms(2026, 1, 1, 12, 0, 0).unwrap(),
+            "coins": 10, "food": 0, "dna_helix": 0,
+            "habitats": [], "animals": [], "structures": [],
+            "claimed_gifts": [], "discovered_recipes": [],
+            "nest_count": 1, "exotic_skip_window": null,
+            "visitors": [], "world_seed": 42,
+            "chunk_deltas": [{ "cx": 1, "cy": 2, "removed": [0], "partial": [] }],
+            "waypoints": [], "species_dupes": [],
+            "zoo_level": 0, "zoo_upgrade_finishes_at": null,
+            "pedestals": [], "unplaced_pedestals": 0,
+        });
+        let bytes = serde_json::to_vec(&v19).unwrap();
+        let snap = parse_snapshot(&bytes).unwrap();
+        assert_eq!(snap.schema_version, SCHEMA_VERSION);
+        // world_seed survives the migration; chunk_deltas is gone from the type.
+        assert_eq!(snap.world_seed, 42);
     }
 
     #[test]
@@ -1155,7 +1154,6 @@ mod tests {
         let snap = parse_snapshot(&bytes).unwrap();
         assert_eq!(snap.schema_version, SCHEMA_VERSION);
         assert_eq!(snap.world_seed, world_seed_from_player(pid));
-        assert!(snap.chunk_deltas.is_empty());
     }
 
     #[test]

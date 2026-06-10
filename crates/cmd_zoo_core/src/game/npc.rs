@@ -13,8 +13,6 @@
 
 use glam::{Vec2, vec2};
 
-use crate::game::world_chunks::{zoo_center, zoo_half_extent};
-
 /// Interaction "pop" animation duration (seconds). Kept in the core so the
 /// NPC sim is engine-free; the renderer has its own matching `view::POP_DURATION`.
 const POP_DURATION: f32 = 0.3;
@@ -121,42 +119,40 @@ pub const EXPEDITION_BOARD_SPRITE_ID: &str = "expedition_board";
 
 /// Fixed world position of the exotic merchant — inset near the top-right of the
 /// plot, mirroring the structure merchant on the left.
-pub fn exotic_merchant_pos() -> Vec2 {
-    let c = zoo_center();
-    let half = zoo_half_extent();
-    vec2(c.x + half * 0.55, c.y - half * 0.30)
+pub fn exotic_merchant_pos(center: Vec2, half: f32) -> Vec2 {
+    vec2(center.x + half * 0.55, center.y - half * 0.30)
 }
 
 /// Fixed world position of the expedition board — just outside the plot's
-/// right edge, the gateway out to the biomes.
-pub fn expedition_board_pos() -> Vec2 {
-    let c = zoo_center();
-    let half = zoo_half_extent();
-    vec2(c.x + half * 1.25, c.y)
+/// right edge, the gateway out to the biomes. Relative to the plot `center`.
+pub fn expedition_board_pos(center: Vec2, half: f32) -> Vec2 {
+    vec2(center.x + half * 1.25, center.y)
 }
 
 /// The NPCs placed in every world: the structure merchant and the exotic
 /// merchant. Add new placed characters here and they inherit bob / pop /
 /// speaking-swap automatically.
-pub fn default_npcs() -> Vec<Npc> {
+/// `center` / `half` describe the plot these NPCs belong to (a player's home
+/// plot on the hub), so the roster re-bases cleanly onto any plot origin.
+pub fn default_npcs(center: Vec2, half: f32) -> Vec<Npc> {
     vec![
         Npc::new(
             NpcKind::StructureMerchant,
             crate::game::merchant::MERCHANT_SPRITE_ID,
             "Structures",
-            crate::game::merchant::merchant_pos(),
+            crate::game::merchant::merchant_pos(center, half),
         ),
         Npc::new(
             NpcKind::ExoticMerchant,
             EXOTIC_MERCHANT_SPRITE_ID,
             "Exotics",
-            exotic_merchant_pos(),
+            exotic_merchant_pos(center, half),
         ),
         Npc::new(
             NpcKind::ExpeditionBoard,
             EXPEDITION_BOARD_SPRITE_ID,
             "Expedition",
-            expedition_board_pos(),
+            expedition_board_pos(center, half),
         ),
     ]
 }

@@ -16,7 +16,6 @@ use macroquad::prelude::*;
 use crate::app::GameApp;
 use crate::game::biome::{self, noise2d_seeded};
 use crate::game::species::HabitatTheme;
-use crate::game::world_chunks::{zoo_center, zoo_half_extent};
 
 use super::view::{self, PLANE_H, PLANE_W};
 
@@ -167,18 +166,17 @@ fn zoo_profile() -> GrassProfile {
     }
 }
 
-/// True when `pos` is inside the home zoo plot.
-fn in_zoo(pos: Vec2) -> bool {
-    let c = zoo_center();
-    let h = zoo_half_extent();
-    (pos.x - c.x).abs() <= h && (pos.y - c.y).abs() <= h
+/// True when `pos` is inside the plot centred at `home_c` with half-extent
+/// `home_h` (the local player's home plot).
+fn in_zoo(pos: Vec2, home_c: Vec2, home_h: f32) -> bool {
+    (pos.x - home_c.x).abs() <= home_h && (pos.y - home_c.y).abs() <= home_h
 }
 
-/// Grass profile for tile `(tx, ty)` — the manicured zoo lawn inside the plot,
-/// else the biome profile.
-fn tile_profile(tx: i32, ty: i32, seed: u64) -> GrassProfile {
+/// Grass profile for tile `(tx, ty)` — the manicured zoo lawn inside the home
+/// plot (`home_c`/`home_h`), else the biome profile.
+fn tile_profile(tx: i32, ty: i32, seed: u64, home_c: Vec2, home_h: f32) -> GrassProfile {
     let center = vec2((tx as f32 + 0.5) * BTILE, (ty as f32 + 0.5) * BTILE);
-    if in_zoo(center) {
+    if in_zoo(center, home_c, home_h) {
         zoo_profile()
     } else {
         biome_profile(biome::biome_at(center, seed))
@@ -219,13 +217,15 @@ fn emit_tile(
     verts: &mut Vec<Vertex>,
     idx: &mut Vec<u16>,
     budget: usize,
+    home_c: Vec2,
+    home_h: f32,
 ) -> usize {
     let tile_cx = (tx as f32 + 0.5) * BTILE;
     let tile_cy = (ty as f32 + 0.5) * BTILE;
     if tile_cx < 0.0 || tile_cx > PLANE_W || tile_cy < 0.0 || tile_cy > PLANE_H {
         return 0;
     }
-    let profile = tile_profile(tx, ty, seed);
+    let profile = tile_profile(tx, ty, seed, home_c, home_h);
     if profile.density <= 0.0 {
         return 0;
     }
@@ -335,6 +335,9 @@ pub fn draw_grass(app: &GameApp, atlas: Option<&Texture2D>, material: Option<&Ma
         return;
     }
     let seed = app.zoo.world_seed;
+    // The local player's home plot gets the manicured lawn profile.
+    let home_c = app.zoo.plot_origin;
+    let home_h = app.zoo.plot_half_extent();
 
     let (cam_tl, cam_br) = view::camera_world_rect(&cam, screen_width(), screen_height());
     let tx0 = (cam_tl.x / BTILE).floor() as i32;
@@ -352,7 +355,7 @@ pub fn draw_grass(app: &GameApp, atlas: Option<&Texture2D>, material: Option<&Ma
             if center.x < 0.0 || center.x > PLANE_W || center.y < 0.0 || center.y > PLANE_H {
                 continue;
             }
-            let profile = tile_profile(tx, ty, seed);
+            let profile = tile_profile(tx, ty, seed, home_c, home_h);
             if profile.density <= 0.0 {
                 continue;
             }
@@ -387,7 +390,7 @@ pub fn draw_grass(app: &GameApp, atlas: Option<&Texture2D>, material: Option<&Ma
             if idx.len() + tile_max_idx >= MAX_IDX_PER_FLUSH {
                 flush(&mut verts, &mut idx, atlas);
             }
-            let added = emit_tile(tx, ty, seed, quality, &cam, &mut verts, &mut idx, budget);
+            let added = emit_tile(tx, ty, seed, quality, &cam, &mut verts, &mut idx, budget, home_c, home_h);
             budget -= added;
         }
     }
@@ -407,8 +410,9 @@ mod tests {
         let mut verts = Vec::new();
         let mut idx = Vec::new();
         let cam = view::Camera { offset: vec2(0.0, 0.0), zoom: 1.0 };
+        let home = crate::game::plot::world_center();
         // A clearly-grassy tile but Off quality → no blades.
-        let n = emit_tile(0, 0, 42, GrassQuality::Off, &cam, &mut verts, &mut idx, 1000);
+        let n = emit_tile(0, 0, 42, GrassQuality::Off, &cam, &mut verts, &mut idx, 1000, home, 600.0);
         assert_eq!(n, 0);
         assert!(verts.is_empty());
     }
@@ -435,13 +439,14 @@ mod tests {
         let mut ia = Vec::new();
         let mut vb = Vec::new();
         let mut ib = Vec::new();
-        // A tile near the zoo gets the (always-grassy) manicured profile, so the
-        // count is stable regardless of biome classification.
-        let za = super::zoo_center();
+        // A tile at the home plot centre gets the (always-grassy) manicured
+        // profile, so the count is stable regardless of biome classification.
+        let za = crate::game::plot::world_center();
+        let home_h = 600.0;
         let tx = (za.x / BTILE) as i32;
         let ty = (za.y / BTILE) as i32;
-        let a = emit_tile(tx, ty, 7, GrassQuality::Lush, &cam, &mut va, &mut ia, 1000);
-        let b = emit_tile(tx, ty, 7, GrassQuality::Lush, &cam, &mut vb, &mut ib, 1000);
+        let a = emit_tile(tx, ty, 7, GrassQuality::Lush, &cam, &mut va, &mut ia, 1000, za, home_h);
+        let b = emit_tile(tx, ty, 7, GrassQuality::Lush, &cam, &mut vb, &mut ib, 1000, za, home_h);
         assert!(a > 0);
         assert_eq!(a, b, "same tile+seed+quality → same tuft count");
         // Each tuft is a textured quad: 4 verts / 6 indices.

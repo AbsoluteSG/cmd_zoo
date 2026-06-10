@@ -13,6 +13,7 @@ pub mod intent;
 pub mod merchant;
 pub mod npc;
 pub mod pedestal;
+pub mod plot;
 pub mod player;
 pub mod rank;
 pub mod rng;
@@ -22,7 +23,6 @@ pub mod structure_kind;
 pub mod vendor;
 pub mod visitor;
 pub mod wild_animal;
-pub mod world_chunks;
 pub mod zoo;
 
 pub use animal::{Animal, AnimalState};

@@ -25,9 +25,9 @@ fn approach_vec(from: Vec2, to: Vec2, dt: f32, k: f32) -> Vec2 {
 /// kept local so the domain doesn't depend on the render layer. If we ever
 /// move to per-zoo tile sizing this becomes a parameter on `World`.
 pub const TILE_W: f32 = 128.0;
-/// Flat-world plane bounds — must stay in sync with `game::world_chunks`.
-pub const PLANE_W: f32 = crate::game::world_chunks::WORLD_W;
-pub const PLANE_H: f32 = crate::game::world_chunks::WORLD_H;
+/// Flat-world plane bounds — must stay in sync with `game::plot`.
+pub const PLANE_W: f32 = crate::game::plot::WORLD_W;
+pub const PLANE_H: f32 = crate::game::plot::WORLD_H;
 
 /// Read-only slice of the simulation a behavior may inspect.
 pub struct World<'a> {

@@ -15,7 +15,6 @@ use macroquad::prelude::*;
 
 use crate::game::biome;
 use crate::game::species::HabitatTheme;
-use crate::game::world_chunks::{zoo_center, zoo_half_extent};
 use crate::render::textures;
 
 use super::view::{PLANE_H, PLANE_W};
@@ -39,12 +38,10 @@ pub struct PropInstance {
     pub flip: bool,
 }
 
-/// True when `pos` is inside the home zoo plot (props are suppressed there so the
-/// manicured enclosure stays clear).
-fn in_zoo(pos: Vec2) -> bool {
-    let c = zoo_center();
-    let h = zoo_half_extent();
-    (pos.x - c.x).abs() <= h && (pos.y - c.y).abs() <= h
+/// True when `pos` is inside the home plot (`home_c`/`home_h`); props are
+/// suppressed there so the manicured enclosure stays clear.
+fn in_zoo(pos: Vec2, home_c: Vec2, home_h: f32) -> bool {
+    (pos.x - home_c.x).abs() <= home_h && (pos.y - home_c.y).abs() <= home_h
 }
 
 /// Well-distributed 32-bit hash of `(tx, ty, salt)` salted by `seed` (lowbias32
@@ -72,7 +69,15 @@ fn unit(h: u32) -> f32 {
 /// Gather the props to draw for the visible tile range `[tx0..=tx1] × [ty0..=ty1]`.
 /// Deterministic for a fixed `(tile, seed)`. Tiles outside the world plane or
 /// inside the zoo plot, and biomes with no bundled props, contribute nothing.
-pub fn gather(seed: u64, tx0: i32, tx1: i32, ty0: i32, ty1: i32) -> Vec<PropInstance> {
+pub fn gather(
+    seed: u64,
+    tx0: i32,
+    tx1: i32,
+    ty0: i32,
+    ty1: i32,
+    home_c: Vec2,
+    home_h: f32,
+) -> Vec<PropInstance> {
     // Cache the (possibly empty) prop id list per biome so we scan the embedded
     // table at most once per biome on screen, not once per tile.
     let mut cache: Vec<(HabitatTheme, Vec<&'static str>)> = Vec::new();
@@ -84,7 +89,7 @@ pub fn gather(seed: u64, tx0: i32, tx1: i32, ty0: i32, ty1: i32) -> Vec<PropInst
             if center.x < 0.0 || center.x > PLANE_W || center.y < 0.0 || center.y > PLANE_H {
                 continue;
             }
-            if in_zoo(center) {
+            if in_zoo(center, home_c, home_h) {
                 continue;
             }
             // Sparse roll first (cheap) before resolving biome/props.

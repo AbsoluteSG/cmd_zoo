@@ -101,7 +101,15 @@ pub fn draw_scene(app: &mut GameApp, now: DateTime<Utc>) {
     // screen-Y (feet). Props (rocks/plants/trees scattered by world-gen) join the
     // same painter's-algorithm pass so a tree correctly occludes — or is occluded
     // by — a passing critter or avatar.
-    let props = super::terrain::gather(app.zoo.world_seed, tx0, tx1, ty0, ty1);
+    let props = super::terrain::gather(
+        app.zoo.world_seed,
+        tx0,
+        tx1,
+        ty0,
+        ty1,
+        app.zoo.plot_origin,
+        app.zoo.plot_half_extent(),
+    );
     enum Item {
         Critter(usize),
         Avatar(uuid::Uuid),
@@ -607,7 +615,7 @@ fn draw_zoo_plot(cam: &Camera, center: Vec2, half: f32) {
 /// and are intentionally not shown here.
 fn draw_tile_grid_overlay(app: &GameApp) {
     use crate::game::structure::MAX_FOOD_STRUCTURES;
-    use crate::game::world_chunks::ZOO_TILE_W;
+    use crate::game::plot::ZOO_TILE_W;
     use std::collections::HashSet;
     let cam = app.camera;
     for zoo in std::iter::once(&app.zoo).chain(app.peer_zoos.values()) {

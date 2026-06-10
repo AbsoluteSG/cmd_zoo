@@ -12,13 +12,13 @@ and well-documented.
 
 - **Idle economy** — animals accrue coins and DNA Helix over time. Click a critter
   to collect its income once it's full; below-cap animals play a poke sound instead.
-- **An open world to explore** — a chunk-streamed wilderness surrounds your home
-  zoo plot, with biome-driven procedural animal spawns. Scroll to zoom; use fast-travel
-  waypoints to mark and return to points of interest.
-- **Catching** — enter catch mode (`C`) and hover over a wild animal to fill the
-  capture ring. Wild animals have per-species evasion behaviors: zigzaggers, bursters,
-  circlers, vanishers, and charging bashers that can knock back and interrupt your catch.
-  Rarer species require multiple successful catches before they're tamed.
+- **Expeditions to explore** — launch into bounded, seed-generated biome
+  "expedition" maps from the hub, hunt their wild animals, and bring your catches
+  home. Scroll to zoom; use fast-travel waypoints to mark points of interest.
+- **Catching** — click a wild animal to *target* it, then *engage*: deplete its
+  catch-resistance bar with a stat-driven roll, equipped gear abilities (net /
+  lure / trap), and timed skill-check inputs, while managing a stamina pool. Catch
+  power comes from your gear plus owned-collection bonuses — no XP or skill tree.
 - **Breeding & crossbreeding** — walk animals to a nest with the follow chain (`E` to
   inspect → Follow), then deposit them into a nest to start gestation. Pairs can
   produce hybrids from a large recipe table (100+ species, including themed exotics
@@ -77,9 +77,9 @@ Each module is a focused study in a different area of building a game in Rust:
 | Area | Where | What it explores |
 |------|-------|------------------|
 | Rendering | `src/render/` | Camera/projection, billboard sprites, depth sorting, HUD, post-process shaders, texture caching |
-| World streaming | `src/game/world_chunks.rs` | Chunk load/cull with hysteresis, entity migration, spatial culling |
+| Instanced biomes | `src/game/biome_instance.rs` | Bounded, seed-generated expedition maps; deterministic arrangement |
 | Procedural content | `src/game/biome.rs` | Noise sampling, Poisson-disk placement, weighted spawn tables |
-| Game AI | `src/game/wild_animal.rs` | State machines for per-species movement and catch behaviors |
+| Target-based catching | `src/game/catch.rs`, `src/game/gear.rs` | Resistance bar, skill checks, gear + collection-bonus catch power |
 | Domain modeling | `src/game/` | Species catalog, economy, breeding recipes, structures |
 | Persistence | `src/persistence/` | Versioned save schema with forward migrations, atomic file writes |
 | Networking | `src/net/` | Transport abstraction, session/avatar sync, loopback vs. Steam relay |

@@ -19,7 +19,6 @@ use super::structure::{
     FOOD_KIND, MAX_FOOD_STRUCTURES, MAX_STRUCTURE_LEVEL, Structure, food_structure_unlock_cost,
     structure_upgrade_cost,
 };
-use super::world_chunks::ChunkDelta;
 use crate::share::{
     GiftContents, GiftPayload, SharedSnapshotPayload, SnapshotView, SpeciesTallyEntry,
 };
@@ -146,14 +145,10 @@ pub struct Zoo {
     /// the *next* one (see `exotic_shop::effective_window`); self-expires once
     /// it opens naturally. `None` normally.
     pub exotic_skip_window: Option<i64>,
-    /// Procedural-generation seed for the wild world. The entire 500k×500k map is
-    /// regenerated on the fly from this seed; only `chunk_deltas` is persisted
-    /// beyond it. Added in schema v13.
+    /// Procedural-generation seed for this player's world. Drives deterministic
+    /// cosmetic scatter (grass, terrain props) and seeds expedition arrangement.
+    /// Added in schema v13.
     pub world_seed: u64,
-    /// Player-caused deviations from the procedural wild world (captures and
-    /// partial-catch progress), keyed by chunk coord. The only wild-world state
-    /// saved to disk — everything else regenerates from `world_seed`.
-    pub chunk_deltas: HashMap<(i32, i32), ChunkDelta>,
     /// Player-placed fast-travel waypoints (the home zoo is implicit). Added v14.
     pub waypoints: Vec<Waypoint>,
     /// World-space centre of this zoo's plot. All plot-relative geometry (nests,
@@ -163,7 +158,8 @@ pub struct Zoo {
     /// load, and reassigned when a zoo is placed on a hub.
     pub plot_origin: Vec2,
     /// Zoo expansion level (0 = starting plot). Drives the physical plot size
-    /// (mirrored into `world_chunks`) and the global animal capacity. Added v16.
+    /// (via `plot_half_extent` / `plot_tile_radius`) and the animal capacity.
+    /// Added v16.
     pub zoo_level: u8,
     /// When `Some`, an expansion from `zoo_level` to `zoo_level + 1` is in
     /// flight, completing at this instant; the player claims it with
@@ -204,7 +200,7 @@ pub const MAX_NESTS: u8 = 5;
 // ── Zoo expansion (plot size + animal capacity) ───────────────────────────────
 //
 // The home zoo starts small and is expanded with coins. Each expansion grows
-// the physical plot (handled in `world_chunks`) *and* the global animal
+// the physical plot (via the per-zoo `plot_*` helpers) *and* the animal
 // capacity. Cost climbs on a moderate exponential curve; the build time climbs
 // on a gentle linear one — early expansions are quick and cheap, late ones are
 // a real investment without ballooning out of reach.
@@ -278,10 +274,6 @@ impl Zoo {
         let starter_habitat = Habitat::new(HabitatTheme::Forest);
         let player = Player::new_default();
         let world_seed = world_seed_from_player(player.id);
-        // A fresh zoo starts at the base plot size; point the global plot
-        // geometry back at level 0 (e.g. when starting a new game after an
-        // expanded save was loaded).
-        super::world_chunks::set_zoo_level(0);
         Self {
             player,
             visitors: HashMap::new(),
@@ -301,9 +293,8 @@ impl Zoo {
             nests: Vec::new(),
             exotic_skip_window: None,
             world_seed,
-            chunk_deltas: HashMap::new(),
             waypoints: Vec::new(),
-            plot_origin: super::world_chunks::zoo_center(),
+            plot_origin: super::plot::world_center(),
             zoo_level: 0,
             zoo_upgrade_finishes_at: None,
             last_saved_at: now,
@@ -401,8 +392,8 @@ impl Zoo {
     /// `plot_origin ± plot_half_extent` on each axis). Derived from the zoo's own
     /// expansion level, independent of the process-global plot geometry.
     pub fn plot_half_extent(&self) -> f32 {
-        crate::game::world_chunks::zoo_tiles_for_level(self.zoo_level) as f32
-            * crate::game::world_chunks::ZOO_TILE_W
+        crate::game::plot::zoo_tiles_for_level(self.zoo_level) as f32
+            * crate::game::plot::ZOO_TILE_W
             * 0.5
     }
 
@@ -410,18 +401,18 @@ impl Zoo {
     /// axis (a `2r+1` square centred on tile 0). Derived from this zoo's own
     /// expansion level.
     pub fn plot_tile_radius(&self) -> i32 {
-        (crate::game::world_chunks::zoo_tiles_for_level(self.zoo_level) - 1) / 2
+        (crate::game::plot::zoo_tiles_for_level(self.zoo_level) - 1) / 2
     }
 
     /// World-space centre of `tile` within this plot.
     pub fn tile_to_world(&self, tile: (i32, i32)) -> Vec2 {
         self.plot_origin
-            + Vec2::new(tile.0 as f32, tile.1 as f32) * crate::game::world_chunks::ZOO_TILE_W
+            + Vec2::new(tile.0 as f32, tile.1 as f32) * crate::game::plot::ZOO_TILE_W
     }
 
     /// Snap a world position to the nearest plot tile (centre-relative).
     pub fn world_to_tile(&self, world: Vec2) -> (i32, i32) {
-        let rel = (world - self.plot_origin) / crate::game::world_chunks::ZOO_TILE_W;
+        let rel = (world - self.plot_origin) / crate::game::plot::ZOO_TILE_W;
         (rel.x.round() as i32, rel.y.round() as i32)
     }
 
@@ -1601,7 +1592,6 @@ impl Zoo {
         }
         self.zoo_level = (self.zoo_level + 1).min(MAX_ZOO_LEVEL);
         self.zoo_upgrade_finishes_at = None;
-        super::world_chunks::set_zoo_level(self.zoo_level);
         Ok(self.zoo_level)
     }
 

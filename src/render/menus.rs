@@ -160,7 +160,6 @@ fn draw_disconnected(app: &mut GameApp, now: DateTime<Utc>, ctx: Ctx) {
 // ─────────────────────────── Waypoints ───────────────────────────
 
 fn draw_waypoints(app: &mut GameApp, now: DateTime<Utc>, ctx: Ctx) {
-    use crate::game::world_chunks::zoo_center;
 
     // Snapshot the list so we can call &mut app methods while iterating.
     let waypoints: Vec<(uuid::Uuid, String, Vec2)> = app
@@ -184,9 +183,10 @@ fn draw_waypoints(app: &mut GameApp, now: DateTime<Utc>, ctx: Ctx) {
     let tp_w = pw - 52.0 - 40.0 - 8.0;
     let mut y = py + 78.0;
 
-    // Default destination: the home zoo.
+    // Default destination: the home zoo (this player's plot origin).
     if button(&ctx, px + 26.0, y, tp_w, 32.0, "Home Zoo", true) {
-        app.teleport_to(zoo_center());
+        let home = app.zoo.plot_origin;
+        app.teleport_to(home);
     }
     y += 38.0;
 
@@ -553,7 +553,7 @@ fn draw_shop(app: &mut GameApp, now: DateTime<Utc>, ctx: Ctx) {
 /// The UPGRADES menu (key 1). Currently houses the zoo expansion; more
 /// player/zoo upgrades will join it here. The animal Shop is reached via NPCs.
 fn draw_upgrades(app: &mut GameApp, now: DateTime<Utc>, ctx: Ctx) {
-    use crate::game::world_chunks::zoo_tiles_for_level;
+    use crate::game::plot::zoo_tiles_for_level;
     use crate::game::zoo::{MAX_ZOO_LEVEL, ZOO_CAPACITY_PER_LEVEL, zoo_upgrade_duration};
 
     let coins = app.zoo.coins;

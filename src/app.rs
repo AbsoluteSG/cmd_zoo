@@ -19,7 +19,7 @@ use crate::audio::Sounds;
 use crate::game::action::{Action, ActionOutcome};
 use crate::game::avatar_system::{self, Behavior};
 use crate::game::{Zoo, economy, species};
-use crate::game::world_chunks::{WORLD_W, WORLD_H};
+use crate::game::plot::{WORLD_W, WORLD_H};
 use crate::input::{AvatarController, ControllerCtx, KeyboardController, RemoteController};
 use crate::net::Session;
 use crate::persistence::json_file::JsonFileRepository;
@@ -171,12 +171,12 @@ pub struct Critter {
 }
 
 impl Critter {
-    fn new(animal_id: Uuid, species: &'static str, pos: Vec2) -> Self {
+    fn new(animal_id: Uuid, species: &'static str, pos: Vec2, home_c: Vec2, home_h: f32) -> Self {
         Self {
             animal_id,
             species,
             pos,
-            target: random_zoo_point(),
+            target: random_zoo_point(home_c, home_h),
             speed: 80.0,
             dir: vec2(-1.0, 1.0),
             idle_timer: rand::gen_range(0.0, 2.0),
@@ -211,7 +211,7 @@ impl Critter {
 
     /// Wander with random pauses; retarget (and idle) on arrival. Income accrual
     /// is derived from the domain animal's `last_collected_at`, not tracked here.
-    fn update(&mut self, dt: f32) {
+    fn update(&mut self, dt: f32, home_c: Vec2, home_h: f32) {
         if self.pop > 0.0 {
             self.pop = (self.pop - dt).max(0.0);
         }
@@ -223,7 +223,7 @@ impl Critter {
         let dist = to.length();
         if dist < 4.0 {
             // Arrived: pause a moment, then head somewhere new (within zoo).
-            self.target = random_zoo_point();
+            self.target = random_zoo_point(home_c, home_h);
             self.idle_timer = rand::gen_range(0.4, 2.5);
             return;
         }
@@ -288,18 +288,19 @@ impl Critter {
 
 /// Build a critter for every animal in the zoo, scattered within the zoo zone.
 fn critters_from_zoo(zoo: &Zoo) -> Vec<Critter> {
+    let home_c = zoo.plot_origin;
+    let home_h = zoo.plot_half_extent();
     zoo.animals
         .values()
-        .map(|a| Critter::new(a.id, a.species, random_zoo_point()))
+        .map(|a| Critter::new(a.id, a.species, random_zoo_point(home_c, home_h), home_c, home_h))
         .collect()
 }
 
-/// A uniformly random point inside the enclosed 9×9 zoo plot, inset slightly
-/// from the fence. Tame critters wander here; wild animals never spawn here.
-fn random_zoo_point() -> Vec2 {
-    let c = crate::game::world_chunks::zoo_center();
-    let half = (crate::game::world_chunks::zoo_half_extent() - 48.0).max(0.0);
-    c + vec2(rand::gen_range(-half, half), rand::gen_range(-half, half))
+/// A uniformly random point inside a zoo plot centred at `center` with the given
+/// `half`-extent, inset slightly from the fence. Tame critters wander here.
+fn random_zoo_point(center: Vec2, half: f32) -> Vec2 {
+    let half = (half - 48.0).max(0.0);
+    center + vec2(rand::gen_range(-half, half), rand::gen_range(-half, half))
 }
 
 /// Which texture a notification shows on its left edge.
@@ -535,6 +536,7 @@ const SNAPSHOT_BROADCAST_INTERVAL: f32 = 2.0;
 impl GameApp {
     pub fn new(zoo: Zoo, repo: Arc<JsonFileRepository>, last_modtime: SystemTime) -> Self {
         let critters = critters_from_zoo(&zoo);
+        let npcs = crate::game::npc::default_npcs(zoo.plot_origin, zoo.plot_half_extent());
         let spawn = vec2(WORLD_W * 0.5, WORLD_H * 0.5);
         let session = Session::solo(zoo.player.id, spawn);
         let mut camera = default_camera();
@@ -579,7 +581,7 @@ impl GameApp {
             placing: None,
             dedicating: None,
             selected_slot: 0,
-            npcs: crate::game::npc::default_npcs(),
+            npcs,
             grass_quality: crate::render::grass::GrassQuality::from_env(),
             debug_biome: false,
             debug_grid: false,
@@ -1060,7 +1062,6 @@ impl GameApp {
         economy::advance(&mut self.zoo, now);
 
         // Rebuild all state derived from our own zoo (mirrors `GameApp::new`).
-        crate::game::world_chunks::set_zoo_level(self.zoo.zoo_level);
         self.critters = critters_from_zoo(&self.zoo);
         let spawn = vec2(WORLD_W * 0.5, WORLD_H * 0.5);
         self.session = Session::solo(self.zoo.player.id, spawn);
@@ -1089,10 +1090,17 @@ impl GameApp {
             .retain(|c| self.zoo.animals.contains_key(&c.animal_id));
         let known: std::collections::HashSet<Uuid> =
             self.critters.iter().map(|c| c.animal_id).collect();
+        let home_c = self.zoo.plot_origin;
+        let home_h = self.zoo.plot_half_extent();
         for a in self.zoo.animals.values() {
             if !known.contains(&a.id) {
-                self.critters
-                    .push(Critter::new(a.id, a.species, random_zoo_point()));
+                self.critters.push(Critter::new(
+                    a.id,
+                    a.species,
+                    random_zoo_point(home_c, home_h),
+                    home_c,
+                    home_h,
+                ));
             }
         }
     }
@@ -1651,6 +1659,8 @@ impl GameApp {
         let mut parked = self.zoo.nested_animal_positions();
         parked.extend(self.zoo.pedestal_animal_positions());
         let avatar_pos = self.session.my_avatar().pos;
+        let home_c = self.zoo.plot_origin;
+        let home_h = self.zoo.plot_half_extent();
         // First pass: everything that isn't currently following the avatar.
         for c in &mut self.critters {
             if Some(c.animal_id) == locked_id || self.following.contains(&c.animal_id) {
@@ -1659,7 +1669,7 @@ impl GameApp {
             if let Some(&dest) = parked.get(&c.animal_id) {
                 c.move_toward(dest, dt);
             } else {
-                c.update(dt);
+                c.update(dt, home_c, home_h);
             }
         }
         // Chain pass: each follower is dragged on an elastic leash anchored to

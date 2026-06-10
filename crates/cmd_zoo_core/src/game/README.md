@@ -66,16 +66,19 @@ out into the smaller modules.
   owned-collection bonuses are your two sources of catch power (there's
   deliberately no XP/skill tree).
 - **`biome_instance.rs`** — a bounded, seed-generated "expedition" map of a single
-  biome that you launch from the hub, hunt in, and return from. This is replacing
-  the older infinite streamed world below.
+  biome that you launch from the hub, hunt in, and return from. (This *replaced*
+  the old infinite streamed open world, which has been removed.)
+- **`biome.rs`** — the procedural generation toolkit reused by expeditions:
+  Voronoi/climate biome classification + value noise + Poisson-disk placement +
+  weighted spawn tables.
+- **`wild_animal.rs`** — a roaming catch target. Catching is now a stat check
+  (target → deplete the catch bar), so these just wander their map; the old
+  per-species evasion movesets were retired with the open world.
 
-### The (legacy) open world
-- **`biome.rs`** — procedural world generation: Voronoi biome regions + value
-  noise + Poisson-disk placement + weighted spawn tables.
-- **`world_chunks.rs`** — streaming the infinite world in chunks as the player
-  moves (load radius / cull radius with hysteresis).
-- **`wild_animal.rs`** — per-species movement & escape AI (zigzaggers, bursters,
-  circlers, vanishers, charging bashers) as small state machines.
+### Plot geometry
+- **`plot.rs`** — the hub world extent + per-player zoo-plot constants
+  (`ZOO_TILE_W`, `zoo_tiles_for_level`, …). Plot geometry derives from each
+  `Zoo`'s own `plot_origin` + `zoo_level`, so many plots coexist on one hub.
 
 ### The avatar (your in-world character)
 - **`intent.rs`** — `ControllerIntent` / `ActionFlags`: a device-independent

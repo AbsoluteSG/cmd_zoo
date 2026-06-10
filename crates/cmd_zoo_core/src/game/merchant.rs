@@ -6,8 +6,6 @@
 
 use glam::{Vec2, vec2};
 
-use crate::game::world_chunks::{zoo_center, zoo_half_extent};
-
 /// A kind of placeable structure the merchant can sell.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum StructureItemKind {
@@ -39,10 +37,9 @@ pub const MERCHANT_NAME: &str = "Structure Merchant";
 /// the art is missing the renderer falls back to the placeholder vector figure.
 pub const MERCHANT_SPRITE_ID: &str = "structure_merchant";
 
-/// The merchant's fixed world position — inset near the top-left of the plot,
-/// clear of the nest row and the food-structure row.
-pub fn merchant_pos() -> Vec2 {
-    let c = zoo_center();
-    let half = zoo_half_extent();
-    vec2(c.x - half * 0.55, c.y - half * 0.30)
+/// The merchant's fixed position on a plot — inset near the top-left, clear of
+/// the nest row and the food-structure row. Relative to the plot `center` with
+/// the given `half`-extent, so it re-bases onto any plot on a shared hub.
+pub fn merchant_pos(center: Vec2, half: f32) -> Vec2 {
+    vec2(center.x - half * 0.55, center.y - half * 0.30)
 }

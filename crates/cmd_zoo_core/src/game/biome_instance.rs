@@ -21,7 +21,7 @@ use crate::game::species::{HabitatTheme, SpeciesId};
 use crate::game::wild_animal::WildAnimal;
 
 /// A bounded, seeded biome map launched from the hub — a *mini open world*. The
-/// avatar walks it freely and its [`WildAnimal`]s roam with the full wild AI
+/// avatar walks it freely and its [`WildAnimal`]s wander
 /// ([`crate::game::wild_animal`]); left-click engages the nearest one with the
 /// target-engage catch loop ([`crate::game::catch`]).
 #[derive(Clone, Debug)]
@@ -62,8 +62,8 @@ impl BiomeInstance {
             }
             // Per-candidate noise drives which band of the theme's table rolls.
             let noise = rng.next_f32();
-            if let Some((species, make_moveset)) = weighted_spawn(theme, noise, &mut rng) {
-                let mut animal = WildAnimal::new(species, pos, make_moveset(), (0, 0), i as u16);
+            if let Some(species) = weighted_spawn(theme, noise, &mut rng) {
+                let mut animal = WildAnimal::new(species, pos, i as u16);
                 // Stable, seed-derived id so engagements are reproducible.
                 animal.id = Uuid::from_u64_pair(seed.wrapping_add(i as u64 + 1), i as u64);
                 animals.push(animal);
@@ -81,7 +81,7 @@ impl BiomeInstance {
     /// Animals just wander (catching is a stat check, not an evasion minigame),
     /// and the **currently engaged** animal (`engaged`) holds completely still
     /// while it's being caught.
-    pub fn update(&mut self, dt: f32, avatar_pos: Vec2, engaged: Option<Uuid>) {
+    pub fn update(&mut self, dt: f32, _avatar_pos: Vec2, engaged: Option<Uuid>) {
         let size = self.size;
         for a in &mut self.animals {
             if Some(a.id) == engaged {
@@ -89,9 +89,7 @@ impl BiomeInstance {
                 a.vel = Vec2::ZERO;
                 continue;
             }
-            a.update(dt, avatar_pos, avatar_pos, false);
-            a.pos.x = a.pos.x.clamp(0.0, size.x);
-            a.pos.y = a.pos.y.clamp(0.0, size.y);
+            a.update(dt, size);
         }
     }
 

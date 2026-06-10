@@ -22,9 +22,9 @@ pub const DEFAULT_TILE_W: f32 = 128.0;
 pub const TILT: f32 = 0.6;
 
 /// Size of the freeform ground plane — canonical values live in
-/// `game::world_chunks`; these aliases let render code keep its old names.
-pub const PLANE_W: f32 = crate::game::world_chunks::WORLD_W;
-pub const PLANE_H: f32 = crate::game::world_chunks::WORLD_H;
+/// `game::plot`; these aliases let render code keep its old names.
+pub const PLANE_W: f32 = crate::game::plot::WORLD_W;
+pub const PLANE_H: f32 = crate::game::plot::WORLD_H;
 
 /// Base on-screen height (px, pre-zoom) of a critter sprite. Shared by the
 /// renderer and the click hit-test so they stay in sync.

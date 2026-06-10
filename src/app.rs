@@ -635,6 +635,14 @@ impl GameApp {
     /// Launch a fresh, randomly-seeded expedition into `theme`. The avatar enters
     /// the bounded instance's coordinate space at its centre and roams freely.
     pub fn launch_expedition(&mut self, theme: crate::game::species::HabitatTheme) {
+        // Force any open menu (e.g. the expedition board that launched us) fully
+        // closed *now*: once the expedition is active, `handle_input` early-returns
+        // before the menu-tween logic runs, so a lingering `menu_t` would freeze
+        // the panel on-screen with no way to dismiss it.
+        self.screen = Screen::World;
+        self.shown_menu = Screen::World;
+        self.menu_t = 0.0;
+
         let screen = vec2(screen_width(), screen_height());
         let seed = ((rand::rand() as u64) << 32) | rand::rand() as u64;
         let exp = crate::expedition::Expedition::launch(theme, seed);

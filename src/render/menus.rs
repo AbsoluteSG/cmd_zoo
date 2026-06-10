@@ -462,10 +462,9 @@ fn draw_expedition_board(app: &mut GameApp, _now: DateTime<Utc>, ctx: Ctx) {
         app.set_screen(Screen::World);
     }
 
-    // Defer the launch until after the panel is drawn (it teleports the avatar
-    // and closes the menu).
+    // Defer the launch until after the panel is drawn; `launch_expedition`
+    // closes this menu and teleports the avatar into the instance.
     if let Some(theme) = launch {
-        app.set_screen(Screen::World);
         app.launch_expedition(theme);
     }
 }

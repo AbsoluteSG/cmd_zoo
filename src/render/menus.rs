@@ -80,6 +80,7 @@ pub fn draw(app: &mut GameApp, now: DateTime<Utc>) {
         Screen::ExoticShop => draw_exotic_shop(app, now, ctx),
         Screen::Disconnected => draw_disconnected(app, now, ctx),
         Screen::Player => draw_player(app, now, ctx),
+        Screen::ExpeditionBoard => draw_expedition_board(app, now, ctx),
         Screen::World => {}
     }
 }
@@ -412,6 +413,60 @@ fn draw_settings(app: &mut GameApp, now: DateTime<Utc>, ctx: Ctx) {
 
     if button(&ctx, px + pw - 26.0 - 120.0, py + ph - 42.0, 120.0, 30.0, "Close  [Esc]", true) {
         app.set_screen(Screen::World);
+    }
+}
+
+// ─────────────────────────── Expedition board ───────────────────────────
+
+/// The hub's expedition board: pick a biome to launch a bounded, freshly-seeded
+/// expedition into. Every biome is launchable (expeditions are how you catch
+/// fauna — especially the catch-only new-biome species); the vendor roster gives
+/// a stable order + flavour names. Selecting one closes the board and drops the
+/// avatar into the instance.
+fn draw_expedition_board(app: &mut GameApp, _now: DateTime<Utc>, ctx: Ctx) {
+    use crate::game::vendor::VENDORS;
+
+    // Two-column grid of biome buttons.
+    let pw = 720.0;
+    let rows = VENDORS.len().div_ceil(2);
+    let ph = 110.0 + rows as f32 * 36.0 + 56.0;
+    let (px, py) = (ctx.center.x - pw * 0.5, ctx.center.y - ph * 0.5);
+
+    panel(&ctx, px, py, pw, ph);
+    title(&ctx, px + 26.0, py + 30.0, "EXPEDITION BOARD");
+    label(
+        &ctx,
+        px + 26.0,
+        py + 62.0,
+        "Choose a biome to explore — catch its wildlife and bring it home.",
+        16.0,
+        TEXT_DIM,
+    );
+
+    let col_w = (pw - 52.0 - 12.0) * 0.5;
+    let mut y = py + 84.0;
+    let mut launch: Option<crate::game::species::HabitatTheme> = None;
+    for (i, v) in VENDORS.iter().enumerate() {
+        let col = (i % 2) as f32;
+        let bx = px + 26.0 + col * (col_w + 12.0);
+        if i % 2 == 0 && i != 0 {
+            y += 36.0;
+        }
+        let lbl = format!("{}  ·  {}", v.theme.name(), v.npc_name);
+        if button(&ctx, bx, y, col_w, 30.0, &lbl, true) {
+            launch = Some(v.theme);
+        }
+    }
+
+    if button(&ctx, px + pw - 26.0 - 120.0, py + ph - 42.0, 120.0, 30.0, "Close  [Esc]", true) {
+        app.set_screen(Screen::World);
+    }
+
+    // Defer the launch until after the panel is drawn (it teleports the avatar
+    // and closes the menu).
+    if let Some(theme) = launch {
+        app.set_screen(Screen::World);
+        app.launch_expedition(theme);
     }
 }
 

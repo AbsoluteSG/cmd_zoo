@@ -57,6 +57,9 @@ pub enum Screen {
     /// Co-op player-interaction panel (press E near another player). Target is
     /// in `GameApp::active_player`.
     Player,
+    /// Expedition board: pick a biome to launch an expedition into. Opened by
+    /// pressing E near the ExpeditionBoard NPC (or F6 in the hub).
+    ExpeditionBoard,
 }
 
 /// An interactive ground pad reachable with E: a breeding nest (top row), a
@@ -604,32 +607,40 @@ impl GameApp {
         crate::game::gear::catch_stats(&self.loadout, distinct, rank_sum)
     }
 
-    /// Launch (or, if already out, return from) a biome expedition. F6 — the
-    /// stand-in for the hub's expedition board until the board UI lands.
+    /// F6 / board interaction toggle: while on an expedition, return to the hub;
+    /// otherwise open the expedition board to pick a biome.
     fn toggle_expedition(&mut self) {
-        let screen = vec2(screen_width(), screen_height());
         if self.expedition.is_some() {
-            // Return to the hub: drop the instance and teleport the avatar back.
-            self.expedition = None;
-            if let Some(pos) = self.expedition_return_pos.take() {
-                let a = self.session.my_avatar_mut();
-                a.pos = pos;
-                a.vel = vec2(0.0, 0.0);
-            }
-            self.camera.snap_to(self.session.my_avatar().pos, screen);
-            self.set_status("Returned to the hub");
+            self.return_from_expedition();
+        } else {
+            self.set_screen(Screen::ExpeditionBoard);
+        }
+    }
+
+    /// Return to the hub: drop the instance and teleport the avatar back.
+    fn return_from_expedition(&mut self) {
+        if self.expedition.take().is_none() {
             return;
         }
+        let screen = vec2(screen_width(), screen_height());
+        if let Some(pos) = self.expedition_return_pos.take() {
+            let a = self.session.my_avatar_mut();
+            a.pos = pos;
+            a.vel = vec2(0.0, 0.0);
+        }
+        self.camera.snap_to(self.session.my_avatar().pos, screen);
+        self.set_status("Returned to the hub");
+    }
+
+    /// Launch a fresh, randomly-seeded expedition into `theme`. The avatar enters
+    /// the bounded instance's coordinate space at its centre and roams freely.
+    pub fn launch_expedition(&mut self, theme: crate::game::species::HabitatTheme) {
+        let screen = vec2(screen_width(), screen_height());
         let seed = ((rand::rand() as u64) << 32) | rand::rand() as u64;
-        let exp = crate::expedition::Expedition::launch(
-            crate::game::species::HabitatTheme::Forest,
-            seed,
-        );
+        let exp = crate::expedition::Expedition::launch(theme, seed);
         let n = exp.instance.remaining();
         let center = vec2(exp.instance.size.x * 0.5, exp.instance.size.y * 0.5);
-        // The expedition is a mini open world: the avatar physically enters the
-        // instance's coordinate space at its centre and roams freely. Remember
-        // the hub position so we can put them back on return.
+        // Remember the hub position so we can put them back on return.
         self.expedition_return_pos = Some(self.session.my_avatar().pos);
         // Start the run with a full stamina pool (sized by progression).
         self.stamina = self.catch_stats().max_stamina;
@@ -641,7 +652,8 @@ impl GameApp {
         self.expedition = Some(exp);
         self.camera.snap_to(center, screen);
         self.set_status(format!(
-            "Expedition: Forest ({n} animals) — walk freely · left-click an animal to engage · 1 net · 2 lure · 3 trap · Space skill-check · F6 leave"
+            "Expedition: {} ({n} animals) — walk freely · left-click an animal to engage · 1 net · 2 lure · 3 trap · Space skill-check · F6 leave",
+            theme.name()
         ));
     }
 
@@ -1404,7 +1416,7 @@ impl GameApp {
                     self.active_pedestal = Some(id);
                     self.set_screen(Screen::Pedestal);
                 }
-                // No pad nearby: the expedition board launches an expedition;
+                // No pad nearby: the expedition board opens the biome picker;
                 // else the nearest NPC merchant, then a nearby player, otherwise
                 // fall back to inspecting an animal under the cursor.
                 None => {

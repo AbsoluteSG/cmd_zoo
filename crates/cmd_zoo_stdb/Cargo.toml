@@ -1,0 +1,23 @@
+[package]
+name = "cmd_zoo_stdb"
+version = "0.1.0"
+edition = "2024"
+description = "SpacetimeDB authority module for cmd_zoo — wraps cmd_zoo_core's rules in reducers."
+
+# Detach from the root workspace: this crate is built to wasm32 by `spacetime
+# build` with cmd_zoo_core's default features OFF (no filesystem, host-seeded
+# ids), independent of the native client/test workspace.
+[workspace]
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+spacetimedb = "2.4.1"
+log = "0.4"
+serde_json = "1"
+# default-features off drops chrono's `wasmbind` (wasm-bindgen), which
+# SpacetimeDB modules reject. We only need DateTime/serde, not the clock.
+chrono = { version = "0.4", default-features = false, features = ["serde"] }
+# The shared simulation core, headless (no filesystem, deterministic ids).
+cmd_zoo_core = { path = "../cmd_zoo_core", default-features = false }

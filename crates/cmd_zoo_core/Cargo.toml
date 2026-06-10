@@ -12,7 +12,10 @@ description = "Headless simulation core for cmd_zoo (no graphics engine). Runs b
 #   - `std-ids`: random v4 entity ids (needs OS randomness, and would be
 #     non-deterministic in a reducer). The module derives ids host-seeded instead.
 default = ["file-persistence", "std-ids"]
-file-persistence = ["dep:fs2", "dep:directories"]
+# `chrono/clock` (Utc::now) is only needed by the native json_file tests; it's
+# bundled here so the wasm module build (file-persistence off) drops it — clock
+# pulls chrono's `wasmbind`/wasm-bindgen path, which SpacetimeDB modules reject.
+file-persistence = ["dep:fs2", "dep:directories", "chrono/clock"]
 std-ids = ["uuid/v4"]
 
 [dependencies]
@@ -21,7 +24,7 @@ std-ids = ["uuid/v4"]
 glam = "0.27"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-chrono = { version = "0.4", features = ["serde"] }
+chrono = { version = "0.4", default-features = false, features = ["serde"] }
 # v4 (random ids) is pulled only by the `std-ids` feature; the module build
 # drops it (and getrandom) and derives ids deterministically instead.
 uuid = { version = "1", features = ["v5", "serde"] }

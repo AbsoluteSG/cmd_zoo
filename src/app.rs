@@ -771,10 +771,11 @@ impl GameApp {
             return;
         }
         let mut neighbor = Zoo::new(now);
-        // Sit one plot-width (plus a lane) east of home so the two plots don't
-        // touch. `plot_half_extent` is the same for both at level 0.
-        let gap = self.zoo.plot_half_extent() * 2.6;
-        neighbor.plot_origin = self.zoo.plot_origin + vec2(gap, 0.0);
+        // Place the local player on hub slot 0 (centre) and the neighbour on
+        // slot 1 — the same hub layout a real co-op session / the Phase 4 hub
+        // will use to assign each player a distinct, non-overlapping plot.
+        self.zoo.plot_origin = crate::game::plot::hub_plot_origin(0);
+        neighbor.plot_origin = crate::game::plot::hub_plot_origin(1);
         // Furnish it a little so the plot reads as a lived-in neighbour: a few
         // nests, a couple of food structures, and a pedestal on a tile.
         neighbor.coins = 1_000_000;

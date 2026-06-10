@@ -507,6 +507,15 @@ pub struct GameApp {
     /// (refreshed in `sync_online`); each frame they *walk* toward the target via
     /// the normal avatar system, so remote players animate naturally.
     pub online_avatars: HashMap<Uuid, crate::game::avatar::PlayerAvatar>,
+    /// While online, the player's authoritative zoo lives on the server: `self.zoo`
+    /// is downloaded from (and reconciled against) our server row, mutations are
+    /// forwarded as `apply_action` reducer calls, and local JSON saving is paused.
+    /// This holds the offline/solo zoo (as a snapshot) so it's restored when we
+    /// go back offline.
+    pub online_solo_backup: Option<crate::persistence::schema::ZooSnapshot>,
+    /// True once we've downloaded our authoritative zoo from the server (and
+    /// relocated onto our assigned plot) after going online.
+    pub online_downloaded: bool,
     /// The player's active biome expedition (Phase 3), if they've launched one
     /// from the hub. `None` while at the hub. Drives the new target→engage catch
     /// loop; see [`crate::expedition::Expedition`].
@@ -605,6 +614,8 @@ impl GameApp {
             online: None,
             online_timer: 0.0,
             online_avatars: HashMap::new(),
+            online_solo_backup: None,
+            online_downloaded: false,
             expedition: None,
             expedition_return_pos: None,
             stamina: crate::game::catch::CatchStats::default().max_stamina,
@@ -626,6 +637,11 @@ impl GameApp {
     fn toggle_expedition(&mut self) {
         if self.expedition.is_some() {
             self.return_from_expedition();
+        } else if self.online.is_some() {
+            // Expeditions are solo-instanced; mixing them with the live online
+            // session would diverge from the server-authoritative zoo. Gate them
+            // off while online (party instances are a later phase).
+            self.set_status("Go offline (F7) to launch expeditions");
         } else {
             self.set_screen(Screen::ExpeditionBoard);
         }
@@ -815,13 +831,24 @@ impl GameApp {
     /// SpacetimeDB connection, join the hub (server assigns our plot slot), and
     /// thereafter mirror every other player's plot into `peer_zoos` each tick.
     /// Offline play is untouched — this is purely additive.
-    fn toggle_online(&mut self) {
+    fn toggle_online(&mut self, now: DateTime<Utc>) {
         if self.online.is_some() {
             if let Some(o) = self.online.take() {
                 o.disconnect();
             }
             self.peer_zoos.clear();
             self.online_avatars.clear();
+            self.online_downloaded = false;
+            // Restore the offline/solo zoo we set aside on going online.
+            if let Some(snap) = self.online_solo_backup.take() {
+                if let Ok(loaded) = crate::persistence::zoo_from_snapshot(snap) {
+                    self.zoo = loaded.zoo; // restores its solo plot_origin (world centre)
+                    self.sync_critters();
+                    let home = self.zoo.plot_origin;
+                    self.teleport_to(home);
+                    self.save_under_lock(now);
+                }
+            }
             self.set_status("Went offline");
             return;
         }
@@ -830,6 +857,10 @@ impl GameApp {
         match crate::stdb::client::OnlineClient::connect_maincloud() {
             Ok(client) => {
                 let _ = client.join_hub(&self.zoo.player.name);
+                // Set the solo zoo aside; while online `self.zoo` is the server's
+                // authoritative copy, downloaded on the first sync.
+                self.online_solo_backup = Some(crate::persistence::snapshot_from_zoo(&self.zoo));
+                self.online_downloaded = false;
                 self.online = Some(client);
                 self.online_timer = 0.0;
                 self.set_status("Connecting to online hub… (F7 to leave)");
@@ -852,7 +883,7 @@ impl GameApp {
         self.online_timer = 0.2; // ~5 Hz pose + peer refresh
 
         let pos = self.session.my_avatar().pos;
-        // Pull the data out under a short borrow, then mutate `peer_zoos`.
+        // Pull the data out under a short borrow, then mutate game state.
         let (my_id, rows) = {
             let o = self.online.as_ref().unwrap();
             let _ = o.move_avatar(pos.x, pos.y);
@@ -860,10 +891,8 @@ impl GameApp {
         };
 
         let mut peers: HashMap<Uuid, Zoo> = HashMap::new();
+        let mut mine: Option<Zoo> = None;
         for z in rows {
-            if Some(z.owner) == my_id {
-                continue; // our own plot is rendered locally from self.zoo
-            }
             let Ok(snap) = crate::persistence::parse_snapshot(z.snapshot_json.as_bytes()) else {
                 continue;
             };
@@ -872,9 +901,27 @@ impl GameApp {
             };
             let mut zoo = loaded.zoo;
             zoo.plot_origin = vec2(z.plot.0, z.plot.1);
-            peers.insert(zoo.player.id, zoo);
+            if Some(z.owner) == my_id {
+                mine = Some(zoo); // our authoritative server zoo
+            } else {
+                peers.insert(zoo.player.id, zoo);
+            }
         }
         self.peer_zoos = peers;
+
+        // Adopt / reconcile our authoritative server zoo. On the first download we
+        // also relocate the avatar + camera onto our assigned plot.
+        if let Some(server_zoo) = mine {
+            let first = !self.online_downloaded;
+            let home = server_zoo.plot_origin;
+            self.zoo = server_zoo;
+            self.sync_critters();
+            if first {
+                self.online_downloaded = true;
+                self.teleport_to(home);
+                self.set_status("Online — you're on the shared hub (F7 to leave)");
+            }
+        }
     }
 
     /// Per-frame: walk each remote avatar toward its latest subscribed pose, so
@@ -1090,6 +1137,20 @@ impl GameApp {
         if let Some(hp) = host_peer {
             if let Some(t) = self.session.transport.as_mut() {
                 t.send(hp, crate::net::NetMessage::Command(action));
+            }
+            return None;
+        }
+        // Online: the server is authoritative. Forward the action as a reducer
+        // call; our zoo updates when the subscription echoes the new state (see
+        // `sync_online`). Don't touch `self.zoo` locally.
+        if let Some(online) = self.online.as_ref() {
+            match serde_json::to_string(&action) {
+                Ok(json) => {
+                    if let Err(e) = online.apply_action_json(json) {
+                        self.set_status(format!("{e}"));
+                    }
+                }
+                Err(e) => self.set_status(format!("online action encode failed: {e}")),
             }
             return None;
         }
@@ -1397,7 +1458,7 @@ impl GameApp {
         }
         // F7 connects to / disconnects from the online hub (SpacetimeDB).
         if is_key_pressed(KeyCode::F7) {
-            self.toggle_online();
+            self.toggle_online(now);
         }
         if self.expedition.is_some() {
             self.update_expedition(now);
@@ -2512,6 +2573,11 @@ impl GameApp {
     /// real save. The host is the sole writer of the shared zoo.
     pub fn save_under_lock(&mut self, now: DateTime<Utc>) {
         if self.is_guest() {
+            return;
+        }
+        // Online, `self.zoo` is the server's authoritative copy — don't let it
+        // overwrite the local solo save (which is stashed in online_solo_backup).
+        if self.online.is_some() {
             return;
         }
         self.zoo.last_saved_at = now;

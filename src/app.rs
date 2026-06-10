@@ -496,6 +496,12 @@ pub struct GameApp {
     /// full authoritative `HashMap<player_id, Zoo>` arrives with the SpacetimeDB
     /// model in Phase 4. Populated today only by the F4 debug neighbour.
     pub peer_zoos: HashMap<Uuid, Zoo>,
+    /// Live SpacetimeDB connection when the player has gone online (F7). While
+    /// `Some`, `peer_zoos` is rebuilt each tick from the subscribed `zoo` rows
+    /// and our avatar pose is pushed to the server. `None` for solo/offline play.
+    pub online: Option<crate::stdb::client::OnlineClient>,
+    /// Throttle accumulator for online sync (pose push + peer rebuild).
+    pub online_timer: f32,
     /// The player's active biome expedition (Phase 3), if they've launched one
     /// from the hub. `None` while at the hub. Drives the new target→engage catch
     /// loop; see [`crate::expedition::Expedition`].
@@ -591,6 +597,8 @@ impl GameApp {
             disconnect_reason: None,
             active_player: None,
             peer_zoos: HashMap::new(),
+            online: None,
+            online_timer: 0.0,
             expedition: None,
             expedition_return_pos: None,
             stamina: crate::game::catch::CatchStats::default().max_stamina,
@@ -795,6 +803,71 @@ impl GameApp {
         let _ = neighbor.place_pedestal((1, 1));
         self.peer_zoos.insert(neighbor.player.id, neighbor);
         self.set_status("Debug neighbour added (F4) — a second plot on the hub");
+    }
+
+    /// Connect to (or disconnect from) the online hub (F7). On connect we open a
+    /// SpacetimeDB connection, join the hub (server assigns our plot slot), and
+    /// thereafter mirror every other player's plot into `peer_zoos` each tick.
+    /// Offline play is untouched — this is purely additive.
+    fn toggle_online(&mut self) {
+        if self.online.is_some() {
+            if let Some(o) = self.online.take() {
+                o.disconnect();
+            }
+            self.peer_zoos.clear();
+            self.set_status("Went offline");
+            return;
+        }
+        // Clear any F4 debug neighbour so it doesn't mix with real peers.
+        self.peer_zoos.clear();
+        match crate::stdb::client::OnlineClient::connect_maincloud() {
+            Ok(client) => {
+                let _ = client.join_hub(&self.zoo.player.name);
+                self.online = Some(client);
+                self.online_timer = 0.0;
+                self.set_status("Connecting to online hub… (F7 to leave)");
+            }
+            Err(e) => self.set_status(format!("Online connect failed: {e}")),
+        }
+    }
+
+    /// Per-tick online sync (throttled): push our avatar pose to the server and
+    /// rebuild `peer_zoos` from the subscribed `zoo` rows (every player but us).
+    /// Cheap no-op when offline.
+    fn sync_online(&mut self, dt: f32) {
+        if self.online.is_none() {
+            return;
+        }
+        self.online_timer -= dt;
+        if self.online_timer > 0.0 {
+            return;
+        }
+        self.online_timer = 0.2; // ~5 Hz pose + peer refresh
+
+        let pos = self.session.my_avatar().pos;
+        // Pull the data out under a short borrow, then mutate `peer_zoos`.
+        let (my_id, rows) = {
+            let o = self.online.as_ref().unwrap();
+            let _ = o.move_avatar(pos.x, pos.y);
+            (o.identity(), o.zoos())
+        };
+
+        let mut peers: HashMap<Uuid, Zoo> = HashMap::new();
+        for z in rows {
+            if Some(z.owner) == my_id {
+                continue; // our own plot is rendered locally from self.zoo
+            }
+            let Ok(snap) = crate::persistence::parse_snapshot(z.snapshot_json.as_bytes()) else {
+                continue;
+            };
+            let Ok(loaded) = crate::persistence::zoo_from_snapshot(snap) else {
+                continue;
+            };
+            let mut zoo = loaded.zoo;
+            zoo.plot_origin = vec2(z.plot.0, z.plot.1);
+            peers.insert(zoo.player.id, zoo);
+        }
+        self.peer_zoos = peers;
     }
 
     /// Attempt to join a friend's hosted zoo by `code`. Today this requires
@@ -1276,6 +1349,10 @@ impl GameApp {
         if is_key_pressed(KeyCode::F6) {
             self.toggle_expedition();
         }
+        // F7 connects to / disconnects from the online hub (SpacetimeDB).
+        if is_key_pressed(KeyCode::F7) {
+            self.toggle_online();
+        }
         if self.expedition.is_some() {
             self.update_expedition(now);
 
@@ -1317,6 +1394,9 @@ impl GameApp {
             );
             return;
         }
+
+        // Hub only: mirror online peers' plots into `peer_zoos` and push our pose.
+        self.sync_online(get_frame_time());
 
         let mp = mouse_position();
         let mouse = vec2(mp.0, mp.1);

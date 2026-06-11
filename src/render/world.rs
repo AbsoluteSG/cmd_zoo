@@ -64,7 +64,7 @@ pub fn draw_scene(app: &mut GameApp, now: DateTime<Utc>) {
             if tile_cx < 0.0 || tile_cx > PLANE_W || tile_cy < 0.0 || tile_cy > PLANE_H {
                 continue;
             }
-            let color = biome_color(biome::biome_tile_color(vec2(tile_cx, tile_cy), app.zoo.world_seed));
+            let color = biome_color(biome::biome_tile_color(vec2(tile_cx, tile_cy), app.ground_seed()));
             let (pos, size) = view::tile_rect(tx, ty, BTILE, &cam);
             // +1 px overlap prevents seams between tiles.
             draw_rectangle(pos.x, pos.y, size.x + 1.0, size.y + 1.0, color);
@@ -102,7 +102,7 @@ pub fn draw_scene(app: &mut GameApp, now: DateTime<Utc>) {
     // same painter's-algorithm pass so a tree correctly occludes — or is occluded
     // by — a passing critter or avatar.
     let props = super::terrain::gather(
-        app.zoo.world_seed,
+        app.ground_seed(),
         tx0,
         tx1,
         ty0,
@@ -134,6 +134,11 @@ pub fn draw_scene(app: &mut GameApp, now: DateTime<Utc>) {
     }
     order.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
 
+    // Player sprite sheet (owned clone — cheap handle), fetched once so the
+    // per-item mut borrows of `app.textures` below don't conflict. `None` ⇒
+    // avatars fall back to the procedural toon-ball.
+    let player_sheet = app.textures.player("player");
+
     for (_, item) in order {
         match item {
             Item::Critter(i) => {
@@ -153,14 +158,27 @@ pub fn draw_scene(app: &mut GameApp, now: DateTime<Utc>) {
                 draw_critter(pos, dir, tex.as_ref(), icon.as_ref(), fallback, at_cap, scale, WHITE, bob_phase, bob_amp, &cam);
             }
             Item::Avatar(id) => {
-                // Procedural toon-ball avatar (no sprite asset needed).
+                // Procedural toon-ball avatar (no sprite asset needed). While
+                // online, paint ourselves with the *same* key-derived hue every
+                // other client uses for us, so colours agree across the server.
                 if let Some(a) = app.session.avatars.get(&id) {
-                    draw_avatar(a, &cam);
+                    let rid = app
+                        .online
+                        .as_ref()
+                        .map(|o| crate::stdb::client::key_uuid(o.my_key()))
+                        .unwrap_or(id);
+                    draw_avatar(a, &cam, player_color(rid), 1.0, player_sheet.as_ref());
                 }
             }
             Item::OnlineAvatar(id) => {
                 if let Some(a) = app.online_avatars.get(&id) {
-                    draw_avatar(a, &cam);
+                    // Pop-in / shrink-out scale from the join/leave tween.
+                    let scale = app
+                        .online_avatar_fx
+                        .get(&id)
+                        .map(|fx| ui::ease_out_back(fx.vis))
+                        .unwrap_or(1.0);
+                    draw_avatar(a, &cam, player_color(id), scale, player_sheet.as_ref());
                 }
             }
             Item::Prop(i) => {
@@ -353,12 +371,105 @@ fn draw_toon_ball(center: Vec2, r: f32, sx: f32, sy: f32, lean: f32, outline: f3
 /// Draw the player avatar as a procedural toon-shaded ball with a planted drop
 /// shadow, momentum bob, squash/stretch and lean. Works for the local player
 /// and every session avatar (each carries its own smoothed `viz` state).
-fn draw_avatar(avatar: &PlayerAvatar, cam: &Camera) {
+/// Draw a player avatar. When a sprite sheet is bundled (`assets/player/`) the
+/// animated character is used; otherwise we fall back to the procedural
+/// toon-ball (`draw_toon_avatar`), kept as a backup so the game still renders a
+/// player with no art present.
+fn draw_avatar(avatar: &PlayerAvatar, cam: &Camera, base: Color, scale: f32, sheet: Option<&Texture2D>) {
+    match sheet {
+        Some(t) => draw_sprite_avatar(avatar, cam, scale, t),
+        None => draw_toon_avatar(avatar, cam, base, scale),
+    }
+}
+
+/// Sprite-sheet animated avatar. The sheet is 17 columns × 3 rows; frames are
+/// numbered 1-based left-to-right, top-to-bottom. Only the top row is used:
+///   1-4   idle facing  (down, right, up, left)
+///   5-7   walk down · 8-10 walk right · 11-13 walk up · 14-16 walk left
+/// Idle shows the dedicated facing frame; walking cycles the 3-frame triplet,
+/// driven by the smoothed `viz` walk state so it stays in step with the bob.
+fn draw_sprite_avatar(avatar: &PlayerAvatar, cam: &Camera, scale: f32, sheet: &Texture2D) {
+    use crate::game::avatar::Facing;
+
     let base_h = CRITTER_H * cam.zoom;
-    let r = base_h * 0.30;
+    let sprite_h = base_h * scale.max(0.0);
+    let viz = &avatar.viz;
+
+    // (idle facing frame, walk triplet) for the current heading.
+    let (idle_frame, walk) = match avatar.facing {
+        Facing::S => (1u32, [5u32, 6, 7]),
+        Facing::E => (2, [8, 9, 10]),
+        Facing::N => (3, [11, 12, 13]),
+        Facing::W => (4, [14, 15, 16]),
+    };
+
+    // Walk vs idle from the smoothed walk intensity; cycle the triplet over one
+    // bob period (2π) so the foot-plant lines up with the bounce.
+    let moving = viz.bob_amp > 0.15;
+    let frame = if moving {
+        let steps = walk.len() as f32;
+        let t = (viz.bob_phase / std::f32::consts::TAU).rem_euclid(1.0);
+        walk[((t * steps) as usize).min(walk.len() - 1)]
+    } else {
+        idle_frame
+    };
+
+    // Subtle bounce + planted shadow, mirroring the critter billboard feel.
+    let bob = viz.bob_phase.sin();
+    let lift = (bob * 0.5 + 0.1) * viz.bob_amp;
+    let hop = lift * base_h * 0.06;
+    let sh = 1.0 - 0.16 * lift;
+
+    // Faded dash after-images behind the live sprite.
+    for img in &avatar.afterimages {
+        let frac = (img.life / img.max_life).clamp(0.0, 1.0);
+        let g = view::world_to_screen(img.pos, cam);
+        let gframe = match img.facing {
+            Facing::S => 1,
+            Facing::E => 2,
+            Facing::N => 3,
+            Facing::W => 4,
+        };
+        blit_sheet_frame(sheet, gframe, g, sprite_h, 0.0, ui::fade(WHITE, 0.4 * frac));
+    }
+
+    let feet = view::world_to_screen(avatar.pos, cam);
+    draw_ellipse(feet.x, feet.y, sprite_h * 0.26 * sh, sprite_h * 0.09 * sh, 0.0, SHADOW);
+    blit_sheet_frame(sheet, frame, feet, sprite_h, hop, WHITE);
+}
+
+/// Draw one 1-based `frame` of a 17×3 sheet as a billboard anchored at `feet`,
+/// standing `sprite_h` pixels tall and lifted `hop` pixels off the ground.
+fn blit_sheet_frame(sheet: &Texture2D, frame: u32, feet: Vec2, sprite_h: f32, hop: f32, tint: Color) {
+    const COLS: f32 = 17.0;
+    const ROWS: f32 = 3.0;
+    let cw = sheet.width() / COLS;
+    let ch = sheet.height() / ROWS;
+    let i = frame.saturating_sub(1);
+    let col = (i % COLS as u32) as f32;
+    let row = (i / COLS as u32) as f32;
+    let aspect = if ch > 0.0 { cw / ch } else { 1.0 };
+    let w = sprite_h * aspect;
+    draw_texture_ex(
+        sheet,
+        feet.x - w * 0.5,
+        feet.y - sprite_h - hop,
+        tint,
+        DrawTextureParams {
+            dest_size: Some(vec2(w, sprite_h)),
+            source: Some(Rect::new(col * cw, row * ch, cw, ch)),
+            ..Default::default()
+        },
+    );
+}
+
+/// Procedural toon-ball avatar — the backup renderer used when no player sprite
+/// sheet is bundled in `assets/player/`.
+fn draw_toon_avatar(avatar: &PlayerAvatar, cam: &Camera, base: Color, scale: f32) {
+    let base_h = CRITTER_H * cam.zoom;
+    let r = base_h * 0.30 * scale.max(0.0);
     let outline = (2.5 * cam.zoom).max(1.5);
     let viz = &avatar.viz;
-    let base = player_color(avatar.player_id);
 
     // Dash after-images: faded cool ghosts of the ball at past positions.
     for img in &avatar.afterimages {
@@ -391,6 +502,122 @@ fn draw_avatar(avatar: &PlayerAvatar, cam: &Camera) {
     // Body centre sits just above the shadow, plus the bob offset.
     let center = vec2(feet.x, feet.y - r * 0.95 + bob_off);
     draw_toon_ball(center, r, sx, sy, viz.lean, outline, viz.light_dir, base, 1.0);
+}
+
+/// Float each online player's username above their avatar (HUD pass, so text is
+/// safe). Covers remote players and — while online — ourselves. The name fades
+/// in/out with the avatar's join/leave tween. No-op offline.
+fn draw_avatar_labels(app: &GameApp) {
+    let Some(online) = app.online.as_ref() else {
+        return;
+    };
+    let cam = app.camera;
+    let names = online.account_names();
+    let powers = online.power_by_key_uuid(); // peer Power by render key
+
+    // Helper: draw a centered "<name>  ·  <power>" a little above the avatar's head.
+    let label = |pos: Vec2, text: &str, alpha: f32| {
+        if text.is_empty() || alpha <= 0.01 {
+            return;
+        }
+        // Sit clear above the full-height avatar sprite (≈ CRITTER_H tall).
+        let head = view::world_to_screen(pos, &cam) - vec2(0.0, CRITTER_H * cam.zoom * 1.12);
+        let fs = 18.0;
+        let w = measure_text(text, None, fs as u16, 1.0).width;
+        let (x, y) = (head.x - w * 0.5, head.y - 6.0);
+        let a = (alpha * 255.0) as u8;
+        draw_text(text, x + 1.0, y + 1.0, fs, color_u8!(0, 0, 0, a.saturating_sub(40)));
+        draw_text(text, x, y, fs, color_u8!(235, 240, 255, a));
+    };
+
+    // Remote players — fade with their pop/shrink tween.
+    for (id, a) in app.online_avatars.iter() {
+        if let Some(name) = names.get(id) {
+            let alpha = app.online_avatar_fx.get(id).map(|fx| fx.vis).unwrap_or(1.0);
+            let p = powers.get(id).copied().unwrap_or(0);
+            label(a.pos, &format!("{name}  ·  {p}"), alpha);
+        }
+    }
+    // Ourselves (Power from the local derived value).
+    if let Some(a) = app.session.avatars.get(&app.session.local_player_id) {
+        label(a.pos, &format!("{}  ·  {}", online.my_name(), app.power_score()), 1.0);
+    }
+}
+
+/// Floating catch "damage" numbers: each pops off the targeted animal with a
+/// scale-pop (overshoot then settle) and then fades. World-projected via the
+/// (expedition) camera so they sit on the animal and pan/zoom with it. Expedition
+/// only — `catch_numbers` is cleared on enter/leave.
+fn draw_catch_numbers(app: &GameApp) {
+    if app.expedition.is_none() || app.catch_numbers.is_empty() {
+        return;
+    }
+    let cam = app.camera;
+    let now = get_time();
+    let font = app.font.clone();
+    let font = font.as_ref();
+    for n in &app.catch_numbers {
+        let t = ((now - n.born) as f32 / crate::app::CATCH_NUMBER_LIFE).clamp(0.0, 1.0);
+        // Pop: ease-out-back overshoot during the first 30%, then settle to 1.
+        let pop = if t < 0.3 { ui::ease_out_back(t / 0.3) } else { 1.0 };
+        // Fade: hold, then fade out over the last 40% of life.
+        let alpha = if t < 0.6 { 1.0 } else { 1.0 - (t - 0.6) / 0.4 };
+        // Crits punch up: bigger, hotter colour, and a "!".
+        let crit_mul = if n.crit { 1.45 } else { 1.0 };
+        let scale = (0.7 + 0.5 * pop) * cam.zoom * crit_mul; // grows with the engage zoom too
+        let size = ((26.0 * scale).clamp(10.0, 96.0)) as u16;
+        let screen = view::world_to_screen(n.pos, &cam);
+        let col = if n.crit {
+            Color::new(1.0, 0.86, 0.30, alpha) // bright gold for crits
+        } else {
+            Color::new(1.0, 0.78, 0.42, alpha) // warm amber "hit" colour
+        };
+        let label = if n.crit { format!("{}!", n.value) } else { format!("{}", n.value) };
+        text_centered(&label, screen.x, screen.y, size, col, font);
+    }
+}
+
+/// Party roster panel on the left edge: `party_container` frame + each partymate's
+/// username (excluding ourselves). Only shown online when you actually have
+/// partymates. Falls back to a rounded panel without the sprite.
+fn draw_party_panel(app: &mut GameApp) {
+    let Some(online) = app.online.as_ref() else {
+        return;
+    };
+    let members = online.party_member_info(); // (name, power), excluding self
+    if members.is_empty() {
+        return;
+    }
+    let font = app.font.clone();
+    let font = font.as_ref();
+    let container = app.textures.ui("party_container");
+
+    let s = ui::ui_scale();
+    let pw = 224.0 * s;
+    let header_h = 34.0 * s;
+    let line_h = 28.0 * s;
+    let ph = header_h + line_h * members.len() as f32 + 14.0 * s;
+    let px = 16.0 * s;
+    let py = (screen_height() - ph) * 0.5;
+
+    // Panel background.
+    match container.as_ref() {
+        Some(c) => draw_texture_ex(c, px, py, WHITE, DrawTextureParams { dest_size: Some(vec2(pw, ph)), ..Default::default() }),
+        None => {
+            ui::rrect(px, py, pw, ph, 10.0, color_u8!(28, 30, 44, 225));
+            ui::rrect_outline(px, py, pw, ph, 10.0, color_u8!(255, 255, 255, 45));
+        }
+    }
+
+    // Header + member list.
+    let cx = px + pw * 0.5;
+    let head_fs = (24.0 * s).max(8.0) as u16;
+    let name_fs = (22.0 * s).max(8.0) as u16;
+    text_centered(&format!("Party ({})", members.len() + 1), cx, py + header_h * 0.5 + 2.0 * s, head_fs, color_u8!(245, 220, 150, 255), font);
+    for (i, (name, power)) in members.iter().enumerate() {
+        let ly = py + header_h + line_h * (i as f32 + 0.5) + 6.0 * s;
+        text_centered(&format!("{name}  ·  {power}"), cx, ly, name_fs, WHITE, font);
+    }
 }
 
 /// The income-currency icon id + a fallback color for `species`.
@@ -510,14 +737,23 @@ fn draw_income_icon(cx: f32, sprite_top: f32, icon: Option<&Texture2D>, fallback
 fn draw_prop(world: Vec2, tex: Option<&Texture2D>, scale: f32, flip: bool, cam: &Camera) {
     let Some(t) = tex else { return };
     let z = cam.zoom;
-    let w = t.width() * z * scale;
-    let h = t.height() * z * scale;
+    // Normalize to a target world size (longest side) so the prop's on-screen
+    // size is independent of the source PNG's resolution; `scale` then applies
+    // the per-instance variation on top. Without this, large source art renders
+    // enormous in the world.
+    const PROP_WORLD_SIZE: f32 = 100.0;
+    let native = t.width().max(t.height()).max(1.0);
+    let k = PROP_WORLD_SIZE / native * z * scale;
+    let w = t.width() * k;
+    let h = t.height() * k;
     if w <= 0.0 || h <= 0.0 {
         return;
     }
     let feet = view::world_to_screen(world, cam);
-    // Soft contact shadow at the base.
-    draw_ellipse(feet.x, feet.y, w * 0.32, h * 0.07, 0.0, SHADOW);
+    // Soft contact shadow at the base. Both radii scale with the prop's *width*
+    // so the flat ground disc stays tight to the base — keying the vertical
+    // radius off height pushed tall props' shadows far below their feet.
+    draw_ellipse(feet.x, feet.y, w * 0.32, w * 0.11, 0.0, SHADOW);
     draw_texture_ex(
         t,
         feet.x - w * 0.5,
@@ -682,15 +918,20 @@ fn draw_expedition_scene(app: &mut GameApp, now: DateTime<Utc>) {
     draw_rectangle(tl.x, tl.y, br.x - tl.x, br.y - tl.y, ground);
     draw_rectangle_lines(tl.x, tl.y, br.x - tl.x, br.y - tl.y, 3.0, color_u8!(20, 24, 18, 220));
 
+    // Decorative terrain props scattered across the arena, themed to the biome
+    // and deterministic from the instance seed (same scatter every visit).
+    let (view_tl, view_br) = view::camera_world_rect(&cam, screen_width(), screen_height());
+    let props = super::terrain::gather_themed(inst.seed, inst.theme, view_tl, view_br, inst.size);
+
     // Collect roaming-animal render data first (ends the immutable borrow on
     // `exp` before we touch `app.textures`/`app.session` below).
     struct Draw {
         species: &'static str,
-        pos: macroquad::math::Vec2,
-        dir: macroquad::math::Vec2,
+        pos: Vec2,
+        dir: Vec2,
         tier: u8,
     }
-    let mut animals: Vec<Draw> = inst
+    let animals: Vec<Draw> = inst
         .live()
         .map(|a| Draw {
             species: a.species,
@@ -700,83 +941,258 @@ fn draw_expedition_scene(app: &mut GameApp, now: DateTime<Utc>) {
             tier: crate::game::catch::catch_tier(a.species),
         })
         .collect();
-    animals.sort_by(|a, b| a.pos.y.partial_cmp(&b.pos.y).unwrap_or(std::cmp::Ordering::Equal));
-    let bar_remaining = exp.engagement.as_ref().map(|e| 1.0 - e.progress());
     let target_pos = exp.target_pos().map(|p| vec2(p.x, p.y));
     let avatar_y = app.session.my_avatar().pos.y;
 
-    // Depth-sorted pass: roaming animals + the avatar, painter's-algorithm by
-    // feet-Y so the avatar occludes / is occluded correctly as it walks.
-    let mut avatar_drawn = false;
-    for d in &animals {
-        if !avatar_drawn && d.pos.y > avatar_y {
-            draw_avatar(app.session.my_avatar(), &cam);
-            avatar_drawn = true;
-        }
-        let tex = app.textures.animal(d.species);
-        draw_critter(d.pos, d.dir, tex.as_ref(), None, COIN_GOLD, false, 1.0, WHITE, 0.0, 0.0, &cam);
-        // Tier pip label above each animal.
-        let screen = view::world_to_screen(d.pos, &cam);
-        text_shadow(&format!("T{}", d.tier), screen.x - 8.0, screen.y - 70.0 * cam.zoom, 15.0, TEXT_DIM);
+    // Unified depth-sorted pass (props + animals + the avatar + party mates),
+    // painter's-algorithm by feet-Y so everything occludes correctly — exactly
+    // like the hub scene.
+    enum Item {
+        Prop(usize),
+        Animal(usize),
+        Avatar,
+        Peer(Uuid),
     }
-    if !avatar_drawn {
-        draw_avatar(app.session.my_avatar(), &cam);
+    let mut order: Vec<(f32, Item)> = Vec::new();
+    for (i, p) in props.iter().enumerate() {
+        order.push((p.world.y, Item::Prop(i)));
+    }
+    for (i, a) in animals.iter().enumerate() {
+        order.push((a.pos.y, Item::Animal(i)));
+    }
+    order.push((avatar_y, Item::Avatar));
+    for (id, a) in app.online_avatars.iter() {
+        order.push((a.pos.y, Item::Peer(*id)));
+    }
+    order.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+
+    let player_sheet = app.textures.player("player");
+
+    for (_, item) in order {
+        match item {
+            Item::Prop(i) => {
+                let p = &props[i];
+                let tex = app.textures.terrain(p.id);
+                draw_prop(p.world, tex.as_ref(), p.scale, p.flip, &cam);
+            }
+            Item::Animal(i) => {
+                let d = &animals[i];
+                let tex = app.textures.animal(d.species);
+                draw_critter(d.pos, d.dir, tex.as_ref(), None, COIN_GOLD, false, 1.0, WHITE, 0.0, 0.0, &cam);
+                let screen = view::world_to_screen(d.pos, &cam);
+                text_shadow(&format!("T{}", d.tier), screen.x - 8.0, screen.y - 70.0 * cam.zoom, 15.0, TEXT_DIM);
+            }
+            Item::Avatar => {
+                let me = app.session.my_avatar();
+                draw_avatar(me, &cam, player_color(me.player_id), 1.0, player_sheet.as_ref());
+            }
+            Item::Peer(id) => {
+                if let Some(a) = app.online_avatars.get(&id) {
+                    let scale = app
+                        .online_avatar_fx
+                        .get(&id)
+                        .map(|fx| ui::ease_out_back(fx.vis))
+                        .unwrap_or(1.0);
+                    draw_avatar(a, &cam, player_color(id), scale, player_sheet.as_ref());
+                }
+            }
+        }
     }
 
-    // Top pass: the engaged target's ring + overhead catch bar at its live pos.
-    if let (Some(tp), Some(rem)) = (target_pos, bar_remaining) {
+    // Top pass: a pulsing ring marks the engaged target at its live position (the
+    // catch bar itself now lives top-centre, in `draw_expedition_bars`).
+    if let Some(tp) = target_pos {
         let screen = view::world_to_screen(tp, &cam);
         let pulse = (get_time() as f32 * 4.0).sin() * 0.5 + 0.5;
         draw_circle_lines(screen.x, screen.y, (34.0 + pulse * 5.0) * cam.zoom, 3.0, COIN_GOLD);
-        let bw = 56.0 * cam.zoom;
-        let bx = screen.x - bw * 0.5;
-        let by = screen.y - 92.0 * cam.zoom;
-        draw_rectangle(bx, by, bw, 7.0 * cam.zoom, color_u8!(40, 44, 52, 230));
-        draw_rectangle(bx, by, bw * rem.clamp(0.0, 1.0), 7.0 * cam.zoom, color_u8!(225, 110, 110, 255));
-        draw_rectangle_lines(bx, by, bw, 7.0 * cam.zoom, 1.0, color_u8!(255, 255, 255, 110));
     }
 
     app.particles.draw(&cam);
 }
 
-/// Bottom-centre expedition bars — they take the place of the item hotbar while
-/// on an expedition (which is otherwise just free-roam in a biome instance). The
-/// **stamina** bar is always shown; the **catch** bar (with the engaged animal's
-/// name + a skill-check prompt) appears above it only while engaging.
-fn draw_expedition_bars(app: &GameApp) {
-    let Some(exp) = app.expedition.as_ref() else { return };
-    let w = 360.0;
+/// Expedition meters: the **catch** bar (the engaged animal's catch-resistance)
+/// floats at the **top centre** while engaging; the **stamina** bar sits at the
+/// **bottom centre**, always shown. Both use the `bar_container` / `bar_fill`
+/// sprites (`assets/ui/`) when present, falling back to primitives otherwise.
+fn draw_expedition_bars(app: &mut GameApp) {
+    if app.expedition.is_none() {
+        return;
+    }
+    let s = ui::ui_scale();
+    let w = 380.0 * s;
     let bx = (screen_width() - w) * 0.5;
-    let stamina_y = screen_height() - 38.0;
-    let catch_y = stamina_y - 34.0;
+    let font = app.font.clone();
+    let font = font.as_ref();
+    let fs = (22.0 * s).max(8.0) as u16; // bar label font, scaled
+    // Fill sits a couple of (scaled) pixels inside the container so the container
+    // sprite's outline stays visible around it.
+    let inset = (2.0 * s).clamp(1.0, 3.0);
+    let container = app.textures.ui("bar_container");
+    let fill = app.textures.ui("bar_fill");
+    // Height follows the container sprite's native aspect ratio so it never
+    // stretches; the rectangle fallback keeps a fixed slim bar.
+    let h = container
+        .as_ref()
+        .map(|c| (w * c.height() / c.width()).max(1.0))
+        .unwrap_or(22.0 * s);
 
-    // Catch bar — only while engaging a target.
-    if let Some(eng) = exp.engagement.as_ref() {
-        let name = crate::game::species::get(eng.target.species).display_name;
-        text_shadow(&format!("Catching {name}  (T{})", eng.target.tier), bx, catch_y - 6.0, 15.0, TEXT);
-        draw_rectangle(bx, catch_y, w, 13.0, color_u8!(40, 44, 52, 235));
-        // Remaining catch-resistance, emptying toward capture.
-        let remaining = (1.0 - eng.progress()).clamp(0.0, 1.0);
-        draw_rectangle(bx, catch_y, w * remaining, 13.0, color_u8!(225, 110, 110, 255));
-        draw_rectangle_lines(bx, catch_y, w, 13.0, 1.5, color_u8!(255, 255, 255, 90));
-        // Skill-check prompt, centred above the catch bar.
-        if eng.skill_check.is_some() {
+    // Palette (container, fill) per the requested colours.
+    let catch_container = color_u8!(0x30, 0x32, 0x99, 255);
+    let catch_fill = color_u8!(0x6E, 0x71, 0xFF, 255);
+    let stamina_container = color_u8!(0x69, 0x3A, 0x26, 255);
+    let stamina_fill = color_u8!(0xFF, 0x8A, 0x58, 255);
+
+    // ── Catch bar (top centre) — only while engaging a target ──────────────
+    let engaged = app.expedition.as_ref().and_then(|e| e.engagement.as_ref()).map(|eng| {
+        (
+            crate::game::species::get(eng.target.species).display_name,
+            eng.target.tier,
+            (1.0 - eng.progress()).clamp(0.0, 1.0), // remaining, empties toward capture
+            eng.skill_check.is_some(),
+        )
+    });
+    if let Some((name, tier, remaining, skill_up)) = engaged {
+        let cy = 30.0 * s;
+        draw_meter_bar(container.as_ref(), fill.as_ref(), bx, cy, w, h, inset, remaining, catch_container, catch_fill);
+        // Label centred *inside* the bar.
+        let label = format!("Catching {name}  (T{tier})");
+        text_centered(&label, bx + w * 0.5, cy + h * 0.5, fs, WHITE, font);
+        // Skill-check prompt pulses just below the catch bar.
+        if skill_up {
             let pulse = (get_time() as f32 * 8.0).sin() * 0.5 + 0.5;
             let col = Color::new(1.0, 0.9, 0.3, 0.6 + 0.4 * pulse);
-            let msg = "SKILL CHECK!  [SPACE]";
-            let mw = measure_text(msg, None, 16, 1.0).width;
-            text_shadow(msg, bx + (w - mw) * 0.5, catch_y - 24.0, 16.0, col);
+            text_centered("SKILL CHECK!  [SPACE]", bx + w * 0.5, cy + h + 18.0 * s, fs, col, font);
         }
     }
 
-    // Stamina bar — always shown on an expedition.
+    // ── Stamina bar (bottom centre) — always shown ─────────────────────────
     let max = app.catch_stats().max_stamina.max(1.0);
     let frac = (app.stamina / max).clamp(0.0, 1.0);
-    text_shadow(&format!("Stamina  {} / {}", app.stamina as i32, max as i32), bx, stamina_y - 6.0, 14.0, TEXT_DIM);
-    draw_rectangle(bx, stamina_y, w, 11.0, color_u8!(40, 44, 52, 235));
-    let col = if frac < 0.25 { color_u8!(225, 110, 110, 255) } else { color_u8!(120, 210, 130, 255) };
-    draw_rectangle(bx, stamina_y, w * frac, 11.0, col);
-    draw_rectangle_lines(bx, stamina_y, w, 11.0, 1.5, color_u8!(255, 255, 255, 90));
+    let sy = screen_height() - h - 24.0 * s;
+    draw_meter_bar(container.as_ref(), fill.as_ref(), bx, sy, w, h, inset, frac, stamina_container, stamina_fill);
+    text_centered(
+        &format!("Stamina  {} / {}", app.stamina as i32, max as i32),
+        bx + w * 0.5,
+        sy + h * 0.5,
+        fs,
+        WHITE,
+        font,
+    );
+
+    // ── Skill slots (centred just above the stamina bar) ───────────────────
+    draw_skill_slots(app, bx + w * 0.5, sy, s);
+}
+
+/// The three ability slots (Net/Lure/Trap), centred above the stamina bar. Each:
+/// `skill_container` frame, `skill_icon`, and a radial `skill_timer_overlay`
+/// cooldown sweep. Falls back to simple squares without the sprites.
+/// `(center_x, bar_y)` is the stamina bar's top-centre.
+fn draw_skill_slots(app: &mut GameApp, center_x: f32, bar_y: f32, s: f32) {
+    let container = app.textures.ui("skill_container");
+    let icon = app.textures.ui("skill_icon");
+    let overlay = app.textures.ui("skill_timer_overlay");
+    let slot = 80.0 * s; // fixed 80×80 at the reference resolution, scaled
+    let gap = slot * 0.18;
+    let row_w = slot * 3.0 + gap * 2.0;
+    let y = bar_y - slot - 12.0 * s;
+    let x0 = center_x - row_w * 0.5; // centred above the bar
+
+    for i in 0..3 {
+        let x = x0 + i as f32 * (slot + gap);
+        // Frame.
+        if let Some(c) = container.as_ref() {
+            draw_texture_ex(c, x, y, WHITE, DrawTextureParams { dest_size: Some(vec2(slot, slot)), ..Default::default() });
+        } else {
+            draw_rectangle(x, y, slot, slot, color_u8!(40, 44, 52, 230));
+            draw_rectangle_lines(x, y, slot, slot, 2.0, color_u8!(255, 255, 255, 70));
+        }
+        // Icon (inset).
+        let pad = slot * 0.14;
+        if let Some(ic) = icon.as_ref() {
+            draw_texture_ex(
+                ic,
+                x + pad,
+                y + pad,
+                WHITE,
+                DrawTextureParams { dest_size: Some(vec2(slot - pad * 2.0, slot - pad * 2.0)), ..Default::default() },
+            );
+        }
+        // Cooldown radial sweep (darkens the slot for the remaining fraction).
+        let frac = app.ability_cooldown_frac(i);
+        if frac > 0.0 {
+            match overlay.as_ref() {
+                Some(o) => draw_radial(o, x + slot * 0.5, y + slot * 0.5, slot, frac, color_u8!(255, 255, 255, 235)),
+                None => draw_radial_primitive(x + slot * 0.5, y + slot * 0.5, slot * 0.5, frac),
+            }
+        }
+    }
+}
+
+/// Fallback radial cooldown wedge (dark, semi-transparent) when no overlay sprite
+/// is bundled — a plain triangle-fan pie, no texture.
+fn draw_radial_primitive(cx: f32, cy: f32, r: f32, frac: f32) {
+    let frac = frac.clamp(0.0, 1.0);
+    let segs = ((48.0 * frac).ceil() as usize).max(1);
+    let start = -std::f32::consts::FRAC_PI_2;
+    let sweep = std::f32::consts::TAU * frac;
+    let col = color_u8!(10, 12, 20, 150);
+    for i in 0..segs {
+        let a0 = start + sweep * (i as f32 / segs as f32);
+        let a1 = start + sweep * ((i + 1) as f32 / segs as f32);
+        draw_triangle(
+            vec2(cx, cy),
+            vec2(cx + a0.cos() * r, cy + a0.sin() * r),
+            vec2(cx + a1.cos() * r, cy + a1.sin() * r),
+            col,
+        );
+    }
+}
+
+/// Draw one meter: `bar_container` (tinted `container_tint`) as the background,
+/// `bar_fill` (tinted `fill_tint`) left-aligned and clipped to `frac` on top. The
+/// fill is drawn `inset` px inside the container on every side so the container
+/// sprite's outline stays visible around it. Falls back to flat rectangles when
+/// the sprites aren't bundled. Caller sizes `(w, h)` to the container's aspect
+/// ratio so the sprite never stretches.
+#[allow(clippy::too_many_arguments)]
+fn draw_meter_bar(
+    container: Option<&Texture2D>,
+    fill: Option<&Texture2D>,
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+    inset: f32,
+    frac: f32,
+    container_tint: Color,
+    fill_tint: Color,
+) {
+    let frac = frac.clamp(0.0, 1.0);
+    // Fill region sits inside the container by `inset` on each side.
+    let (fx, fy) = (x + inset, y + inset);
+    let (fw, fh) = ((w - inset * 2.0).max(0.0), (h - inset * 2.0).max(0.0));
+    match (container, fill) {
+        (Some(c), Some(f)) => {
+            draw_texture_ex(c, x, y, container_tint, DrawTextureParams { dest_size: Some(vec2(w, h)), ..Default::default() });
+            if frac > 0.0 {
+                // Sample the left `frac` of the fill so it reveals/recedes in place.
+                let src = Rect::new(0.0, 0.0, f.width() * frac, f.height());
+                draw_texture_ex(
+                    f,
+                    fx,
+                    fy,
+                    fill_tint,
+                    DrawTextureParams { dest_size: Some(vec2(fw * frac, fh)), source: Some(src), ..Default::default() },
+                );
+            }
+        }
+        _ => {
+            // Primitive fallback (matches the previous bars).
+            draw_rectangle(x, y, w, h, container_tint);
+            draw_rectangle(fx, fy, fw * frac, fh, fill_tint);
+            draw_rectangle_lines(x, y, w, h, 1.5, color_u8!(255, 255, 255, 90));
+        }
+    }
 }
 
 /// Draw each neighbouring plot on the shared hub (Phase 2 additive de-risk):
@@ -1212,15 +1628,27 @@ const ERROR_LIFE: f64 = 8.0;
 /// HUD overlay: floating currency chips, hint line, status/error toasts.
 /// Draw on the screen, never into a render target.
 pub fn draw_hud(app: &mut GameApp, now_utc: DateTime<Utc>) {
+    // Usernames float above every player on the online hub (text lives in the
+    // HUD pass — the scene pass is render-target/text-free).
+    draw_avatar_labels(app);
+    // Party roster on the left edge (online, when you have partymates).
+    draw_party_panel(app);
+    // Floating catch "damage" numbers popping off the engaged animal (text lives
+    // in the HUD pass; world-projected so they sit on the animal).
+    draw_catch_numbers(app);
+
     // ── Top-left: floating currency chips (icon + value) ─────────────────
     let mut x = 14.0;
     let chip_y = 12.0;
     let coins = format!("{}", app.zoo.coins);
     let food = format!("{}", app.zoo.food);
     let dna = format!("{}", app.zoo.dna_helix);
+    let power = format!("{}", app.power_score());
     x += ui::currency_chip(&mut app.textures, x, chip_y, "coin", &coins, ui::COIN_GOLD) + 8.0;
     x += ui::currency_chip(&mut app.textures, x, chip_y, "food", &food, ui::FOOD_GREEN) + 8.0;
-    ui::currency_chip(&mut app.textures, x, chip_y, "dna_helix", &dna, ui::DNA_PINK);
+    x += ui::currency_chip(&mut app.textures, x, chip_y, "dna_helix", &dna, ui::DNA_PINK) + 8.0;
+    // Power Score — the progression / region-access metric.
+    ui::currency_chip(&mut app.textures, x, chip_y, "power", &power, ui::POWER_VIOLET);
 
     // Hint line below the chips, with a soft drop shadow so it stays legible
     // over the world (the old letterbox bar is gone).
@@ -1235,6 +1663,26 @@ pub fn draw_hud(app: &mut GameApp, now_utc: DateTime<Utc>) {
             let line = format!("● Online — share code  {}   ·   {peers}/3 visitors", code.as_str());
             text_shadow(&line, 16.0, 84.0, 18.0, color_u8!(123, 207, 167, 255));
         }
+    }
+
+    // ── Party status / invite prompt (online only) ──────────────────────
+    if let Some(online) = app.online.as_ref() {
+        let invites = online.my_invites();
+        if let Some((_, _from)) = invites.first() {
+            // A pending invite addressed to us — prompt to accept/decline.
+            let line = format!("Party invite — [Y] accept   [N] decline   ({} pending)", invites.len());
+            text_shadow(&line, 16.0, 108.0, 18.0, color_u8!(245, 205, 120, 255));
+        } else {
+            let members = online.party_members().len();
+            let line = if members >= 2 {
+                format!("● Party of {members}   ·   [P] leave   ·   walk up + [G] to invite")
+            } else {
+                "Solo on the hub   ·   walk up to a player + [G] to invite to a party".to_string()
+            };
+            text_shadow(&line, 16.0, 108.0, 16.0, color_u8!(123, 207, 167, 255));
+        }
+        // Warp hint: hop between the shared plaza and your own zoo plot.
+        text_shadow("[H] warp between the plaza and your zoo", 16.0, 130.0, 16.0, TEXT_DIM);
     }
 
     // ── Bottom-left stack: errors (red) then status (amber), as pills ────
@@ -1599,6 +2047,46 @@ fn biome_color(c: crate::game::biome::Rgba) -> Color {
 fn text_shadow(text: &str, x: f32, y: f32, size: f32, color: Color) {
     draw_text(text, x + 1.0, y + 1.0, size, color_u8!(0, 0, 0, 170));
     draw_text(text, x, y, size, color);
+}
+
+/// Draw `text` centred (both axes) on `(cx, cy)` using the optional custom UI
+/// `font` (falls back to the default), with a soft drop shadow.
+fn text_centered(text: &str, cx: f32, cy: f32, size: u16, color: Color, font: Option<&Font>) {
+    let d = measure_text(text, font, size, 1.0);
+    let x = cx - d.width * 0.5;
+    let y = cy + d.offset_y - d.height * 0.5; // baseline that centres the glyph box
+    let shadow = TextParams { font, font_size: size, color: color_u8!(0, 0, 0, 170), ..Default::default() };
+    draw_text_ex(text, x + 1.0, y + 1.0, shadow);
+    draw_text_ex(text, x, y, TextParams { font, font_size: size, color, ..Default::default() });
+}
+
+/// Radial "pie" fill of `tex` covering `frac` of the circle, sweeping clockwise
+/// from the top — a Unity-style cooldown sweep. Built as a textured triangle fan
+/// (macroquad has no radial clip). `size` is the sprite's drawn edge length.
+fn draw_radial(tex: &Texture2D, cx: f32, cy: f32, size: f32, frac: f32, tint: Color) {
+    let frac = frac.clamp(0.0, 1.0);
+    if frac <= 0.0 {
+        return;
+    }
+    let r = size * 0.5;
+    let segs = ((48.0 * frac).ceil() as usize).max(1);
+    let start = -std::f32::consts::FRAC_PI_2; // top
+    let sweep = std::f32::consts::TAU * frac;
+    let uv = |dx: f32, dy: f32| (0.5 + dx / size, 0.5 + dy / size);
+    let mut vertices = Vec::with_capacity(segs + 2);
+    let (u0, v0) = uv(0.0, 0.0);
+    vertices.push(macroquad::models::Vertex::new(cx, cy, 0.0, u0, v0, tint));
+    for i in 0..=segs {
+        let a = start + sweep * (i as f32 / segs as f32);
+        let (dx, dy) = (a.cos() * r, a.sin() * r);
+        let (u, v) = uv(dx, dy);
+        vertices.push(macroquad::models::Vertex::new(cx + dx, cy + dy, 0.0, u, v, tint));
+    }
+    let mut indices = Vec::with_capacity(segs * 3);
+    for i in 1..=segs as u16 {
+        indices.extend_from_slice(&[0, i, i + 1]);
+    }
+    draw_mesh(&macroquad::models::Mesh { vertices, indices, texture: Some(tex.clone()) });
 }
 
 /// Draw one bottom-left toast pill (rounded backing + text) at `bottom_y`,

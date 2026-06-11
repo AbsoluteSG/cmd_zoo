@@ -31,6 +31,90 @@ pub fn catch_tier(species: SpeciesId) -> u8 {
     species::captures_required(species).clamp(1, 5) as u8
 }
 
+/// ════════════════════════════════════════════════════════════════════════════
+/// CATCH TUNING — per-class config + per-species overrides.
+///
+/// **This is the one place to tune how hard each animal is to catch.** A
+/// [`CatchClass`] bundles the catch knobs; [`catch_config`] maps a species to its
+/// class (per-species overrides first, then a per-class default). [`TargetProfile`]
+/// resolves the final numbers from `(class, tier)`.
+///
+/// To tune one animal: add an arm to [`catch_config`]'s override `match`.
+/// To tune a whole archetype: edit a [`CatchClass`] preset (or add a new one).
+/// ════════════════════════════════════════════════════════════════════════════
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct CatchClass {
+    /// Resistance-bar depth at tier 0; the real bar is `base + per_tier * tier`.
+    pub resistance_base: f32,
+    pub resistance_per_tier: f32,
+    /// Skill checks per second: `freq_base + freq_per_tier * tier`.
+    pub skill_freq_base: f32,
+    pub skill_freq_per_tier: f32,
+    /// Fraction of a missed skill-check's reward refilled onto the bar (the
+    /// lose-condition). Higher = punishing misses harder.
+    pub miss_refill_frac: f32,
+    /// Multiplier on how much a *landed* skill check depletes (on top of tier
+    /// scaling). >1 rewards twitch play; <1 makes checks matter less.
+    pub skill_reward_mult: f32,
+}
+
+impl CatchClass {
+    /// Baseline archetype — reproduces the original tier-only tuning.
+    pub const NORMAL: Self = Self {
+        resistance_base: 60.0,
+        resistance_per_tier: 40.0,
+        skill_freq_base: 0.15,
+        skill_freq_per_tier: 0.12,
+        miss_refill_frac: 0.75,
+        skill_reward_mult: 1.0,
+    };
+    /// Jumpy prey: lots of skill checks, harsh miss penalty, but each hit helps a
+    /// lot. A twitchy, high-variance catch.
+    pub const SKITTISH: Self = Self {
+        resistance_base: 50.0,
+        resistance_per_tier: 30.0,
+        skill_freq_base: 0.30,
+        skill_freq_per_tier: 0.20,
+        miss_refill_frac: 1.0,
+        skill_reward_mult: 1.3,
+    };
+    /// Stubborn bruiser: a deep bar and few skill checks — a slow grind that
+    /// leans on raw catch power/stamina rather than reflexes.
+    pub const STUBBORN: Self = Self {
+        resistance_base: 90.0,
+        resistance_per_tier: 70.0,
+        skill_freq_base: 0.10,
+        skill_freq_per_tier: 0.06,
+        miss_refill_frac: 0.5,
+        skill_reward_mult: 0.8,
+    };
+}
+
+/// The catch class for a species. **Edit this to tune catching.** Per-species
+/// overrides take priority; otherwise a per-habitat-theme default is used (and
+/// most themes currently fall back to [`CatchClass::NORMAL`]).
+pub fn catch_config(species: SpeciesId) -> CatchClass {
+    // 1) Per-species overrides — add specific animals here.
+    match species {
+        // e.g. "king_cobra" => CatchClass::SKITTISH,
+        // e.g. "polar_bear" => CatchClass::STUBBORN,
+        _ => class_for_theme(species::get(species).theme),
+    }
+}
+
+/// Per-class default by habitat theme. **Edit this to tune a whole biome's feel.**
+fn class_for_theme(theme: species::HabitatTheme) -> CatchClass {
+    use species::HabitatTheme::*;
+    match theme {
+        // Skittish biomes (small, jumpy fauna).
+        Forest | Farmland | Wetland => CatchClass::SKITTISH,
+        // Stubborn biomes (big, hardy fauna).
+        Arctic | Tundra | Volcanic | Ocean => CatchClass::STUBBORN,
+        // Everything else uses the baseline.
+        _ => CatchClass::NORMAL,
+    }
+}
+
 /// The catch-relevant profile of a target, derived from its species (or built
 /// directly in tests). Everything the engagement needs to know about *what is
 /// being caught*; the engager's side lives in [`CatchStats`].
@@ -42,27 +126,32 @@ pub struct TargetProfile {
     pub resistance_max: f32,
     /// Expected skill-check moments per second while engaged. Scales with tier.
     pub skill_check_frequency: f32,
+    /// The resolved catch class (carries miss-refill + skill-reward tuning the
+    /// engagement reads each tick).
+    pub class: CatchClass,
 }
 
 impl TargetProfile {
-    /// Derive a target's catch profile from its species. Resistance and
-    /// skill-check cadence both climb with tier.
+    /// Derive a target's catch profile from its species, via its [`catch_config`]
+    /// class scaled by tier.
     pub fn for_species(species: SpeciesId) -> Self {
         let tier = catch_tier(species);
+        let class = catch_config(species);
         Self {
             species,
             tier,
-            // 100 → 260 across tiers 1–5.
-            resistance_max: 60.0 + 40.0 * tier as f32,
-            // ~0.27/s at tier 1 up to ~0.75/s at tier 5 (a check every ~1.3–3.7s).
-            skill_check_frequency: 0.15 + 0.12 * tier as f32,
+            resistance_max: class.resistance_base + class.resistance_per_tier * tier as f32,
+            skill_check_frequency: class.skill_freq_base + class.skill_freq_per_tier * tier as f32,
+            class,
         }
     }
 }
 
-/// The engager's catch power, summed from equipped gear and owned-collection
-/// bonuses (see [`crate::game::gear`]). These are the "two sources" of catch
-/// power from the roadmap; this struct is what they ultimately resolve to.
+/// The engager's **resolved** catch stats — the final numbers an engagement
+/// consumes, after folding the bare-handed baseline with every modifier source
+/// (gear, owned-collection bonuses, temporary buffs). Build these with
+/// [`crate::game::gear::catch_stats`]; never mutate fields ad-hoc — add a
+/// [`CatchMods`] source instead so the system stays composable.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct CatchStats {
     /// Baseline resistance depleted per second by the stat-roll loop.
@@ -76,14 +165,101 @@ pub struct CatchStats {
     /// is what lets a player sustain catching deeper-bar, rarer animals — the
     /// difficulty-scaling gate. Drained on the engager's side, not here.
     pub max_stamina: f32,
+    /// Flat stamina restored per regen tick (out of combat). Identity-additive:
+    /// items/buffs add to this.
+    pub stamina_regen_per_tick: f32,
+    /// Multiplier on the *target's* effective catch-resistance. `1.0` = normal;
+    /// **below 1.0 means the target is easier** (a "reduce enemy resistance"
+    /// buff). Folded from `1.0` by [`CatchMods::target_resist_mult`] deltas.
+    pub target_resist_mult: f32,
+    /// Chance `[0,1]` that a stat-roll depletion tick is a **critical hit**.
+    pub crit_chance: f32,
+    /// Damage multiplier applied to a critical depletion tick (`>= 1.0`).
+    pub crit_mult: f32,
+}
+
+impl CatchStats {
+    /// The bare-handed baseline (no gear, empty collection). Multiplicative-style
+    /// stats sit at their identity here (`target_resist_mult = 1`, `crit_mult`
+    /// the crit payoff, `crit_chance = 0`); [`CatchMods`] deltas move them.
+    pub const fn base() -> Self {
+        Self {
+            catch_power: 5.0,
+            skill_bonus: 1.0,
+            debuff_power: 1.0,
+            max_stamina: 200.0,
+            stamina_regen_per_tick: 10.0,
+            target_resist_mult: 1.0,
+            crit_chance: 0.0,
+            crit_mult: 1.5,
+        }
+    }
+
+    /// Fold one modifier source onto these stats (field-wise add of its deltas).
+    pub fn apply(&mut self, m: &CatchMods) {
+        self.catch_power += m.catch_power;
+        self.skill_bonus += m.skill_bonus;
+        self.debuff_power += m.debuff_power;
+        self.max_stamina += m.max_stamina;
+        self.stamina_regen_per_tick += m.stamina_regen_per_tick;
+        self.target_resist_mult += m.target_resist_mult;
+        self.crit_chance += m.crit_chance;
+        self.crit_mult += m.crit_mult;
+    }
+
+    /// Clamp resolved stats to sane ranges after all sources are folded.
+    pub fn sanitized(mut self) -> Self {
+        self.max_stamina = self.max_stamina.max(1.0);
+        self.stamina_regen_per_tick = self.stamina_regen_per_tick.max(0.0);
+        self.target_resist_mult = self.target_resist_mult.max(0.1); // never free / div-0
+        self.crit_chance = self.crit_chance.clamp(0.0, 1.0);
+        self.crit_mult = self.crit_mult.max(1.0);
+        self
+    }
 }
 
 impl Default for CatchStats {
-    /// Bare-handed baseline (no gear, empty collection): catchable but slow, and
-    /// a starter stamina pool that comfortably handles low-tier catches only.
+    /// Bare-handed baseline — see [`CatchStats::base`].
     fn default() -> Self {
-        Self { catch_power: 14.0, skill_bonus: 1.0, debuff_power: 1.0, max_stamina: 200.0 }
+        Self::base()
     }
+}
+
+/// **Additive deltas** to [`CatchStats`] contributed by one modifier source — a
+/// gear item, a collection bonus, or a temporary buff. Everything is a delta over
+/// the baseline, so sources compose by simple summation (see [`CatchStats::apply`]).
+///
+/// For the multiplicative-style stats the delta is signed change from identity:
+/// e.g. `target_resist_mult: -0.2` means *"−20% target resistance"*, and
+/// `crit_chance: 0.1` means *"+10% crit"*. Add new modifiable stats by adding a
+/// field here, to [`CatchStats`], and to [`CatchStats::apply`].
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct CatchMods {
+    pub catch_power: f32,
+    pub skill_bonus: f32,
+    pub debuff_power: f32,
+    pub max_stamina: f32,
+    pub stamina_regen_per_tick: f32,
+    /// Signed delta to `target_resist_mult` (negative = target resistance reduced).
+    pub target_resist_mult: f32,
+    /// Added crit chance `[0,1]`.
+    pub crit_chance: f32,
+    /// Added crit multiplier.
+    pub crit_mult: f32,
+}
+
+impl CatchMods {
+    /// A no-op modifier (all zero) — handy as a `..` base for partial literals.
+    pub const NONE: Self = Self {
+        catch_power: 0.0,
+        skill_bonus: 0.0,
+        debuff_power: 0.0,
+        max_stamina: 0.0,
+        stamina_regen_per_tick: 0.0,
+        target_resist_mult: 0.0,
+        crit_chance: 0.0,
+        crit_mult: 0.0,
+    };
 }
 
 /// Live debuffs an engagement has stacked on its target via abilities. All
@@ -154,6 +330,9 @@ pub struct CatchEngagement {
     /// Total resistance this engager has depleted — the per-engager
     /// **contribution** the Phase 5 co-op/ownership model keys on.
     pub contribution: f32,
+    /// Whether the most recent stat-roll depletion was a **critical hit** (set
+    /// each tick) — surfaced so the UI can punch up the damage number.
+    pub last_hit_crit: bool,
     /// Seconds until the next skill-check window may spawn.
     next_check_in: f32,
     /// Accumulated time toward the next discrete depletion tick.
@@ -164,7 +343,7 @@ pub struct CatchEngagement {
 /// Cadence of the stat-roll depletion. The bar steps down once per tick rather
 /// than draining continuously, so progress reads as increments — and it mirrors
 /// an authoritative server tick when this runs inside a SpacetimeDB reducer.
-pub const CATCH_TICK_SECS: f32 = 0.5;
+pub const CATCH_TICK_SECS: f32 = 1.25;
 
 /// Stamina spent **per catch tick, per point of the target's `resistance_max`**.
 /// Cost-per-tick = this × resistance, so rarer/deeper-bar animals burn the pool
@@ -173,8 +352,9 @@ pub const CATCH_TICK_SECS: f32 = 0.5;
 /// player handles low tiers and must progress to sustain the high ones.
 pub const STAMINA_PER_TICK_PER_RESISTANCE: f32 = 0.1;
 
-/// Base resistance a landed skill check removes, before tier and `skill_bonus`
-/// scaling. Tuned so a well-timed check is a meaningful chunk of a low-tier bar.
+/// Base resistance a landed skill check removes, before tier, `skill_bonus`, and
+/// the per-class `skill_reward_mult`. Tuned so a well-timed check is a meaningful
+/// chunk of a low-tier bar.
 const SKILL_CHECK_BASE_REWARD: f32 = 18.0;
 /// How long a skill-check window stays hittable.
 const SKILL_CHECK_WINDOW: f32 = 1.1;
@@ -192,6 +372,7 @@ impl CatchEngagement {
             debuffs: Debuffs::default(),
             skill_check: None,
             contribution: 0.0,
+            last_hit_crit: false,
             next_check_in,
             tick_accum: 0.0,
             rng,
@@ -220,7 +401,13 @@ impl CatchEngagement {
         // Stat-roll loop, stepped: accumulate time and deplete one increment per
         // discrete tick, so the bar drops in chunks rather than draining smooth.
         // Each tick also spends stamina ∝ the target's resistance.
-        let effective_dps = stats.catch_power * (1.0 + self.debuffs.weaken);
+        //
+        // Modifiers fold in here: `target_resist_mult` below 1 makes every hit
+        // land harder (the target's effective resistance is reduced), and
+        // `crit_chance`/`crit_mult` roll a bigger hit. All sourced from `stats`
+        // (gear/collection/buffs) so new items just change the numbers.
+        let resist_factor = 1.0 / stats.target_resist_mult.max(0.1);
+        let per_tick = stats.catch_power * (1.0 + self.debuffs.weaken) * resist_factor * CATCH_TICK_SECS;
         let stamina_cost = STAMINA_PER_TICK_PER_RESISTANCE * self.target.resistance_max;
         self.tick_accum += dt;
         while self.tick_accum >= CATCH_TICK_SECS {
@@ -229,7 +416,10 @@ impl CatchEngagement {
                 return EngagementOutcome::Exhausted;
             }
             *stamina -= stamina_cost;
-            self.deplete(effective_dps * CATCH_TICK_SECS);
+            // Critical hit roll on this depletion tick.
+            self.last_hit_crit = stats.crit_chance > 0.0 && self.rng.next_f32() < stats.crit_chance;
+            let amount = if self.last_hit_crit { per_tick * stats.crit_mult } else { per_tick };
+            self.deplete(amount);
             if self.is_captured() {
                 break;
             }
@@ -239,7 +429,11 @@ impl CatchEngagement {
         if let Some(sc) = &mut self.skill_check {
             sc.remaining -= dt;
             if sc.remaining <= 0.0 {
+                // Missed it — the target claws back part of the bar (lose-con).
+                let refill = sc.reward * self.target.class.miss_refill_frac;
                 self.skill_check = None;
+                self.refill(refill);
+                self.next_check_in = Self::roll_next_check(&self.target, &mut self.rng);
             }
         } else {
             self.next_check_in -= dt;
@@ -283,10 +477,11 @@ impl CatchEngagement {
         true
     }
 
-    /// The player let the skill check lapse (or deliberately skipped it).
-    /// Clears the window with no reward; the cadence resumes.
+    /// The player let the skill check lapse (or deliberately skipped it). Refills
+    /// part of the bar (the miss penalty) and resumes the cadence.
     pub fn miss_skill_check(&mut self) {
-        if self.skill_check.take().is_some() {
+        if let Some(sc) = self.skill_check.take() {
+            self.refill(sc.reward * self.target.class.miss_refill_frac);
             self.next_check_in = Self::roll_next_check(&self.target, &mut self.rng);
         }
     }
@@ -316,6 +511,19 @@ impl CatchEngagement {
         self.contribution += applied;
     }
 
+    /// Add `amount` back onto the bar (the skill-check miss penalty), clamped to
+    /// the target's full resistance. Walks back banked contribution by the same
+    /// amount so it still reflects *net* progress.
+    fn refill(&mut self, amount: f32) {
+        if amount <= 0.0 {
+            return;
+        }
+        let headroom = (self.target.resistance_max - self.resistance).max(0.0);
+        let applied = amount.min(headroom);
+        self.resistance += applied;
+        self.contribution = (self.contribution - applied).max(0.0);
+    }
+
     fn decay_debuffs(&mut self, dt: f32) {
         if self.debuffs.flee_lock_secs > 0.0 {
             self.debuffs.flee_lock_secs = (self.debuffs.flee_lock_secs - dt).max(0.0);
@@ -329,7 +537,9 @@ impl CatchEngagement {
     }
 
     fn spawn_skill_check(&mut self) {
-        let reward = SKILL_CHECK_BASE_REWARD * (0.6 + 0.2 * self.target.tier as f32);
+        let reward = SKILL_CHECK_BASE_REWARD
+            * (0.6 + 0.2 * self.target.tier as f32)
+            * self.target.class.skill_reward_mult;
         self.skill_check = Some(SkillCheck {
             remaining: SKILL_CHECK_WINDOW,
             window: SKILL_CHECK_WINDOW,
@@ -356,6 +566,7 @@ mod tests {
             tier: 1,
             resistance_max: tier_resistance,
             skill_check_frequency: 0.5,
+            class: CatchClass::NORMAL,
         }
     }
 
@@ -433,6 +644,25 @@ mod tests {
         assert!(e.hit_skill_check(&stats));
         assert!(e.resistance < before, "hitting the check should deplete the bar");
         assert!(e.skill_check.is_none(), "window clears after a hit");
+    }
+
+    #[test]
+    fn missing_a_skill_check_refills_the_bar() {
+        let mut e = CatchEngagement::new(profile(1000.0), 42);
+        let stats = CatchStats::default();
+        // Run until a window appears, then deplete a bit so there's headroom.
+        for _ in 0..600 {
+            e.tick(0.05, &stats, &mut 1.0e9_f32);
+            if e.skill_check.is_some() {
+                break;
+            }
+        }
+        assert!(e.skill_check.is_some(), "a skill check should spawn");
+        e.deplete(40.0); // open up headroom so a refill is observable
+        let before = e.resistance;
+        e.miss_skill_check();
+        assert!(e.resistance > before, "missing a check claws the bar back up");
+        assert!(e.resistance <= e.target.resistance_max, "refill clamps at full");
     }
 
     #[test]

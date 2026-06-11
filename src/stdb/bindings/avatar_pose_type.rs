@@ -7,7 +7,7 @@ use spacetimedb_sdk::__codegen::{self as __sdk, __lib, __sats, __ws};
 #[derive(__lib::ser::Serialize, __lib::de::Deserialize, Clone, PartialEq, Debug)]
 #[sats(crate = __lib)]
 pub struct AvatarPose {
-    pub owner: __sdk::Identity,
+    pub owner_key: String,
     pub x: f32,
     pub y: f32,
     pub updated_at: __sdk::Timestamp,
@@ -21,7 +21,7 @@ impl __sdk::InModule for AvatarPose {
 ///
 /// Provides typed access to columns for query building.
 pub struct AvatarPoseCols {
-    pub owner: __sdk::__query_builder::Col<AvatarPose, __sdk::Identity>,
+    pub owner_key: __sdk::__query_builder::Col<AvatarPose, String>,
     pub x: __sdk::__query_builder::Col<AvatarPose, f32>,
     pub y: __sdk::__query_builder::Col<AvatarPose, f32>,
     pub updated_at: __sdk::__query_builder::Col<AvatarPose, __sdk::Timestamp>,
@@ -31,7 +31,7 @@ impl __sdk::__query_builder::HasCols for AvatarPose {
     type Cols = AvatarPoseCols;
     fn cols(table_name: &'static str) -> Self::Cols {
         AvatarPoseCols {
-            owner: __sdk::__query_builder::Col::new(table_name, "owner"),
+            owner_key: __sdk::__query_builder::Col::new(table_name, "owner_key"),
             x: __sdk::__query_builder::Col::new(table_name, "x"),
             y: __sdk::__query_builder::Col::new(table_name, "y"),
             updated_at: __sdk::__query_builder::Col::new(table_name, "updated_at"),
@@ -43,14 +43,14 @@ impl __sdk::__query_builder::HasCols for AvatarPose {
 ///
 /// Provides typed access to indexed columns for query building.
 pub struct AvatarPoseIxCols {
-    pub owner: __sdk::__query_builder::IxCol<AvatarPose, __sdk::Identity>,
+    pub owner_key: __sdk::__query_builder::IxCol<AvatarPose, String>,
 }
 
 impl __sdk::__query_builder::HasIxCols for AvatarPose {
     type IxCols = AvatarPoseIxCols;
     fn ix_cols(table_name: &'static str) -> Self::IxCols {
         AvatarPoseIxCols {
-            owner: __sdk::__query_builder::IxCol::new(table_name, "owner"),
+            owner_key: __sdk::__query_builder::IxCol::new(table_name, "owner_key"),
         }
     }
 }

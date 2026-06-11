@@ -16,6 +16,7 @@ pub mod npc;
 pub mod pedestal;
 pub mod plot;
 pub mod player;
+pub mod power;
 pub mod rank;
 pub mod rng;
 pub mod species;

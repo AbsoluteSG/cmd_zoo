@@ -23,12 +23,15 @@ fn main() {
     emit_png_table("assets/icons", "icon_table.rs");
     emit_png_table("assets/npcs", "npc_table.rs");
     emit_png_table("assets/hotbar", "hotbar_table.rs");
+    emit_png_table("assets/ui", "ui_table.rs");
     emit_png_table("assets/structures", "structure_table.rs");
+    emit_png_table("assets/player", "player_table.rs");
     // Terrain props live in per-biome subfolders (`assets/terrain/<Biome>/*.png`);
     // each entry is keyed `"<biome>/<stem>"` so the renderer can pick scenery by
     // biome. Subfolder names should match the biome display names (case-insensitive).
     emit_nested_png_table("assets/terrain", "terrain_table.rs");
     emit_asset_table("assets/sfx", "sfx_table.rs", &["ogg", "wav"]);
+    emit_asset_table("assets/fonts", "font_table.rs", &["ttf", "otf"]);
 }
 
 /// Scan `<dir>/<sub>/*.png` (one level of subfolders) into a `(&str, &[u8])`

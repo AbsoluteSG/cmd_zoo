@@ -12,7 +12,7 @@
 //! Pure data + arithmetic, headless and unit-tested — the same derivation runs
 //! client-side for Solo and inside a SpacetimeDB reducer online.
 
-use crate::game::catch::{AbilityKind, CatchStats};
+use crate::game::catch::{AbilityKind, CatchMods, CatchStats};
 
 /// Stable string id of a gear item (mirrors `SpeciesId`'s `&'static str` style).
 pub type GearId = &'static str;
@@ -28,19 +28,18 @@ pub enum GearSlot {
     Support,
 }
 
-/// A craftable/buyable catch tool. Grants flat catch stats while equipped and,
-/// optionally, an active ability the player triggers during an engagement.
+/// A craftable/buyable catch item. Grants a bundle of passive [`CatchMods`] while
+/// equipped and, optionally, an active ability. Because the bonus is a full
+/// `CatchMods`, **any** modifiable stat is fair game — a net adds catch power, a
+/// pendant could add `stamina_regen_per_tick`, a charm could add `crit_chance` or
+/// shave `target_resist_mult` — without touching this struct.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct GearItem {
     pub id: GearId,
     pub display_name: &'static str,
     pub slot: GearSlot,
-    /// Passive bonus to baseline depletion-per-second.
-    pub catch_power: f32,
-    /// Passive bonus to skill-check reward multiplier.
-    pub skill_bonus: f32,
-    /// Passive bonus to ability debuff strength.
-    pub debuff_power: f32,
+    /// Passive stat modifiers granted while equipped.
+    pub mods: CatchMods,
     /// The active ability this item grants, if any.
     pub ability: Option<AbilityKind>,
 }
@@ -52,9 +51,7 @@ pub const STARTER_NET: GearItem = GearItem {
     id: "starter_net",
     display_name: "Starter Net",
     slot: GearSlot::Tool,
-    catch_power: 8.0,
-    skill_bonus: 0.0,
-    debuff_power: 0.0,
+    mods: CatchMods { catch_power: 8.0, ..CatchMods::NONE },
     ability: Some(AbilityKind::Net),
 };
 
@@ -62,9 +59,7 @@ pub const SNARE_LURE: GearItem = GearItem {
     id: "snare_lure",
     display_name: "Snare Lure",
     slot: GearSlot::Support,
-    catch_power: 0.0,
-    skill_bonus: 0.15,
-    debuff_power: 0.2,
+    mods: CatchMods { skill_bonus: 0.15, debuff_power: 0.2, ..CatchMods::NONE },
     ability: Some(AbilityKind::Lure),
 };
 
@@ -72,9 +67,7 @@ pub const BOX_TRAP: GearItem = GearItem {
     id: "box_trap",
     display_name: "Box Trap",
     slot: GearSlot::Support,
-    catch_power: 2.0,
-    skill_bonus: 0.0,
-    debuff_power: 0.5,
+    mods: CatchMods { catch_power: 2.0, debuff_power: 0.5, ..CatchMods::NONE },
     ability: Some(AbilityKind::Trap),
 };
 
@@ -134,41 +127,42 @@ impl Loadout {
 /// Passive catch bonus granted by what the zoo already owns — the second source
 /// of catch power. Scales gently with breadth (distinct species owned) and
 /// depth (summed Rank stages), so a fuller, higher-Rank collection makes you a
-/// better catcher and the loop feeds itself. Returned as additive deltas over
-/// [`CatchStats::default`].
-pub fn collection_bonus(distinct_species: usize, rank_sum: u32) -> CatchStats {
-    CatchStats {
+/// better catcher and the loop feeds itself. A [`CatchMods`] like any other
+/// source, so a "collection milestone" buff (e.g. crit chance, target-resistance
+/// reduction) just adds fields here.
+pub fn collection_mods(distinct_species: usize, rank_sum: u32) -> CatchMods {
+    CatchMods {
         // +0.5 catch power per distinct species, +0.25 per accumulated Rank.
         catch_power: 0.5 * distinct_species as f32 + 0.25 * rank_sum as f32,
         // Breadth sharpens skill-check payoff a touch (+1% each, capped).
         skill_bonus: (0.01 * distinct_species as f32).min(0.5),
-        debuff_power: 0.0,
         // Stamina pool grows with breadth + depth — the main difficulty gate, so
         // a fuller, higher-Rank collection lets you sustain catching rarer
         // animals. +15 per distinct species, +12 per accumulated Rank.
         max_stamina: 15.0 * distinct_species as f32 + 12.0 * rank_sum as f32,
+        ..CatchMods::NONE
     }
 }
 
-/// Resolve the engager's total [`CatchStats`] from their equipped `loadout` and
-/// their collection (distinct species owned + summed Rank), folded over the
-/// bare-handed baseline. This is the single entry point the engagement is fed.
-pub fn catch_stats(loadout: &Loadout, distinct_species: usize, rank_sum: u32) -> CatchStats {
-    let base = CatchStats::default();
-    let coll = collection_bonus(distinct_species, rank_sum);
-    let mut out = CatchStats {
-        catch_power: base.catch_power + coll.catch_power,
-        skill_bonus: base.skill_bonus + coll.skill_bonus,
-        debuff_power: base.debuff_power + coll.debuff_power,
-        // Base pool + collection growth (gear doesn't add stamina for now).
-        max_stamina: base.max_stamina + coll.max_stamina,
-    };
+/// Resolve the engager's total [`CatchStats`] by folding **every modifier source**
+/// over the bare-handed baseline: collection bonuses, equipped gear, and any
+/// `extra` mods (temporary buffs, event effects, …). This is the single entry
+/// point the engagement is fed — add a source, get it folded; no call-site math.
+pub fn catch_stats(
+    loadout: &Loadout,
+    distinct_species: usize,
+    rank_sum: u32,
+    extra: &[CatchMods],
+) -> CatchStats {
+    let mut out = CatchStats::base();
+    out.apply(&collection_mods(distinct_species, rank_sum));
     for g in loadout.items() {
-        out.catch_power += g.catch_power;
-        out.skill_bonus += g.skill_bonus;
-        out.debuff_power += g.debuff_power;
+        out.apply(&g.mods);
     }
-    out
+    for m in extra {
+        out.apply(m);
+    }
+    out.sanitized()
 }
 
 #[cfg(test)]
@@ -196,18 +190,29 @@ mod tests {
 
     #[test]
     fn gear_raises_catch_power_over_baseline() {
-        let bare = catch_stats(&Loadout::default(), 0, 0);
-        let kitted = catch_stats(&Loadout::starter(), 0, 0);
+        let bare = catch_stats(&Loadout::default(), 0, 0, &[]);
+        let kitted = catch_stats(&Loadout::starter(), 0, 0, &[]);
         assert_eq!(bare.catch_power, CatchStats::default().catch_power);
         assert!(kitted.catch_power > bare.catch_power, "the net adds catch power");
     }
 
     #[test]
     fn collection_bonus_scales_with_breadth_and_rank() {
-        let small = catch_stats(&Loadout::default(), 1, 0);
-        let big = catch_stats(&Loadout::default(), 40, 30);
+        let small = catch_stats(&Loadout::default(), 1, 0, &[]);
+        let big = catch_stats(&Loadout::default(), 40, 30, &[]);
         assert!(big.catch_power > small.catch_power);
         assert!(big.skill_bonus >= small.skill_bonus);
+    }
+
+    #[test]
+    fn extra_mods_fold_in_and_compose() {
+        let base = catch_stats(&Loadout::default(), 0, 0, &[]);
+        let pendant = CatchMods { stamina_regen_per_tick: 20.0, ..CatchMods::NONE };
+        let charm = CatchMods { crit_chance: 0.15, target_resist_mult: -0.2, ..CatchMods::NONE };
+        let buffed = catch_stats(&Loadout::default(), 0, 0, &[pendant, charm]);
+        assert!((buffed.stamina_regen_per_tick - base.stamina_regen_per_tick - 20.0).abs() < 1e-4);
+        assert!((buffed.crit_chance - 0.15).abs() < 1e-4);
+        assert!((buffed.target_resist_mult - 0.8).abs() < 1e-4, "−20% target resistance");
     }
 
     #[test]

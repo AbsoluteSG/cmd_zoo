@@ -95,32 +95,32 @@ impl<'ctx> __sdk::TableWithPrimaryKey for ZooTableHandle<'ctx> {
     }
 }
 
-/// Access to the `owner` unique index on the table `zoo`,
+/// Access to the `owner_key` unique index on the table `zoo`,
 /// which allows point queries on the field of the same name
-/// via the [`ZooOwnerUnique::find`] method.
+/// via the [`ZooOwnerKeyUnique::find`] method.
 ///
 /// Users are encouraged not to explicitly reference this type,
 /// but to directly chain method calls,
-/// like `ctx.db.zoo().owner().find(...)`.
-pub struct ZooOwnerUnique<'ctx> {
-    imp: __sdk::UniqueConstraintHandle<ZooRow, __sdk::Identity>,
+/// like `ctx.db.zoo().owner_key().find(...)`.
+pub struct ZooOwnerKeyUnique<'ctx> {
+    imp: __sdk::UniqueConstraintHandle<ZooRow, String>,
     phantom: std::marker::PhantomData<&'ctx super::RemoteTables>,
 }
 
 impl<'ctx> ZooTableHandle<'ctx> {
-    /// Get a handle on the `owner` unique index on the table `zoo`.
-    pub fn owner(&self) -> ZooOwnerUnique<'ctx> {
-        ZooOwnerUnique {
-            imp: self.imp.get_unique_constraint::<__sdk::Identity>("owner"),
+    /// Get a handle on the `owner_key` unique index on the table `zoo`.
+    pub fn owner_key(&self) -> ZooOwnerKeyUnique<'ctx> {
+        ZooOwnerKeyUnique {
+            imp: self.imp.get_unique_constraint::<String>("owner_key"),
             phantom: std::marker::PhantomData,
         }
     }
 }
 
-impl<'ctx> ZooOwnerUnique<'ctx> {
-    /// Find the subscribed row whose `owner` column value is equal to `col_val`,
+impl<'ctx> ZooOwnerKeyUnique<'ctx> {
+    /// Find the subscribed row whose `owner_key` column value is equal to `col_val`,
     /// if such a row is present in the client cache.
-    pub fn find(&self, col_val: &__sdk::Identity) -> Option<ZooRow> {
+    pub fn find(&self, col_val: &String) -> Option<ZooRow> {
         self.imp.find(col_val)
     }
 }
@@ -128,7 +128,7 @@ impl<'ctx> ZooOwnerUnique<'ctx> {
 #[doc(hidden)]
 pub(super) fn register_table(client_cache: &mut __sdk::ClientCache<super::RemoteModule>) {
     let _table = client_cache.get_or_make_table::<ZooRow>("zoo");
-    _table.add_unique_constraint::<__sdk::Identity>("owner", |row| &row.owner);
+    _table.add_unique_constraint::<String>("owner_key", |row| &row.owner_key);
 }
 
 #[doc(hidden)]

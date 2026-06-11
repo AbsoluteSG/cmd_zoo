@@ -26,10 +26,27 @@ pub const DNA_PINK: Color = color_u8!(196, 120, 220, 255);
 pub const FOOD_GREEN: Color = color_u8!(150, 210, 120, 255);
 pub const STATUS_AMBER: Color = color_u8!(211, 165, 92, 255);
 pub const ERROR_RED: Color = color_u8!(255, 90, 90, 255);
+/// Power Score accent (progression metric chip / readouts).
+pub const POWER_VIOLET: Color = color_u8!(150, 130, 245, 255);
 
 /// Translucent backing used behind floating HUD chips / pills.
 const CHIP_BG: Color = color_u8!(0, 0, 0, 175);
 const CHIP_EDGE: Color = color_u8!(255, 255, 255, 28);
+
+// ── Resolution scaling ────────────────────────────────────────────────────────
+
+/// Reference design resolution (16:9). UI is authored at these pixel sizes and
+/// [`ui_scale`] scales it to the actual window so it looks the same at any
+/// resolution.
+pub const REF_W: f32 = 1920.0;
+pub const REF_H: f32 = 1080.0;
+
+/// Uniform UI scale factor for the current window vs the 16:9 reference. Uses the
+/// smaller of the width/height ratios so scaled UI always fits (equal on a 16:9
+/// window). Multiply authored pixel sizes/offsets by this.
+pub fn ui_scale() -> f32 {
+    (screen_width() / REF_W).min(screen_height() / REF_H).max(0.1)
+}
 
 // ── Primitives ──────────────────────────────────────────────────────────────────
 

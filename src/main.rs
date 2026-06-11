@@ -15,7 +15,9 @@ use cmd_zoo::persistence::json_file::JsonFileRepository;
 fn window_conf() -> Conf {
     Conf {
         window_title: "cmd_zoo".to_owned(),
-        window_width: 1100,
+        // Default to a 16:9 window (UI is authored for 16:9 and scales via
+        // `ui::ui_scale`); half of the 1920×1080 reference.
+        window_width: 1280,
         window_height: 720,
         high_dpi: true,
         ..Default::default()

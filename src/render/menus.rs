@@ -432,13 +432,15 @@ fn draw_expedition_board(app: &mut GameApp, _now: DateTime<Utc>, ctx: Ctx) {
     let ph = 110.0 + rows as f32 * 36.0 + 56.0;
     let (px, py) = (ctx.center.x - pw * 0.5, ctx.center.y - ph * 0.5);
 
+    let power = app.power_score();
+
     panel(&ctx, px, py, pw, ph);
     title(&ctx, px + 26.0, py + 30.0, "EXPEDITION BOARD");
     label(
         &ctx,
         px + 26.0,
         py + 62.0,
-        "Choose a biome to explore — catch its wildlife and bring it home.",
+        &format!("Choose a biome — locked regions need a higher Power Score.   Your Power: {power}"),
         16.0,
         TEXT_DIM,
     );
@@ -452,8 +454,17 @@ fn draw_expedition_board(app: &mut GameApp, _now: DateTime<Utc>, ctx: Ctx) {
         if i % 2 == 0 && i != 0 {
             y += 36.0;
         }
-        let lbl = format!("{}  ·  {}", v.theme.name(), v.npc_name);
-        if button(&ctx, bx, y, col_w, 30.0, &lbl, true) {
+        let req = crate::game::power::required_power(v.theme);
+        let locked = !crate::game::power::can_enter(power, v.theme);
+        let lbl = if locked {
+            format!("{}  ·  [LOCKED] Power {req}", v.theme.name())
+        } else if req == 0 {
+            format!("{}  ·  {}", v.theme.name(), v.npc_name)
+        } else {
+            format!("{}  ·  Power {req}", v.theme.name())
+        };
+        // Disabled button blocks the click on locked regions (server re-checks too).
+        if button(&ctx, bx, y, col_w, 30.0, &lbl, !locked) {
             launch = Some(v.theme);
         }
     }

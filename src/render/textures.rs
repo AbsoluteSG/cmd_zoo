@@ -18,11 +18,26 @@ static HABITAT_TABLE: &[(&str, &[u8])] =
 static ICON_TABLE: &[(&str, &[u8])] = include!(concat!(env!("OUT_DIR"), "/icon_table.rs"));
 static NPC_TABLE: &[(&str, &[u8])] = include!(concat!(env!("OUT_DIR"), "/npc_table.rs"));
 static HOTBAR_TABLE: &[(&str, &[u8])] = include!(concat!(env!("OUT_DIR"), "/hotbar_table.rs"));
+/// General UI sprites (e.g. the catch/stamina `bar_container` + `bar_fill`).
+static UI_TABLE: &[(&str, &[u8])] = include!(concat!(env!("OUT_DIR"), "/ui_table.rs"));
+/// Embedded UI fonts (`assets/fonts/*.ttf|otf`), e.g. Bebas Neue.
+static FONT_TABLE: &[(&str, &[u8])] = include!(concat!(env!("OUT_DIR"), "/font_table.rs"));
+
+/// Load the custom UI font (the first font bundled in `assets/fonts/`). `None`
+/// when no font is bundled (callers fall back to the macroquad default font).
+pub fn ui_font() -> Option<macroquad::text::Font> {
+    let (_, bytes) = FONT_TABLE.first()?;
+    macroquad::text::load_ttf_font_from_bytes(bytes).ok()
+}
 /// Ground-structure sprites (nests, future silos), keyed by id (e.g. `"nest"`).
 static STRUCTURE_TABLE: &[(&str, &[u8])] =
     include!(concat!(env!("OUT_DIR"), "/structure_table.rs"));
 /// Terrain props, keyed `"<biome>/<name>"` (e.g. `"forest/oak"`).
 static TERRAIN_TABLE: &[(&str, &[u8])] = include!(concat!(env!("OUT_DIR"), "/terrain_table.rs"));
+/// Player character sprite sheets, keyed by stem (e.g. `"player"`), from
+/// `assets/player/`. Used by the animated avatar; `None` falls back to the
+/// procedural toon-ball.
+static PLAYER_TABLE: &[(&str, &[u8])] = include!(concat!(env!("OUT_DIR"), "/player_table.rs"));
 
 /// Which embedded table to look an id up in.
 #[derive(Clone, Copy)]
@@ -33,8 +48,10 @@ enum Kind {
     Icon,
     Npc,
     Hotbar,
+    Ui,
     Terrain,
     Structure,
+    Player,
 }
 
 impl Kind {
@@ -46,8 +63,10 @@ impl Kind {
             Kind::Icon => ICON_TABLE,
             Kind::Npc => NPC_TABLE,
             Kind::Hotbar => HOTBAR_TABLE,
+            Kind::Ui => UI_TABLE,
             Kind::Terrain => TERRAIN_TABLE,
             Kind::Structure => STRUCTURE_TABLE,
+            Kind::Player => PLAYER_TABLE,
         }
     }
     fn prefix(self) -> &'static str {
@@ -58,8 +77,10 @@ impl Kind {
             Kind::Icon => "i:",
             Kind::Npc => "n:",
             Kind::Hotbar => "hb:",
+            Kind::Ui => "ui:",
             Kind::Terrain => "tp:",
             Kind::Structure => "s:",
+            Kind::Player => "pl:",
         }
     }
 }
@@ -117,6 +138,12 @@ impl Textures {
         self.get(Kind::Hotbar, id)
     }
 
+    /// A general UI sprite by id, from `assets/ui/` (e.g. "bar_container",
+    /// "bar_fill"). `None` falls back to primitive drawing.
+    pub fn ui(&mut self, id: &str) -> Option<Texture2D> {
+        self.get(Kind::Ui, id)
+    }
+
     /// A terrain prop by its `"<biome>/<name>"` id, from `assets/terrain/`.
     pub fn terrain(&mut self, id: &str) -> Option<Texture2D> {
         self.get(Kind::Terrain, id)
@@ -126,6 +153,12 @@ impl Textures {
     /// `None` falls back to placeholder vector art.
     pub fn structure(&mut self, id: &str) -> Option<Texture2D> {
         self.get(Kind::Structure, id)
+    }
+
+    /// A player-character sprite sheet by id, from `assets/player/` (e.g.
+    /// "player"). `None` falls back to the procedural toon-ball avatar.
+    pub fn player(&mut self, id: &str) -> Option<Texture2D> {
+        self.get(Kind::Player, id)
     }
 
     /// Any bundled ground tile (first by sorted id), for auto-detecting the

@@ -25,6 +25,23 @@ pub fn world_center() -> Vec2 {
     vec2(WORLD_W * 0.5, WORLD_H * 0.5)
 }
 
+/// Fixed seed for the **shared** hub ground (biome tint, grass, terrain scatter)
+/// so every online player sees the *same* world. Solo play still uses each save's
+/// own `world_seed`; online rendering uses this instead.
+pub const HUB_SEED: u64 = 0xCAFE_F00D_1234_5678;
+
+/// Shared spawn point on the hub — the central plaza where every online player
+/// arrives, so players meet up immediately regardless of which plot slot they
+/// were assigned. (Their zoo plot lives at [`hub_plot_origin`] of their slot.)
+pub fn hub_spawn() -> Vec2 {
+    world_center()
+}
+
+/// Max hub distance (world units) between two avatars for a party invite to be
+/// allowed — the "walk up to someone" range. Shared by the client (to pick the
+/// nearest invitable player) and the server reducer (to authorize the invite).
+pub const PARTY_INVITE_RANGE: f32 = 900.0;
+
 // ── Zoo plot dimensions ─────────────────────────────────────────────────────────
 
 /// Base (un-upgraded) plot edge length in tiles. Each expansion grows it by
@@ -55,10 +72,12 @@ pub fn zoo_tiles_for_level(level: u8) -> i32 {
 /// neighbouring plots never touch even at a couple of expansion levels.
 pub const HUB_PLOT_PITCH: f32 = ZOO_TILES_BASE as f32 * ZOO_TILE_W * 2.6;
 
-/// World-space plot origin for hub `slot` (slot 0 = hub centre). Slots fill a
-/// square spiral around the centre, spaced by [`HUB_PLOT_PITCH`].
+/// World-space plot origin for hub `slot`. The hub centre cell is **reserved**
+/// for the shared plaza ([`hub_spawn`]), so player plots start at the first ring
+/// (`slot 0` → `spiral_cell(1)`) and never overlap the plaza. Slots fill a square
+/// spiral around the centre, spaced by [`HUB_PLOT_PITCH`].
 pub fn hub_plot_origin(slot: u32) -> Vec2 {
-    let (gx, gy) = spiral_cell(slot);
+    let (gx, gy) = spiral_cell(slot + 1);
     world_center() + vec2(gx as f32, gy as f32) * HUB_PLOT_PITCH
 }
 
@@ -94,8 +113,17 @@ mod tests {
     use std::collections::HashSet;
 
     #[test]
-    fn slot_zero_is_hub_centre() {
-        assert_eq!(hub_plot_origin(0), world_center());
+    fn hub_centre_is_reserved_for_the_plaza() {
+        // No player slot may land on the hub centre — that cell is the shared
+        // plaza ([`hub_spawn`]), so plots never overlap it. Slot 0 sits on ring 1.
+        for slot in 0..200u32 {
+            assert_ne!(
+                hub_plot_origin(slot),
+                world_center(),
+                "slot {slot} overlaps the plaza"
+            );
+        }
+        assert_eq!(hub_spawn(), world_center());
     }
 
     #[test]

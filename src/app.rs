@@ -365,11 +365,53 @@ pub const INTERACT_RANGE: f32 = 170.0;
 /// engagement in an expedition.
 const EXPEDITION_CLICK_RADIUS: f32 = 60.0;
 
-/// Catch-stamina regenerated per second while not actively engaging a target.
-const STAMINA_REGEN_PER_SEC: f32 = 45.0;
+/// Cadence of out-of-combat catch-stamina regen: every `STAMINA_REGEN_TICK_SECS`
+/// while not engaging, the pool gains the player's
+/// `CatchStats::stamina_regen_per_tick` — a **stat**, so gear/buffs can raise it
+/// (set its baseline in `catch::CatchStats::base`).
+const STAMINA_REGEN_TICK_SECS: f32 = 1.0;
+/// Per-slot ability cooldowns (seconds), slots = [Net, Lure, Trap].
+const ABILITY_COOLDOWNS: [f32; 3] = [6.0, 8.0, 10.0];
+/// How much closer the camera zooms (× the expedition base) while engaging.
+const ENGAGE_ZOOM_MULT: f32 = 1.6;
 
 /// Most animals that can trail the avatar on the follow chain at once.
 pub const MAX_FOLLOWERS: usize = 10;
+
+/// A floating catch "damage" number that pops off the targeted animal each tick.
+/// Lives in world space (so it pans/zooms with the expedition camera); rendered
+/// as text in the HUD pass with a scale-pop then fade.
+#[derive(Clone, Copy, Debug)]
+pub struct FloatingNumber {
+    /// World-space position (a point on a circle around the animal).
+    pub pos: Vec2,
+    /// Gentle drift (world units/sec) so it floats while fading.
+    pub vel: Vec2,
+    /// The depletion amount shown.
+    pub value: i64,
+    /// Whether this depletion was a critical hit (rendered punchier).
+    pub crit: bool,
+    /// `get_time()` at spawn — drives the pop + fade.
+    pub born: f64,
+}
+
+/// Lifetime of a floating catch number (seconds).
+pub const CATCH_NUMBER_LIFE: f32 = 0.85;
+/// SFX id played when a catch number pops. Drop `catch_tick.wav`/`.ogg` into
+/// `assets/sfx/` to hook a sound in (silent no-op until then).
+pub const CATCH_TICK_SFX: &str = "catch_tick";
+/// World-space radius of the spawn circle around the targeted animal.
+const CATCH_NUMBER_RADIUS: f32 = 70.0;
+
+/// Join/leave appearance tween for one online avatar.
+#[derive(Clone, Copy, Debug)]
+pub struct AvatarFx {
+    /// Animation progress in `[0,1]`: 0 = fully gone, 1 = fully present.
+    pub vis: f32,
+    /// True once the player's pose row has vanished — `vis` is now falling and the
+    /// avatar is removed when it hits ~0.
+    pub leaving: bool,
+}
 
 pub struct GameApp {
     pub zoo: Zoo,
@@ -500,13 +542,24 @@ pub struct GameApp {
     /// `Some`, `peer_zoos` is rebuilt each tick from the subscribed `zoo` rows
     /// and our avatar pose is pushed to the server. `None` for solo/offline play.
     pub online: Option<crate::stdb::client::OnlineClient>,
-    /// Throttle accumulator for online sync (pose push + peer rebuild).
+    /// Throttle accumulator for online sync (peer-zoo rebuild + zoo reconcile).
     pub online_timer: f32,
+    /// Throttle accumulator for pushing our avatar pose to the server (runs both
+    /// on the hub and inside an expedition, so partymates see us move there too).
+    pub online_pose_timer: f32,
     /// Other players' avatars on the hub, keyed by a stable per-identity UUID.
     /// Their target positions come from the subscribed `avatar_pose` rows
     /// (refreshed in `sync_online`); each frame they *walk* toward the target via
     /// the normal avatar system, so remote players animate naturally.
     pub online_avatars: HashMap<Uuid, crate::game::avatar::PlayerAvatar>,
+    /// Per-online-avatar appearance tween in `[0,1]`: rises toward 1 on join,
+    /// falls toward 0 on leave (the avatar is removed once it reaches ~0). Drives
+    /// the pop-in / shrink-out scale. Keyed like [`online_avatars`]; a `leaving`
+    /// flag marks avatars whose pose row has vanished and are animating out.
+    pub online_avatar_fx: HashMap<Uuid, AvatarFx>,
+    /// Party capture-toast `event_id`s we've already shown, so each fires once.
+    /// Pruned to the server's live event set each poll so it stays bounded.
+    pub shown_capture_events: std::collections::HashSet<u64>,
     /// While online, the player's authoritative zoo lives on the server: `self.zoo`
     /// is downloaded from (and reconciled against) our server row, mutations are
     /// forwarded as `apply_action` reducer calls, and local JSON saving is paused.
@@ -520,6 +573,10 @@ pub struct GameApp {
     /// from the hub. `None` while at the hub. Drives the new target→engage catch
     /// loop; see [`crate::expedition::Expedition`].
     pub expedition: Option<crate::expedition::Expedition>,
+    /// While online, the theme we asked the server to put us in via
+    /// `enter_expedition`, pending the instance row (with its authoritative seed)
+    /// arriving so we can build the matching local instance. Cleared on launch.
+    pub online_expedition_pending: Option<crate::game::species::HabitatTheme>,
     /// The avatar's hub position saved on expedition launch, restored on return
     /// (the avatar physically enters the instance's coordinate space).
     pub expedition_return_pos: Option<Vec2>,
@@ -530,6 +587,24 @@ pub struct GameApp {
     /// Equipped catch loadout (in-memory starter kit for now; persistence lands
     /// with the wider gear economy). Feeds the engagement's catch stats.
     pub loadout: crate::game::gear::Loadout,
+    /// Extra active stat modifiers folded into [`GameApp::catch_stats`] on top of
+    /// gear + collection — temporary buffs, collection-milestone effects, event
+    /// bonuses, etc. Empty for now; this is the hook to push such effects into.
+    pub catch_buffs: Vec<crate::game::catch::CatchMods>,
+    /// Accumulator for **tick-rate** stamina regen (stepped, not continuous).
+    pub stamina_regen_accum: f32,
+    /// Per-slot ability cooldown remaining (seconds), slots = [Net, Lure, Trap].
+    pub ability_cooldowns: [f32; 3],
+    /// The expedition's base camera zoom (captured at launch); engaging zooms in
+    /// a multiple of this and reverts to it on disengage.
+    pub expedition_base_zoom: f32,
+    /// Optional custom UI font (Bebas Neue) loaded from `assets/fonts/`; `None`
+    /// falls back to the macroquad default font.
+    pub font: Option<macroquad::text::Font>,
+    /// Live floating catch "damage" numbers (expedition only).
+    pub catch_numbers: Vec<FloatingNumber>,
+    /// The engaged target's `contribution` last frame, to detect per-tick damage.
+    pub last_catch_contribution: f32,
 }
 
 /// Far-out zoom floor allowed only in biome-debug mode, so the whole 500k
@@ -557,6 +632,17 @@ const SHAKE_AMPLITUDE: f32 = 14.0;
 const SNAPSHOT_BROADCAST_INTERVAL: f32 = 2.0;
 
 impl GameApp {
+    /// Seed used to paint the ground (biome tint, grass, terrain scatter). Offline
+    /// each save uses its own `world_seed`; **online** every player must see the
+    /// *same* shared hub, so we render from the fixed [`plot::HUB_SEED`].
+    pub fn ground_seed(&self) -> u64 {
+        if self.online.is_some() {
+            crate::game::plot::HUB_SEED
+        } else {
+            self.zoo.world_seed
+        }
+    }
+
     pub fn new(zoo: Zoo, repo: Arc<JsonFileRepository>, last_modtime: SystemTime) -> Self {
         let critters = critters_from_zoo(&zoo);
         let npcs = crate::game::npc::default_npcs(zoo.plot_origin, zoo.plot_half_extent());
@@ -613,14 +699,67 @@ impl GameApp {
             peer_zoos: HashMap::new(),
             online: None,
             online_timer: 0.0,
+            online_pose_timer: 0.0,
             online_avatars: HashMap::new(),
+            online_avatar_fx: HashMap::new(),
+            shown_capture_events: std::collections::HashSet::new(),
             online_solo_backup: None,
             online_downloaded: false,
             expedition: None,
+            online_expedition_pending: None,
             expedition_return_pos: None,
             stamina: crate::game::catch::CatchStats::default().max_stamina,
             loadout: crate::game::gear::Loadout::starter(),
+            catch_buffs: Vec::new(),
+            stamina_regen_accum: 0.0,
+            ability_cooldowns: [0.0; 3],
+            expedition_base_zoom: 1.0,
+            font: crate::render::textures::ui_font(),
+            catch_numbers: Vec::new(),
+            last_catch_contribution: 0.0,
         }
+    }
+
+    /// Spawn one floating "damage" number at a random point on a circle around the
+    /// targeted animal (`center`), with a small ±5° angular jitter. Also fires the
+    /// catch-tick SFX hook.
+    fn spawn_catch_number(&mut self, center: Vec2, value: f32, crit: bool) {
+        let base = rand::gen_range(0.0, std::f32::consts::TAU);
+        let jitter = rand::gen_range(-1.0_f32, 1.0) * (5.0_f32).to_radians();
+        let a = base + jitter;
+        let dir = vec2(a.cos(), a.sin());
+        self.catch_numbers.push(FloatingNumber {
+            pos: center + dir * CATCH_NUMBER_RADIUS,
+            vel: vec2(0.0, -55.0), // gentle upward drift
+            value: value.round().max(1.0) as i64,
+            crit,
+            born: get_time(),
+        });
+        // Bound the pool so a long catch can't grow it without limit.
+        if self.catch_numbers.len() > 64 {
+            self.catch_numbers.remove(0);
+        }
+        self.sounds.play(CATCH_TICK_SFX);
+    }
+
+    /// Age + prune floating catch numbers (expedition only).
+    fn update_catch_numbers(&mut self, dt: f32) {
+        let now = get_time();
+        for n in &mut self.catch_numbers {
+            n.pos += n.vel * dt;
+        }
+        self.catch_numbers
+            .retain(|n| (now - n.born) as f32 <= CATCH_NUMBER_LIFE);
+    }
+
+    /// Cooldown fraction `[0,1]` of ability `slot` (1 = just used, 0 = ready),
+    /// for the skill-slot radial timer.
+    pub fn ability_cooldown_frac(&self, slot: usize) -> f32 {
+        let max = ABILITY_COOLDOWNS.get(slot).copied().unwrap_or(0.0);
+        if max <= 0.0 {
+            return 0.0;
+        }
+        (self.ability_cooldowns.get(slot).copied().unwrap_or(0.0) / max).clamp(0.0, 1.0)
     }
 
     /// The local player's current catch stats, summed from their equipped
@@ -629,26 +768,38 @@ impl GameApp {
     pub fn catch_stats(&self) -> crate::game::catch::CatchStats {
         let distinct = self.zoo.animals.len();
         let rank_sum: u32 = self.zoo.animals.values().map(|a| a.stage as u32).sum();
-        crate::game::gear::catch_stats(&self.loadout, distinct, rank_sum)
+        crate::game::gear::catch_stats(&self.loadout, distinct, rank_sum, &self.catch_buffs)
+    }
+
+    /// The local player's **Power Score** — a progression metric derived from
+    /// their owned animals (breadth + rarity + rank + level). Gates region access;
+    /// see [`crate::game::power`]. Derived on demand (like [`GameApp::catch_stats`]).
+    pub fn power_score(&self) -> u64 {
+        crate::game::power::power_score(&self.zoo)
     }
 
     /// F6 / board interaction toggle: while on an expedition, return to the hub;
     /// otherwise open the expedition board to pick a biome.
     fn toggle_expedition(&mut self) {
-        if self.expedition.is_some() {
+        if self.expedition.is_some() || self.online_expedition_pending.is_some() {
             self.return_from_expedition();
-        } else if self.online.is_some() {
-            // Expeditions are solo-instanced; mixing them with the live online
-            // session would diverge from the server-authoritative zoo. Gate them
-            // off while online (party instances are a later phase).
-            self.set_status("Go offline (F7) to launch expeditions");
         } else {
+            // Online or solo, the board picks a biome; online routes through the
+            // server (party-shared instances), solo launches a local one.
             self.set_screen(Screen::ExpeditionBoard);
         }
     }
 
-    /// Return to the hub: drop the instance and teleport the avatar back.
+    /// Return to the hub: drop the instance and teleport the avatar back. Online,
+    /// also tell the server we've left (keeps the shared instance population /
+    /// rejoin window correct).
     fn return_from_expedition(&mut self) {
+        if let Some(online) = self.online.as_ref() {
+            let _ = online.leave_expedition();
+        }
+        self.online_expedition_pending = None;
+        self.catch_numbers.clear();
+        self.last_catch_contribution = 0.0;
         if self.expedition.take().is_none() {
             return;
         }
@@ -673,8 +824,38 @@ impl GameApp {
         self.shown_menu = Screen::World;
         self.menu_t = 0.0;
 
-        let screen = vec2(screen_width(), screen_height());
+        // Access gate: Power Score must meet the region requirement. Enforced here
+        // for solo + instant online UX; the server re-checks authoritatively in
+        // `enter_expedition`.
+        if let Some(msg) = crate::game::power::gate_error(self.power_score(), theme) {
+            self.set_status(msg);
+            return;
+        }
+
+        // Online: ask the server to place us in (or resume) the party-shared
+        // instance for this theme. We build the matching local instance once its
+        // authoritative seed arrives (see `sync_online_expedition`).
+        if let Some(online) = self.online.as_ref() {
+            if let Err(e) = online.enter_expedition(theme.name()) {
+                self.set_status(format!("Expedition failed: {e}"));
+                return;
+            }
+            self.expedition_return_pos = Some(self.session.my_avatar().pos);
+            self.online_expedition_pending = Some(theme);
+            self.set_status(format!("Entering {} expedition…", theme.name()));
+            return;
+        }
+
+        // Solo: launch a fresh, randomly-seeded local instance.
         let seed = ((rand::rand() as u64) << 32) | rand::rand() as u64;
+        self.launch_local_expedition(theme, seed);
+    }
+
+    /// Build the local [`Expedition`] for `theme`/`seed` and drop the avatar into
+    /// the arena. Shared by solo launch and the online path (where `seed` is the
+    /// server's authoritative instance seed, so every member arranges identically).
+    fn launch_local_expedition(&mut self, theme: crate::game::species::HabitatTheme, seed: u64) {
+        let screen = vec2(screen_width(), screen_height());
         let exp = crate::expedition::Expedition::launch(theme, seed);
         let n = exp.instance.remaining();
         let center = vec2(exp.instance.size.x * 0.5, exp.instance.size.y * 0.5);
@@ -688,6 +869,12 @@ impl GameApp {
             a.vel = vec2(0.0, 0.0);
         }
         self.expedition = Some(exp);
+        // Remember the roaming zoom so engaging can zoom in relative to it.
+        self.expedition_base_zoom = self.camera.zoom;
+        self.zoom_target = self.camera.zoom;
+        self.ability_cooldowns = [0.0; 3];
+        self.catch_numbers.clear();
+        self.last_catch_contribution = 0.0;
         self.camera.snap_to(center, screen);
         self.set_status(format!(
             "Expedition: {} ({n} animals) — walk freely · left-click an animal to engage · 1 net · 2 lure · 3 trap · Space skill-check · F6 leave",
@@ -731,35 +918,85 @@ impl GameApp {
                     .map(|(_, id)| id)
             });
             if let Some(id) = hit {
-                if let Some(exp) = self.expedition.as_mut() {
-                    exp.engage(id);
-                    self.set_status("Engaging — deplete its catch bar");
+                let prev = self.expedition.as_ref().and_then(|e| e.target);
+                // Clicking the animal you're ALREADY engaging is a no-op — don't
+                // re-engage (that would reset its catch bar). Only (re)engage when
+                // switching to a different target.
+                if prev != Some(id) {
+                    if let Some(exp) = self.expedition.as_mut() {
+                        exp.engage(id);
+                        self.set_status("Engaging — deplete its catch bar");
+                    }
+                    if let Some(online) = self.online.as_ref() {
+                        // Drop participation in the previous target, then join this one.
+                        if let Some(p) = prev {
+                            let _ = online.release_animal(&p.to_string());
+                        }
+                        let _ = online.engage_animal(&id.to_string());
+                    }
                 }
             }
         }
-        if let Some(exp) = self.expedition.as_mut() {
-            if is_key_pressed(KeyCode::Key1) {
-                exp.use_ability(AbilityKind::Net, &stats);
+        // Abilities (slots 0..3) are gated by per-slot cooldowns; using one starts
+        // its cooldown (the skill-slot UI shows a radial timer).
+        let slots = [
+            (KeyCode::Key1, AbilityKind::Net),
+            (KeyCode::Key2, AbilityKind::Lure),
+            (KeyCode::Key3, AbilityKind::Trap),
+        ];
+        for (slot, (key, kind)) in slots.into_iter().enumerate() {
+            if is_key_pressed(key) && self.ability_cooldowns[slot] <= 0.0 {
+                // Abilities require an engaged target — no target, no use (and no
+                // cooldown burned).
+                let used = self
+                    .expedition
+                    .as_mut()
+                    .map(|exp| {
+                        if exp.is_engaging() {
+                            exp.use_ability(kind, &stats);
+                            true
+                        } else {
+                            false
+                        }
+                    })
+                    .unwrap_or(false);
+                if used {
+                    self.ability_cooldowns[slot] = ABILITY_COOLDOWNS[slot];
+                } else if self.expedition.as_ref().is_some_and(|e| !e.is_engaging()) {
+                    self.set_status("Select a target first to use abilities");
+                }
             }
-            if is_key_pressed(KeyCode::Key2) {
-                exp.use_ability(AbilityKind::Lure, &stats);
-            }
-            if is_key_pressed(KeyCode::Key3) {
-                exp.use_ability(AbilityKind::Trap, &stats);
-            }
-            if is_key_pressed(KeyCode::Space) {
+        }
+        if is_key_pressed(KeyCode::Space) {
+            if let Some(exp) = self.expedition.as_mut() {
                 exp.hit_skill_check(&stats);
             }
         }
 
-        // Stamina: regenerate between catches, but not while actively engaging
-        // (the catch tick drains it). Clamp to the progression-scaled max.
+        // Tick down ability cooldowns.
+        for c in &mut self.ability_cooldowns {
+            *c = (*c - dt).max(0.0);
+        }
+
+        // Stamina: regenerate between catches in discrete **ticks** (not smooth),
+        // but never while actively engaging (the catch tick drains it).
         let max_stamina = stats.max_stamina;
         let engaging = self.expedition.as_ref().is_some_and(|e| e.is_engaging());
-        if !engaging {
-            self.stamina = (self.stamina + STAMINA_REGEN_PER_SEC * dt).min(max_stamina);
+        if engaging {
+            self.stamina_regen_accum = 0.0;
+        } else {
+            self.stamina_regen_accum += dt;
+            while self.stamina_regen_accum >= STAMINA_REGEN_TICK_SECS {
+                self.stamina_regen_accum -= STAMINA_REGEN_TICK_SECS;
+                // Per-tick regen is now a player stat (gear/buffs can raise it).
+                self.stamina = (self.stamina + stats.stamina_regen_per_tick).min(max_stamina);
+            }
         }
         self.stamina = self.stamina.min(max_stamina);
+
+        // The animal we're about to resolve (tick clears `target` on capture, so
+        // grab its id first for the online capture call).
+        let engaged_id = self.expedition.as_ref().and_then(|e| e.target);
 
         // Advance the engagement (spending stamina) and resolve the outcome.
         let result = {
@@ -768,13 +1005,45 @@ impl GameApp {
         };
         match result {
             Some(crate::expedition::CatchResult::Captured(species)) => {
-                self.grant_expedition_capture(species, now);
+                if self.online.is_some() {
+                    // Server-authoritative grant: the reducer validates the animal
+                    // is still in our shared instance, removes it, and adds it to
+                    // our server zoo (reflected back via `sync_online`). If a
+                    // partymate beat us the reducer rejects — harmless.
+                    if let (Some(online), Some(id)) = (self.online.as_ref(), engaged_id) {
+                        let _ = online.capture_animal(&id.to_string());
+                    }
+                    let name = species::get(species).display_name;
+                    self.sounds.play("income_sfx");
+                    self.push_notification(name, "Captured!", NotifIcon::Animal(species));
+                    self.set_status(format!("Captured {name}!"));
+                } else {
+                    self.grant_expedition_capture(species, now);
+                }
             }
             Some(crate::expedition::CatchResult::Exhausted) => {
                 self.set_status("Out of stamina! Rest, upgrade your collection, or try an easier animal");
             }
             _ => {}
         }
+
+        // Floating "damage" numbers: whenever the engaged target lost resistance
+        // this frame (stat tick, ability, or skill-check hit), pop a number off it.
+        // We diff the engagement's `contribution` to get the amount depleted.
+        match self.expedition.as_ref().and_then(|e| e.engagement.as_ref()).map(|eng| (eng.contribution, eng.last_hit_crit)) {
+            Some((cur, crit)) => {
+                let delta = cur - self.last_catch_contribution;
+                if delta >= 0.5 {
+                    if let Some(center) = self.expedition.as_ref().and_then(|e| e.target_pos()) {
+                        self.spawn_catch_number(center, delta, crit);
+                    }
+                }
+                self.last_catch_contribution = cur;
+            }
+            // No live engagement (idle, switched, or just captured) — reset baseline.
+            None => self.last_catch_contribution = 0.0,
+        }
+        self.update_catch_numbers(dt);
     }
 
     /// Tame an expedition catch into the hub zoo (mirrors `resolve_catch`'s zoo
@@ -795,6 +1064,72 @@ impl GameApp {
                 self.set_status(format!("Captured {name}! {left} left in the expedition"));
             }
             Err(e) => self.set_status(format!("Capture failed: {e}")),
+        }
+    }
+
+    /// Show a toast for any new party capture event addressed to us (a partymate
+    /// caught something). Each `event_id` fires once; the shown-set is pruned to
+    /// the server's live events so it stays small. No-op solo/offline.
+    fn poll_capture_events(&mut self) {
+        let Some(online) = self.online.as_ref() else {
+            if !self.shown_capture_events.is_empty() {
+                self.shown_capture_events.clear();
+            }
+            return;
+        };
+        let events = online.my_capture_events();
+        let live: std::collections::HashSet<u64> = events.iter().map(|(id, _, _)| *id).collect();
+        let mut toasts: Vec<(String, String, species::SpeciesId)> = Vec::new();
+        for (id, catcher, sp) in events {
+            if self.shown_capture_events.insert(id) {
+                if let Some(def) = species::try_get(&sp) {
+                    toasts.push((def.display_name.to_string(), format!("{catcher} caught it!"), def.id));
+                }
+            }
+        }
+        // Forget ids the server has already pruned so the set can't grow forever.
+        self.shown_capture_events.retain(|id| live.contains(id));
+        for (title, sub, id) in toasts {
+            self.push_notification(title, sub, NotifIcon::Animal(id));
+        }
+    }
+
+    /// Online expedition reconciliation (per frame). Completes a pending launch
+    /// once the server's instance row (with its authoritative seed) is visible,
+    /// and prunes our local instance to the server's still-alive animal set so a
+    /// partymate's catch removes the animal for us too. No-op solo/offline.
+    fn sync_online_expedition(&mut self) {
+        if self.online.is_none() {
+            self.online_expedition_pending = None;
+            return;
+        }
+
+        // 1. Pending launch → build the matching local instance from the seed.
+        if let Some(theme) = self.online_expedition_pending {
+            let seed = self.online.as_ref().and_then(|o| o.my_instance()).map(|(_, _, s)| s);
+            if let Some(seed) = seed {
+                self.online_expedition_pending = None;
+                self.launch_local_expedition(theme, seed);
+            }
+            return;
+        }
+
+        // 2. Reconcile an active instance against the server's authoritative set.
+        if self.expedition.is_some() {
+            let alive = self
+                .online
+                .as_ref()
+                .and_then(|o| o.my_instance().map(|(id, _, _)| o.instance_alive_uuids(id)));
+            if let Some(alive) = alive {
+                if let Some(exp) = self.expedition.as_mut() {
+                    exp.instance.animals.retain(|a| alive.contains(&a.id.to_string()));
+                    if let Some(t) = exp.target {
+                        if !alive.contains(&t.to_string()) {
+                            exp.cancel(); // our target was caught by someone else
+                        }
+                    }
+                }
+            }
         }
     }
 
@@ -831,6 +1166,25 @@ impl GameApp {
     /// SpacetimeDB connection, join the hub (server assigns our plot slot), and
     /// thereafter mirror every other player's plot into `peer_zoos` each tick.
     /// Offline play is untouched — this is purely additive.
+    /// The **stable** online identity for this player: `(player_key, display_name)`.
+    /// With the `steam` feature we use the real SteamID + persona name, so the same
+    /// Steam account always reuses the same server account (no duplicates). Without
+    /// Steam we fall back to the save's persistent `player.id` — stable for this
+    /// install — and the local player name. (Trusted client-side for now; a Steam
+    /// auth-ticket check on the server comes later.)
+    fn online_identity(&self) -> (String, String) {
+        #[cfg(feature = "steam")]
+        {
+            if let Some((key, name)) = crate::net::steam::online_identity() {
+                return (key, name);
+            }
+        }
+        (
+            format!("local:{}", self.zoo.player.id),
+            self.zoo.player.name.clone(),
+        )
+    }
+
     fn toggle_online(&mut self, now: DateTime<Utc>) {
         if self.online.is_some() {
             if let Some(o) = self.online.take() {
@@ -838,6 +1192,7 @@ impl GameApp {
             }
             self.peer_zoos.clear();
             self.online_avatars.clear();
+            self.online_avatar_fx.clear();
             self.online_downloaded = false;
             // Restore the offline/solo zoo we set aside on going online.
             if let Some(snap) = self.online_solo_backup.take() {
@@ -854,9 +1209,10 @@ impl GameApp {
         }
         // Clear any F4 debug neighbour so it doesn't mix with real peers.
         self.peer_zoos.clear();
-        match crate::stdb::client::OnlineClient::connect_maincloud() {
+        let (player_key, name) = self.online_identity();
+        match crate::stdb::client::OnlineClient::connect_maincloud(&player_key, &name) {
             Ok(client) => {
-                let _ = client.join_hub(&self.zoo.player.name);
+                let _ = client.join_hub();
                 // Set the solo zoo aside; while online `self.zoo` is the server's
                 // authoritative copy, downloaded on the first sync.
                 self.online_solo_backup = Some(crate::persistence::snapshot_from_zoo(&self.zoo));
@@ -882,12 +1238,12 @@ impl GameApp {
         }
         self.online_timer = 0.2; // ~5 Hz pose + peer refresh
 
-        let pos = self.session.my_avatar().pos;
-        // Pull the data out under a short borrow, then mutate game state.
-        let (my_id, rows) = {
+        // Pull the data out under a short borrow, then mutate game state. (Pose
+        // pushing now lives in `update_online_avatars` so it also runs inside an
+        // expedition.)
+        let (my_key, rows) = {
             let o = self.online.as_ref().unwrap();
-            let _ = o.move_avatar(pos.x, pos.y);
-            (o.identity(), o.zoos())
+            (o.my_key().to_string(), o.zoos())
         };
 
         let mut peers: HashMap<Uuid, Zoo> = HashMap::new();
@@ -901,7 +1257,7 @@ impl GameApp {
             };
             let mut zoo = loaded.zoo;
             zoo.plot_origin = vec2(z.plot.0, z.plot.1);
-            if Some(z.owner) == my_id {
+            if z.owner_key == my_key {
                 mine = Some(zoo); // our authoritative server zoo
             } else {
                 peers.insert(zoo.player.id, zoo);
@@ -913,15 +1269,104 @@ impl GameApp {
         // also relocate the avatar + camera onto our assigned plot.
         if let Some(server_zoo) = mine {
             let first = !self.online_downloaded;
-            let home = server_zoo.plot_origin;
             self.zoo = server_zoo;
             self.sync_critters();
             if first {
                 self.online_downloaded = true;
-                self.teleport_to(home);
+                // Land everyone on the shared central plaza (not their own far-flung
+                // plot) so players meet immediately and can see each other.
+                self.teleport_to(crate::game::plot::hub_spawn());
                 self.set_status("Online — you're on the shared hub (F7 to leave)");
             }
         }
+    }
+
+    /// Party hotkeys on the hub (online only). G invites the nearest player in
+    /// range, Y/N accept/decline the oldest pending invite, P leaves the party.
+    /// Cheap polling against the subscribed cache.
+    fn handle_party_keys(&mut self) {
+        // All reducer calls + cache reads happen under a short immutable borrow of
+        // `self.online`; we record a status message and apply it afterwards so we
+        // never hold that borrow across the `&mut self` `set_status` call.
+        let me_pos = self.session.my_avatar().pos;
+        let status: Option<&'static str> = {
+            let Some(online) = self.online.as_ref() else {
+                return;
+            };
+            let mut status = None;
+
+            // G — invite the nearest other avatar (server re-checks the range).
+            if is_key_pressed(KeyCode::G) {
+                let me_key = online.my_key();
+                let nearest = online
+                    .avatar_poses()
+                    .into_iter()
+                    .filter(|(owner_key, _, _)| owner_key != me_key)
+                    .map(|(owner_key, x, y)| (owner_key, vec2(x, y).distance(me_pos)))
+                    .min_by(|a, b| a.1.total_cmp(&b.1));
+                status = Some(match nearest {
+                    Some((owner_key, dist)) if dist <= crate::game::plot::PARTY_INVITE_RANGE => {
+                        let _ = online.invite_to_party(&owner_key);
+                        "Party invite sent"
+                    }
+                    Some(_) => "No one close enough to invite",
+                    None => "No other players on the hub",
+                });
+            }
+
+            // Y / N — respond to the oldest invite addressed to us.
+            if is_key_pressed(KeyCode::Y) {
+                if let Some((invite_id, _from)) = online.my_invites().into_iter().next() {
+                    let _ = online.accept_party_invite(invite_id);
+                    status = Some("Joined party");
+                }
+            }
+            if is_key_pressed(KeyCode::N) {
+                if let Some((invite_id, _from)) = online.my_invites().into_iter().next() {
+                    let _ = online.decline_party_invite(invite_id);
+                    status = Some("Declined invite");
+                }
+            }
+
+            // P — leave the current party.
+            if is_key_pressed(KeyCode::P) && online.my_party().is_some() {
+                let _ = online.leave_party();
+                status = Some("Left party");
+            }
+
+            status
+        };
+
+        if let Some(msg) = status {
+            self.set_status(msg);
+        }
+    }
+
+    /// Hub warp hotkey (online only): H toggles between the shared central plaza
+    /// (where players meet) and your own zoo plot (where your nests, food
+    /// structures, and captured animals live). Online your zoo is server-
+    /// authoritative and sits at your assigned `plot_origin`, which is generally
+    /// far from the plaza — this is the "way back" to manage it.
+    fn handle_warp_keys(&mut self) {
+        if !is_key_pressed(KeyCode::H) {
+            return;
+        }
+        // Don't warp while typing in a field or a modal world-overlay owns input.
+        let modal = self.depositing.is_some() || self.dedicating.is_some() || self.placing.is_some();
+        if self.capturing_text_input() || modal {
+            return;
+        }
+        let plaza = crate::game::plot::hub_spawn();
+        let home = self.zoo.plot_origin;
+        let here = self.session.my_avatar().pos;
+        // If we're already near home, go to the plaza; otherwise go home.
+        let (dest, msg) = if here.distance(home) < here.distance(plaza) {
+            (plaza, "Warped to the shared plaza")
+        } else {
+            (home, "Warped to your zoo (H to return to the plaza)")
+        };
+        self.teleport_to(dest);
+        self.set_status(msg);
     }
 
     /// Per-frame: walk each remote avatar toward its latest subscribed pose, so
@@ -929,21 +1374,36 @@ impl GameApp {
     /// normal avatar movement system (bob, facing, dash ghosts) for free. No-op
     /// offline.
     fn update_online_avatars(&mut self, dt: f32) {
-        let Some(online) = self.online.as_ref() else {
+        if self.online.is_none() {
             if !self.online_avatars.is_empty() {
                 self.online_avatars.clear();
+                self.online_avatar_fx.clear();
             }
             return;
+        }
+
+        // Throttled pose push (so partymates see us move, on the hub *and* inside
+        // an instance), then gather only peers sharing our current space.
+        self.online_pose_timer -= dt;
+        let push = self.online_pose_timer <= 0.0;
+        if push {
+            self.online_pose_timer = 0.15;
+        }
+        let my_pos = self.session.my_avatar().pos;
+        let targets = {
+            let online = self.online.as_ref().unwrap();
+            if push {
+                let _ = online.move_avatar(my_pos.x, my_pos.y);
+            }
+            let my_space = online.my_instance().map(|(id, _, _)| id);
+            online.peer_targets_in_space(my_space)
         };
-        let targets = online.peer_avatar_targets();
-
-        // Drop avatars whose player is no longer present.
         let live: std::collections::HashSet<Uuid> = targets.iter().map(|(k, _)| *k).collect();
-        self.online_avatars.retain(|k, _| live.contains(k));
 
-        // Remote avatars don't collide against our local habitats.
-        let world = avatar_system::World { habitats: &[] };
-        for (key, target) in targets {
+        // Pop in / walk live avatars toward their latest pose.
+        let world = avatar_system::World { habitats: &[] }; // no collision vs local habitats
+        for (key, target) in &targets {
+            let (key, target) = (*key, *target);
             let avatar = self
                 .online_avatars
                 .entry(key)
@@ -960,7 +1420,23 @@ impl GameApp {
                 actions: crate::input::ActionFlags::NONE,
             };
             avatar_system::step(avatar, &intent, &world, dt, &self.behaviors);
+
+            // Tween toward present; clear any leaving state if they reappeared.
+            let fx = self.online_avatar_fx.entry(key).or_insert(AvatarFx { vis: 0.0, leaving: false });
+            fx.leaving = false;
+            fx.vis = (fx.vis + dt * AVATAR_FX_SPEED).min(1.0);
         }
+
+        // Shrink out avatars whose pose row vanished; remove once fully gone.
+        const AVATAR_FX_SPEED: f32 = 5.0;
+        for (key, fx) in self.online_avatar_fx.iter_mut() {
+            if !live.contains(key) {
+                fx.leaving = true;
+                fx.vis = (fx.vis - dt * AVATAR_FX_SPEED).max(0.0);
+            }
+        }
+        self.online_avatar_fx.retain(|_, fx| !(fx.leaving && fx.vis <= 0.001));
+        self.online_avatars.retain(|k, _| self.online_avatar_fx.contains_key(k));
     }
 
     /// Attempt to join a friend's hosted zoo by `code`. Today this requires
@@ -1460,6 +1936,22 @@ impl GameApp {
         if is_key_pressed(KeyCode::F7) {
             self.toggle_online(now);
         }
+        // Party controls (online only): G invite nearest, Y/N accept/decline an
+        // invite, P leave party.
+        if self.online.is_some() {
+            self.handle_party_keys();
+            self.handle_warp_keys();
+        }
+        // Online: complete a pending expedition launch once the server instance
+        // arrives, and reconcile our instance's animals against the shared set.
+        self.sync_online_expedition();
+        // Party capture toasts (a partymate caught something).
+        self.poll_capture_events();
+
+        // Push our pose + animate same-space peers (works on the hub and inside an
+        // instance — `update_online_avatars` filters peers to our current space).
+        self.update_online_avatars(get_frame_time());
+
         if self.expedition.is_some() {
             self.update_expedition(now);
 
@@ -1474,9 +1966,14 @@ impl GameApp {
                 };
                 self.controller.sample(&ctx)
             };
-            // No dashing while engaged in a catch (it's a stationary stat check).
+            // No dashing while engaged in a catch (it's a stationary stat check):
+            // strip the dash intent AND cancel any dash already in flight.
             if self.expedition.as_ref().is_some_and(|e| e.is_engaging()) {
                 local_intent.actions.0 &= !crate::input::ActionFlags::DASH.0;
+                let id = self.session.local_player_id;
+                if let Some(a) = self.session.avatars.get_mut(&id) {
+                    a.dash_time = 0.0;
+                }
             }
             {
                 let world = avatar_system::World { habitats: &self.zoo.habitats };
@@ -1492,19 +1989,25 @@ impl GameApp {
                 a.pos.x = a.pos.x.clamp(0.0, size.x);
                 a.pos.y = a.pos.y.clamp(0.0, size.y);
             }
+            // Camera focus: while engaging an animal, lerp to it and zoom in a bit
+            // closer; otherwise track the player at the base expedition zoom.
+            let engaged_pos = self
+                .expedition
+                .as_ref()
+                .filter(|e| e.is_engaging())
+                .and_then(|e| e.target_pos());
+            let (focus, zoom_t) = match engaged_pos {
+                Some(tp) => (tp, self.expedition_base_zoom * ENGAGE_ZOOM_MULT),
+                None => (self.session.my_avatar().pos, self.expedition_base_zoom),
+            };
+            self.zoom_target = zoom_t;
             self.apply_smooth_zoom(dt);
-            self.camera.follow(
-                self.session.my_avatar().pos,
-                vec2(screen_width(), screen_height()),
-                dt,
-                8.0,
-            );
+            self.camera.follow(focus, vec2(screen_width(), screen_height()), dt, 6.0);
             return;
         }
 
-        // Hub only: mirror online peers' plots into `peer_zoos` and push our pose.
+        // Hub only: mirror online peers' plots into `peer_zoos` + reconcile our zoo.
         self.sync_online(get_frame_time());
-        self.update_online_avatars(get_frame_time());
 
         let mp = mouse_position();
         let mouse = vec2(mp.0, mp.1);

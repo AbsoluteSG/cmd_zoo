@@ -7,6 +7,7 @@ use spacetimedb_sdk::__codegen::{self as __sdk, __lib, __sats, __ws};
 #[derive(__lib::ser::Serialize, __lib::de::Deserialize, Clone, PartialEq, Debug)]
 #[sats(crate = __lib)]
 pub struct Account {
+    pub player_key: String,
     pub identity: __sdk::Identity,
     pub slot: u64,
     pub name: String,
@@ -21,6 +22,7 @@ impl __sdk::InModule for Account {
 ///
 /// Provides typed access to columns for query building.
 pub struct AccountCols {
+    pub player_key: __sdk::__query_builder::Col<Account, String>,
     pub identity: __sdk::__query_builder::Col<Account, __sdk::Identity>,
     pub slot: __sdk::__query_builder::Col<Account, u64>,
     pub name: __sdk::__query_builder::Col<Account, String>,
@@ -31,6 +33,7 @@ impl __sdk::__query_builder::HasCols for Account {
     type Cols = AccountCols;
     fn cols(table_name: &'static str) -> Self::Cols {
         AccountCols {
+            player_key: __sdk::__query_builder::Col::new(table_name, "player_key"),
             identity: __sdk::__query_builder::Col::new(table_name, "identity"),
             slot: __sdk::__query_builder::Col::new(table_name, "slot"),
             name: __sdk::__query_builder::Col::new(table_name, "name"),
@@ -44,6 +47,7 @@ impl __sdk::__query_builder::HasCols for Account {
 /// Provides typed access to indexed columns for query building.
 pub struct AccountIxCols {
     pub identity: __sdk::__query_builder::IxCol<Account, __sdk::Identity>,
+    pub player_key: __sdk::__query_builder::IxCol<Account, String>,
 }
 
 impl __sdk::__query_builder::HasIxCols for Account {
@@ -51,6 +55,7 @@ impl __sdk::__query_builder::HasIxCols for Account {
     fn ix_cols(table_name: &'static str) -> Self::IxCols {
         AccountIxCols {
             identity: __sdk::__query_builder::IxCol::new(table_name, "identity"),
+            player_key: __sdk::__query_builder::IxCol::new(table_name, "player_key"),
         }
     }
 }

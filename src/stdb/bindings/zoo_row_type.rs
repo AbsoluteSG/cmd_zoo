@@ -7,11 +7,12 @@ use spacetimedb_sdk::__codegen::{self as __sdk, __lib, __sats, __ws};
 #[derive(__lib::ser::Serialize, __lib::de::Deserialize, Clone, PartialEq, Debug)]
 #[sats(crate = __lib)]
 pub struct ZooRow {
-    pub owner: __sdk::Identity,
+    pub owner_key: String,
     pub slot: u64,
     pub plot_x: f32,
     pub plot_y: f32,
     pub coins: u64,
+    pub power_score: u64,
     pub snapshot_json: String,
 }
 
@@ -23,11 +24,12 @@ impl __sdk::InModule for ZooRow {
 ///
 /// Provides typed access to columns for query building.
 pub struct ZooRowCols {
-    pub owner: __sdk::__query_builder::Col<ZooRow, __sdk::Identity>,
+    pub owner_key: __sdk::__query_builder::Col<ZooRow, String>,
     pub slot: __sdk::__query_builder::Col<ZooRow, u64>,
     pub plot_x: __sdk::__query_builder::Col<ZooRow, f32>,
     pub plot_y: __sdk::__query_builder::Col<ZooRow, f32>,
     pub coins: __sdk::__query_builder::Col<ZooRow, u64>,
+    pub power_score: __sdk::__query_builder::Col<ZooRow, u64>,
     pub snapshot_json: __sdk::__query_builder::Col<ZooRow, String>,
 }
 
@@ -35,11 +37,12 @@ impl __sdk::__query_builder::HasCols for ZooRow {
     type Cols = ZooRowCols;
     fn cols(table_name: &'static str) -> Self::Cols {
         ZooRowCols {
-            owner: __sdk::__query_builder::Col::new(table_name, "owner"),
+            owner_key: __sdk::__query_builder::Col::new(table_name, "owner_key"),
             slot: __sdk::__query_builder::Col::new(table_name, "slot"),
             plot_x: __sdk::__query_builder::Col::new(table_name, "plot_x"),
             plot_y: __sdk::__query_builder::Col::new(table_name, "plot_y"),
             coins: __sdk::__query_builder::Col::new(table_name, "coins"),
+            power_score: __sdk::__query_builder::Col::new(table_name, "power_score"),
             snapshot_json: __sdk::__query_builder::Col::new(table_name, "snapshot_json"),
         }
     }
@@ -49,14 +52,14 @@ impl __sdk::__query_builder::HasCols for ZooRow {
 ///
 /// Provides typed access to indexed columns for query building.
 pub struct ZooRowIxCols {
-    pub owner: __sdk::__query_builder::IxCol<ZooRow, __sdk::Identity>,
+    pub owner_key: __sdk::__query_builder::IxCol<ZooRow, String>,
 }
 
 impl __sdk::__query_builder::HasIxCols for ZooRow {
     type IxCols = ZooRowIxCols;
     fn ix_cols(table_name: &'static str) -> Self::IxCols {
         ZooRowIxCols {
-            owner: __sdk::__query_builder::IxCol::new(table_name, "owner"),
+            owner_key: __sdk::__query_builder::IxCol::new(table_name, "owner_key"),
         }
     }
 }

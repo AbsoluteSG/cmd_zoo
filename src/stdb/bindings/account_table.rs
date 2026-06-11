@@ -95,6 +95,36 @@ impl<'ctx> __sdk::TableWithPrimaryKey for AccountTableHandle<'ctx> {
     }
 }
 
+/// Access to the `player_key` unique index on the table `account`,
+/// which allows point queries on the field of the same name
+/// via the [`AccountPlayerKeyUnique::find`] method.
+///
+/// Users are encouraged not to explicitly reference this type,
+/// but to directly chain method calls,
+/// like `ctx.db.account().player_key().find(...)`.
+pub struct AccountPlayerKeyUnique<'ctx> {
+    imp: __sdk::UniqueConstraintHandle<Account, String>,
+    phantom: std::marker::PhantomData<&'ctx super::RemoteTables>,
+}
+
+impl<'ctx> AccountTableHandle<'ctx> {
+    /// Get a handle on the `player_key` unique index on the table `account`.
+    pub fn player_key(&self) -> AccountPlayerKeyUnique<'ctx> {
+        AccountPlayerKeyUnique {
+            imp: self.imp.get_unique_constraint::<String>("player_key"),
+            phantom: std::marker::PhantomData,
+        }
+    }
+}
+
+impl<'ctx> AccountPlayerKeyUnique<'ctx> {
+    /// Find the subscribed row whose `player_key` column value is equal to `col_val`,
+    /// if such a row is present in the client cache.
+    pub fn find(&self, col_val: &String) -> Option<Account> {
+        self.imp.find(col_val)
+    }
+}
+
 /// Access to the `identity` unique index on the table `account`,
 /// which allows point queries on the field of the same name
 /// via the [`AccountIdentityUnique::find`] method.
@@ -130,6 +160,7 @@ impl<'ctx> AccountIdentityUnique<'ctx> {
 #[doc(hidden)]
 pub(super) fn register_table(client_cache: &mut __sdk::ClientCache<super::RemoteModule>) {
     let _table = client_cache.get_or_make_table::<Account>("account");
+    _table.add_unique_constraint::<String>("player_key", |row| &row.player_key);
     _table.add_unique_constraint::<__sdk::Identity>("identity", |row| &row.identity);
 }
 

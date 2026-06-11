@@ -59,9 +59,13 @@ out into the smaller modules.
   for sale without storing anything.
 
 ### The catching loop (Phase 3 — the current focus)
+> **Tuning catch difficulty per animal / per class?** See
+> **[`CATCHING.md`](CATCHING.md)** — it documents the `CatchClass` config,
+> `catch_config` overrides, and every catch/stamina/skill-check constant.
 - **`catch.rs`** — the new core verb: target a wild animal, then deplete its
   "catch-resistance" bar via a stat-driven roll, gear abilities, and timed
-  skill-check moments.
+  skill-check moments. **Per-animal/per-class tuning lives here** (`CatchClass` +
+  `catch_config`); see [`CATCHING.md`](CATCHING.md).
 - **`gear.rs`** — equippable catch tools and loadouts; their stats plus
   owned-collection bonuses are your two sources of catch power (there's
   deliberately no XP/skill tree).
@@ -74,6 +78,11 @@ out into the smaller modules.
 - **`wild_animal.rs`** — a roaming catch target. Catching is now a stat check
   (target → deplete the catch bar), so these just wander their map; the old
   per-species evasion movesets were retired with the open world.
+
+### Progression & access gating
+- **`power.rs`** — the **Power Score** (derived from owned animals: breadth +
+  rarity + rank + level) that gates region/expedition access. See
+  **[`PROGRESSION.md`](PROGRESSION.md)** for the formula + region requirement table.
 
 ### Plot geometry
 - **`plot.rs`** — the hub world extent + per-player zoo-plot constants

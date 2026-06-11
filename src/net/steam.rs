@@ -357,6 +357,18 @@ mod tests {
     }
 }
 
+/// Stable online identity for SpacetimeDB: `(player_key, persona_name)` read
+/// from the local Steam client. `player_key` is `"steam:<steamid64>"` — stable
+/// for the Steam account across machines/reinstalls — so the hub reuses the same
+/// server account instead of spawning a duplicate each connect. Returns `None`
+/// if Steam isn't running / the client can't init.
+pub fn online_identity() -> Option<(String, String)> {
+    let (client, _single) = Client::init().ok()?;
+    let steam_id = client.user().steam_id().raw();
+    let name = client.friends().name();
+    Some((format!("steam:{steam_id}"), name))
+}
+
 /// Derive a stable visitor `player_id` from a SteamID. Same SteamID always
 /// returns the same UUID, so a returning visitor matches their stored
 /// `VisitorRecord` at every host that's ever seen them.

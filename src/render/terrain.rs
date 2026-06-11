@@ -44,6 +44,48 @@ fn in_zoo(pos: Vec2, home_c: Vec2, home_h: f32) -> bool {
     (pos.x - home_c.x).abs() <= home_h && (pos.y - home_c.y).abs() <= home_h
 }
 
+/// Like [`gather`], but for a **single-theme bounded arena** (an expedition
+/// instance): every tile uses `theme` directly (no per-tile biome lookup, no zoo
+/// exclusion), and props are confined to `[0, arena]`. Deterministic from
+/// `(seed, theme)`. Empty when the theme has no bundled props.
+pub fn gather_themed(
+    seed: u64,
+    theme: HabitatTheme,
+    view_min: Vec2,
+    view_max: Vec2,
+    arena: Vec2,
+) -> Vec<PropInstance> {
+    let ids = textures::terrain_prop_ids(theme.name());
+    if ids.is_empty() {
+        return Vec::new();
+    }
+    // Visible tile range, clamped to the arena.
+    let tx0 = (view_min.x / TILE).floor().max(0.0) as i32;
+    let ty0 = (view_min.y / TILE).floor().max(0.0) as i32;
+    let tx1 = ((view_max.x / TILE).ceil() as i32).min((arena.x / TILE).ceil() as i32);
+    let ty1 = ((view_max.y / TILE).ceil() as i32).min((arena.y / TILE).ceil() as i32);
+
+    let mut out: Vec<PropInstance> = Vec::new();
+    for ty in ty0..=ty1 {
+        for tx in tx0..=tx1 {
+            if unit(hash(tx, ty, 1, seed)) >= DENSITY {
+                continue;
+            }
+            let jx = unit(hash(tx, ty, 3, seed));
+            let jy = unit(hash(tx, ty, 4, seed));
+            let world = vec2((tx as f32 + jx) * TILE, (ty as f32 + jy) * TILE);
+            if world.x > arena.x || world.y > arena.y {
+                continue; // jitter pushed it past the arena edge
+            }
+            let pick = (hash(tx, ty, 2, seed) as usize) % ids.len();
+            let scale = 0.85 + unit(hash(tx, ty, 5, seed)) * 0.4;
+            let flip = hash(tx, ty, 6, seed) & 1 == 0;
+            out.push(PropInstance { world, id: ids[pick], scale, flip });
+        }
+    }
+    out
+}
+
 /// Well-distributed 32-bit hash of `(tx, ty, salt)` salted by `seed` (lowbias32
 /// finalizer — same scheme as the grass scatter, so props don't visibly
 /// correlate with blades).

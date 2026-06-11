@@ -6,23 +6,75 @@
 #![allow(unused, clippy::all)]
 use spacetimedb_sdk::__codegen::{self as __sdk, __lib, __sats, __ws};
 
+pub mod accept_party_invite_reducer;
 pub mod account_table;
 pub mod account_type;
 pub mod apply_action_reducer;
 pub mod avatar_pose_table;
 pub mod avatar_pose_type;
+pub mod capture_animal_reducer;
+pub mod capture_event_table;
+pub mod capture_event_type;
+pub mod decline_party_invite_reducer;
+pub mod engage_animal_reducer;
+pub mod enter_expedition_reducer;
+pub mod instance_animal_table;
+pub mod instance_animal_type;
+pub mod instance_engagement_table;
+pub mod instance_engagement_type;
+pub mod instance_member_table;
+pub mod instance_member_type;
+pub mod instance_table;
+pub mod instance_type;
+pub mod invite_to_party_reducer;
 pub mod join_hub_reducer;
+pub mod leave_expedition_reducer;
+pub mod leave_party_reducer;
 pub mod move_avatar_reducer;
+pub mod party_invite_table;
+pub mod party_invite_type;
+pub mod party_member_table;
+pub mod party_member_type;
+pub mod party_table;
+pub mod party_type;
+pub mod reaper_schedule_type;
+pub mod release_animal_reducer;
 pub mod zoo_row_type;
 pub mod zoo_table;
 
+pub use accept_party_invite_reducer::accept_party_invite;
 pub use account_table::*;
 pub use account_type::Account;
 pub use apply_action_reducer::apply_action;
 pub use avatar_pose_table::*;
 pub use avatar_pose_type::AvatarPose;
+pub use capture_animal_reducer::capture_animal;
+pub use capture_event_table::*;
+pub use capture_event_type::CaptureEvent;
+pub use decline_party_invite_reducer::decline_party_invite;
+pub use engage_animal_reducer::engage_animal;
+pub use enter_expedition_reducer::enter_expedition;
+pub use instance_animal_table::*;
+pub use instance_animal_type::InstanceAnimal;
+pub use instance_engagement_table::*;
+pub use instance_engagement_type::InstanceEngagement;
+pub use instance_member_table::*;
+pub use instance_member_type::InstanceMember;
+pub use instance_table::*;
+pub use instance_type::Instance;
+pub use invite_to_party_reducer::invite_to_party;
 pub use join_hub_reducer::join_hub;
+pub use leave_expedition_reducer::leave_expedition;
+pub use leave_party_reducer::leave_party;
 pub use move_avatar_reducer::move_avatar;
+pub use party_invite_table::*;
+pub use party_invite_type::PartyInvite;
+pub use party_member_table::*;
+pub use party_member_type::PartyMember;
+pub use party_table::*;
+pub use party_type::Party;
+pub use reaper_schedule_type::ReaperSchedule;
+pub use release_animal_reducer::release_animal;
 pub use zoo_row_type::ZooRow;
 pub use zoo_table::*;
 
@@ -34,9 +86,18 @@ pub use zoo_table::*;
 /// to indicate which reducer caused the event.
 
 pub enum Reducer {
+    AcceptPartyInvite { invite_id: u64 },
     ApplyAction { action_json: String },
-    JoinHub { name: String },
+    CaptureAnimal { animal_uuid: String },
+    DeclinePartyInvite { invite_id: u64 },
+    EngageAnimal { animal_uuid: String },
+    EnterExpedition { theme: String },
+    InviteToParty { target_key: String },
+    JoinHub { player_key: String, name: String },
+    LeaveExpedition,
+    LeaveParty,
     MoveAvatar { x: f32, y: f32 },
+    ReleaseAnimal { animal_uuid: String },
 }
 
 impl __sdk::InModule for Reducer {
@@ -46,27 +107,78 @@ impl __sdk::InModule for Reducer {
 impl __sdk::Reducer for Reducer {
     fn reducer_name(&self) -> &'static str {
         match self {
+            Reducer::AcceptPartyInvite { .. } => "accept_party_invite",
             Reducer::ApplyAction { .. } => "apply_action",
+            Reducer::CaptureAnimal { .. } => "capture_animal",
+            Reducer::DeclinePartyInvite { .. } => "decline_party_invite",
+            Reducer::EngageAnimal { .. } => "engage_animal",
+            Reducer::EnterExpedition { .. } => "enter_expedition",
+            Reducer::InviteToParty { .. } => "invite_to_party",
             Reducer::JoinHub { .. } => "join_hub",
+            Reducer::LeaveExpedition => "leave_expedition",
+            Reducer::LeaveParty => "leave_party",
             Reducer::MoveAvatar { .. } => "move_avatar",
+            Reducer::ReleaseAnimal { .. } => "release_animal",
             _ => unreachable!(),
         }
     }
     #[allow(clippy::clone_on_copy)]
     fn args_bsatn(&self) -> Result<Vec<u8>, __sats::bsatn::EncodeError> {
         match self {
+            Reducer::AcceptPartyInvite { invite_id } => {
+                __sats::bsatn::to_vec(&accept_party_invite_reducer::AcceptPartyInviteArgs {
+                    invite_id: invite_id.clone(),
+                })
+            }
             Reducer::ApplyAction { action_json } => {
                 __sats::bsatn::to_vec(&apply_action_reducer::ApplyActionArgs {
                     action_json: action_json.clone(),
                 })
             }
-            Reducer::JoinHub { name } => {
-                __sats::bsatn::to_vec(&join_hub_reducer::JoinHubArgs { name: name.clone() })
+            Reducer::CaptureAnimal { animal_uuid } => {
+                __sats::bsatn::to_vec(&capture_animal_reducer::CaptureAnimalArgs {
+                    animal_uuid: animal_uuid.clone(),
+                })
             }
+            Reducer::DeclinePartyInvite { invite_id } => {
+                __sats::bsatn::to_vec(&decline_party_invite_reducer::DeclinePartyInviteArgs {
+                    invite_id: invite_id.clone(),
+                })
+            }
+            Reducer::EngageAnimal { animal_uuid } => {
+                __sats::bsatn::to_vec(&engage_animal_reducer::EngageAnimalArgs {
+                    animal_uuid: animal_uuid.clone(),
+                })
+            }
+            Reducer::EnterExpedition { theme } => {
+                __sats::bsatn::to_vec(&enter_expedition_reducer::EnterExpeditionArgs {
+                    theme: theme.clone(),
+                })
+            }
+            Reducer::InviteToParty { target_key } => {
+                __sats::bsatn::to_vec(&invite_to_party_reducer::InviteToPartyArgs {
+                    target_key: target_key.clone(),
+                })
+            }
+            Reducer::JoinHub { player_key, name } => {
+                __sats::bsatn::to_vec(&join_hub_reducer::JoinHubArgs {
+                    player_key: player_key.clone(),
+                    name: name.clone(),
+                })
+            }
+            Reducer::LeaveExpedition => {
+                __sats::bsatn::to_vec(&leave_expedition_reducer::LeaveExpeditionArgs {})
+            }
+            Reducer::LeaveParty => __sats::bsatn::to_vec(&leave_party_reducer::LeavePartyArgs {}),
             Reducer::MoveAvatar { x, y } => {
                 __sats::bsatn::to_vec(&move_avatar_reducer::MoveAvatarArgs {
                     x: x.clone(),
                     y: y.clone(),
+                })
+            }
+            Reducer::ReleaseAnimal { animal_uuid } => {
+                __sats::bsatn::to_vec(&release_animal_reducer::ReleaseAnimalArgs {
+                    animal_uuid: animal_uuid.clone(),
                 })
             }
             _ => unreachable!(),
@@ -80,6 +192,14 @@ impl __sdk::Reducer for Reducer {
 pub struct DbUpdate {
     account: __sdk::TableUpdate<Account>,
     avatar_pose: __sdk::TableUpdate<AvatarPose>,
+    capture_event: __sdk::TableUpdate<CaptureEvent>,
+    instance: __sdk::TableUpdate<Instance>,
+    instance_animal: __sdk::TableUpdate<InstanceAnimal>,
+    instance_engagement: __sdk::TableUpdate<InstanceEngagement>,
+    instance_member: __sdk::TableUpdate<InstanceMember>,
+    party: __sdk::TableUpdate<Party>,
+    party_invite: __sdk::TableUpdate<PartyInvite>,
+    party_member: __sdk::TableUpdate<PartyMember>,
     zoo: __sdk::TableUpdate<ZooRow>,
 }
 
@@ -95,6 +215,30 @@ impl TryFrom<__ws::v2::TransactionUpdate> for DbUpdate {
                 "avatar_pose" => db_update
                     .avatar_pose
                     .append(avatar_pose_table::parse_table_update(table_update)?),
+                "capture_event" => db_update
+                    .capture_event
+                    .append(capture_event_table::parse_table_update(table_update)?),
+                "instance" => db_update
+                    .instance
+                    .append(instance_table::parse_table_update(table_update)?),
+                "instance_animal" => db_update
+                    .instance_animal
+                    .append(instance_animal_table::parse_table_update(table_update)?),
+                "instance_engagement" => db_update
+                    .instance_engagement
+                    .append(instance_engagement_table::parse_table_update(table_update)?),
+                "instance_member" => db_update
+                    .instance_member
+                    .append(instance_member_table::parse_table_update(table_update)?),
+                "party" => db_update
+                    .party
+                    .append(party_table::parse_table_update(table_update)?),
+                "party_invite" => db_update
+                    .party_invite
+                    .append(party_invite_table::parse_table_update(table_update)?),
+                "party_member" => db_update
+                    .party_member
+                    .append(party_member_table::parse_table_update(table_update)?),
                 "zoo" => db_update
                     .zoo
                     .append(zoo_table::parse_table_update(table_update)?),
@@ -126,13 +270,40 @@ impl __sdk::DbUpdate for DbUpdate {
 
         diff.account = cache
             .apply_diff_to_table::<Account>("account", &self.account)
-            .with_updates_by_pk(|row| &row.identity);
+            .with_updates_by_pk(|row| &row.player_key);
         diff.avatar_pose = cache
             .apply_diff_to_table::<AvatarPose>("avatar_pose", &self.avatar_pose)
-            .with_updates_by_pk(|row| &row.owner);
+            .with_updates_by_pk(|row| &row.owner_key);
+        diff.capture_event = cache
+            .apply_diff_to_table::<CaptureEvent>("capture_event", &self.capture_event)
+            .with_updates_by_pk(|row| &row.event_id);
+        diff.instance = cache
+            .apply_diff_to_table::<Instance>("instance", &self.instance)
+            .with_updates_by_pk(|row| &row.instance_id);
+        diff.instance_animal = cache
+            .apply_diff_to_table::<InstanceAnimal>("instance_animal", &self.instance_animal)
+            .with_updates_by_pk(|row| &row.animal_uuid);
+        diff.instance_engagement = cache
+            .apply_diff_to_table::<InstanceEngagement>(
+                "instance_engagement",
+                &self.instance_engagement,
+            )
+            .with_updates_by_pk(|row| &row.engage_key);
+        diff.instance_member = cache
+            .apply_diff_to_table::<InstanceMember>("instance_member", &self.instance_member)
+            .with_updates_by_pk(|row| &row.member_key);
+        diff.party = cache
+            .apply_diff_to_table::<Party>("party", &self.party)
+            .with_updates_by_pk(|row| &row.party_id);
+        diff.party_invite = cache
+            .apply_diff_to_table::<PartyInvite>("party_invite", &self.party_invite)
+            .with_updates_by_pk(|row| &row.invite_id);
+        diff.party_member = cache
+            .apply_diff_to_table::<PartyMember>("party_member", &self.party_member)
+            .with_updates_by_pk(|row| &row.member_key);
         diff.zoo = cache
             .apply_diff_to_table::<ZooRow>("zoo", &self.zoo)
-            .with_updates_by_pk(|row| &row.owner);
+            .with_updates_by_pk(|row| &row.owner_key);
 
         diff
     }
@@ -145,6 +316,30 @@ impl __sdk::DbUpdate for DbUpdate {
                     .append(__sdk::parse_row_list_as_inserts(table_rows.rows)?),
                 "avatar_pose" => db_update
                     .avatar_pose
+                    .append(__sdk::parse_row_list_as_inserts(table_rows.rows)?),
+                "capture_event" => db_update
+                    .capture_event
+                    .append(__sdk::parse_row_list_as_inserts(table_rows.rows)?),
+                "instance" => db_update
+                    .instance
+                    .append(__sdk::parse_row_list_as_inserts(table_rows.rows)?),
+                "instance_animal" => db_update
+                    .instance_animal
+                    .append(__sdk::parse_row_list_as_inserts(table_rows.rows)?),
+                "instance_engagement" => db_update
+                    .instance_engagement
+                    .append(__sdk::parse_row_list_as_inserts(table_rows.rows)?),
+                "instance_member" => db_update
+                    .instance_member
+                    .append(__sdk::parse_row_list_as_inserts(table_rows.rows)?),
+                "party" => db_update
+                    .party
+                    .append(__sdk::parse_row_list_as_inserts(table_rows.rows)?),
+                "party_invite" => db_update
+                    .party_invite
+                    .append(__sdk::parse_row_list_as_inserts(table_rows.rows)?),
+                "party_member" => db_update
+                    .party_member
                     .append(__sdk::parse_row_list_as_inserts(table_rows.rows)?),
                 "zoo" => db_update
                     .zoo
@@ -168,6 +363,30 @@ impl __sdk::DbUpdate for DbUpdate {
                 "avatar_pose" => db_update
                     .avatar_pose
                     .append(__sdk::parse_row_list_as_deletes(table_rows.rows)?),
+                "capture_event" => db_update
+                    .capture_event
+                    .append(__sdk::parse_row_list_as_deletes(table_rows.rows)?),
+                "instance" => db_update
+                    .instance
+                    .append(__sdk::parse_row_list_as_deletes(table_rows.rows)?),
+                "instance_animal" => db_update
+                    .instance_animal
+                    .append(__sdk::parse_row_list_as_deletes(table_rows.rows)?),
+                "instance_engagement" => db_update
+                    .instance_engagement
+                    .append(__sdk::parse_row_list_as_deletes(table_rows.rows)?),
+                "instance_member" => db_update
+                    .instance_member
+                    .append(__sdk::parse_row_list_as_deletes(table_rows.rows)?),
+                "party" => db_update
+                    .party
+                    .append(__sdk::parse_row_list_as_deletes(table_rows.rows)?),
+                "party_invite" => db_update
+                    .party_invite
+                    .append(__sdk::parse_row_list_as_deletes(table_rows.rows)?),
+                "party_member" => db_update
+                    .party_member
+                    .append(__sdk::parse_row_list_as_deletes(table_rows.rows)?),
                 "zoo" => db_update
                     .zoo
                     .append(__sdk::parse_row_list_as_deletes(table_rows.rows)?),
@@ -188,6 +407,14 @@ impl __sdk::DbUpdate for DbUpdate {
 pub struct AppliedDiff<'r> {
     account: __sdk::TableAppliedDiff<'r, Account>,
     avatar_pose: __sdk::TableAppliedDiff<'r, AvatarPose>,
+    capture_event: __sdk::TableAppliedDiff<'r, CaptureEvent>,
+    instance: __sdk::TableAppliedDiff<'r, Instance>,
+    instance_animal: __sdk::TableAppliedDiff<'r, InstanceAnimal>,
+    instance_engagement: __sdk::TableAppliedDiff<'r, InstanceEngagement>,
+    instance_member: __sdk::TableAppliedDiff<'r, InstanceMember>,
+    party: __sdk::TableAppliedDiff<'r, Party>,
+    party_invite: __sdk::TableAppliedDiff<'r, PartyInvite>,
+    party_member: __sdk::TableAppliedDiff<'r, PartyMember>,
     zoo: __sdk::TableAppliedDiff<'r, ZooRow>,
     __unused: std::marker::PhantomData<&'r ()>,
 }
@@ -204,6 +431,38 @@ impl<'r> __sdk::AppliedDiff<'r> for AppliedDiff<'r> {
     ) {
         callbacks.invoke_table_row_callbacks::<Account>("account", &self.account, event);
         callbacks.invoke_table_row_callbacks::<AvatarPose>("avatar_pose", &self.avatar_pose, event);
+        callbacks.invoke_table_row_callbacks::<CaptureEvent>(
+            "capture_event",
+            &self.capture_event,
+            event,
+        );
+        callbacks.invoke_table_row_callbacks::<Instance>("instance", &self.instance, event);
+        callbacks.invoke_table_row_callbacks::<InstanceAnimal>(
+            "instance_animal",
+            &self.instance_animal,
+            event,
+        );
+        callbacks.invoke_table_row_callbacks::<InstanceEngagement>(
+            "instance_engagement",
+            &self.instance_engagement,
+            event,
+        );
+        callbacks.invoke_table_row_callbacks::<InstanceMember>(
+            "instance_member",
+            &self.instance_member,
+            event,
+        );
+        callbacks.invoke_table_row_callbacks::<Party>("party", &self.party, event);
+        callbacks.invoke_table_row_callbacks::<PartyInvite>(
+            "party_invite",
+            &self.party_invite,
+            event,
+        );
+        callbacks.invoke_table_row_callbacks::<PartyMember>(
+            "party_member",
+            &self.party_member,
+            event,
+        );
         callbacks.invoke_table_row_callbacks::<ZooRow>("zoo", &self.zoo, event);
     }
 }
@@ -867,7 +1126,27 @@ impl __sdk::SpacetimeModule for RemoteModule {
     fn register_tables(client_cache: &mut __sdk::ClientCache<Self>) {
         account_table::register_table(client_cache);
         avatar_pose_table::register_table(client_cache);
+        capture_event_table::register_table(client_cache);
+        instance_table::register_table(client_cache);
+        instance_animal_table::register_table(client_cache);
+        instance_engagement_table::register_table(client_cache);
+        instance_member_table::register_table(client_cache);
+        party_table::register_table(client_cache);
+        party_invite_table::register_table(client_cache);
+        party_member_table::register_table(client_cache);
         zoo_table::register_table(client_cache);
     }
-    const ALL_TABLE_NAMES: &'static [&'static str] = &["account", "avatar_pose", "zoo"];
+    const ALL_TABLE_NAMES: &'static [&'static str] = &[
+        "account",
+        "avatar_pose",
+        "capture_event",
+        "instance",
+        "instance_animal",
+        "instance_engagement",
+        "instance_member",
+        "party",
+        "party_invite",
+        "party_member",
+        "zoo",
+    ];
 }

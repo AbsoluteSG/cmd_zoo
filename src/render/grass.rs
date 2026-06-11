@@ -334,7 +334,7 @@ pub fn draw_grass(app: &GameApp, atlas: Option<&Texture2D>, material: Option<&Ma
     if cam.zoom < MIN_ZOOM {
         return;
     }
-    let seed = app.zoo.world_seed;
+    let seed = app.ground_seed();
     // The local player's home plot gets the manicured lawn profile.
     let home_c = app.zoo.plot_origin;
     let home_h = app.zoo.plot_half_extent();

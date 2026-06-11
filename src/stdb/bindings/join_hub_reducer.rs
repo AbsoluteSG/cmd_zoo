@@ -7,12 +7,16 @@ use spacetimedb_sdk::__codegen::{self as __sdk, __lib, __sats, __ws};
 #[derive(__lib::ser::Serialize, __lib::de::Deserialize, Clone, PartialEq, Debug)]
 #[sats(crate = __lib)]
 pub(super) struct JoinHubArgs {
+    pub player_key: String,
     pub name: String,
 }
 
 impl From<JoinHubArgs> for super::Reducer {
     fn from(args: JoinHubArgs) -> Self {
-        Self::JoinHub { name: args.name }
+        Self::JoinHub {
+            player_key: args.player_key,
+            name: args.name,
+        }
     }
 }
 
@@ -31,8 +35,8 @@ pub trait join_hub {
     /// The reducer will run asynchronously in the future,
     ///  and this method provides no way to listen for its completion status.
     /// /// Use [`join_hub:join_hub_then`] to run a callback after the reducer completes.
-    fn join_hub(&self, name: String) -> __sdk::Result<()> {
-        self.join_hub_then(name, |_, _| {})
+    fn join_hub(&self, player_key: String, name: String) -> __sdk::Result<()> {
+        self.join_hub_then(player_key, name, |_, _| {})
     }
 
     /// Request that the remote module invoke the reducer `join_hub` to run as soon as possible,
@@ -43,6 +47,7 @@ pub trait join_hub {
     ///  and its status can be observed with the `callback`.
     fn join_hub_then(
         &self,
+        player_key: String,
         name: String,
 
         callback: impl FnOnce(&super::ReducerEventContext, Result<Result<(), String>, __sdk::InternalError>)
@@ -54,6 +59,7 @@ pub trait join_hub {
 impl join_hub for super::RemoteReducers {
     fn join_hub_then(
         &self,
+        player_key: String,
         name: String,
 
         callback: impl FnOnce(&super::ReducerEventContext, Result<Result<(), String>, __sdk::InternalError>)
@@ -61,6 +67,6 @@ impl join_hub for super::RemoteReducers {
             + 'static,
     ) -> __sdk::Result<()> {
         self.imp
-            .invoke_reducer_with_callback(JoinHubArgs { name }, callback)
+            .invoke_reducer_with_callback(JoinHubArgs { player_key, name }, callback)
     }
 }

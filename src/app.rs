@@ -1019,6 +1019,32 @@ impl GameApp {
                 }
             }
         }
+        // Gamepad West (Square) engages the nearest live animal to the avatar
+        // (the pad analogue of clicking one). Re-engaging the current target is a
+        // no-op so the catch bar isn't reset.
+        if self.pad_pressed(PadButton::West) {
+            let apos = self.session.my_avatar().pos;
+            let prev = self.expedition.as_ref().and_then(|e| e.target);
+            let nearest = self
+                .expedition
+                .as_ref()
+                .and_then(|e| e.instance.nearest_live(apos))
+                .map(|s| s.id);
+            if let Some(id) = nearest {
+                if prev != Some(id) {
+                    if let Some(exp) = self.expedition.as_mut() {
+                        exp.engage(id);
+                        self.set_status("Engaging — deplete its catch bar");
+                    }
+                    if let Some(online) = self.online.as_ref() {
+                        if let Some(p) = prev {
+                            let _ = online.release_animal(&p.to_string());
+                        }
+                        let _ = online.engage_animal(&id.to_string());
+                    }
+                }
+            }
+        }
         // Skills (slots 0..3) are gated by per-slot cooldowns; firing one starts
         // its cooldown (the skill-slot UI shows a radial timer). The slot→skill
         // binding comes from `self.skill_loadout`, so it's re-bindable later.
@@ -1049,8 +1075,8 @@ impl GameApp {
                 }
             }
         }
-        // Space or gamepad X hits the live skill check.
-        if is_key_pressed(KeyCode::Space) || self.pad_pressed(PadButton::West) {
+        // Space or gamepad A (Cross) hits the live skill check.
+        if is_key_pressed(KeyCode::Space) || self.pad_pressed(PadButton::South) {
             if let Some(exp) = self.expedition.as_mut() {
                 exp.hit_skill_check(&stats);
             }
@@ -2281,7 +2307,7 @@ impl GameApp {
         // E opens the nearest pad's panel (breeding nest along the top, food
         // structure along the bottom), otherwise inspects the nearest owned
         // animal (only when no menu is open).
-        if !modal && (is_key_pressed(KeyCode::E) || self.pad_pressed(PadButton::South)) && self.menu_t < 0.02 {
+        if !modal && (is_key_pressed(KeyCode::E) || self.pad_pressed(PadButton::West)) && self.menu_t < 0.02 {
             let pad = if self.inspect.is_none() { self.nearest_pad() } else { None };
             match pad {
                 Some(Pad::Nest(i)) if i < self.zoo.nest_count as usize => {
@@ -2302,11 +2328,13 @@ impl GameApp {
                     self.active_pedestal = Some(id);
                     self.set_screen(Screen::Pedestal);
                 }
-                // No pad nearby: the expedition board opens the biome picker;
-                // else the nearest NPC merchant, then a nearby player, otherwise
-                // fall back to inspecting an animal under the cursor.
+                // No pad nearby: collect a ready (full) animal first, then the
+                // expedition board / NPC merchant / nearby player, otherwise fall
+                // back to inspecting the nearest animal.
                 None => {
-                    if self.nearest_npc_kind() == Some(crate::game::npc::NpcKind::ExpeditionBoard) {
+                    if self.try_collect_nearest_full(now) {
+                        // Collected a ready animal — that was the interaction.
+                    } else if self.nearest_npc_kind() == Some(crate::game::npc::NpcKind::ExpeditionBoard) {
                         self.toggle_expedition();
                     } else if let Some(screen) = self.nearest_npc_screen() {
                         self.set_screen(screen);
@@ -3231,8 +3259,18 @@ impl GameApp {
             return;
         }
 
-        // At cap → collect via the authoritative path (host applies; visitor
-        // forwards to the host and gets the result back in the next snapshot).
+        let _ = pos;
+        // At cap → collect (shared with the gamepad interact-to-collect path).
+        self.collect_critter_at(idx, now);
+    }
+
+    /// Collect the (at-cap) critter at `idx` via the authoritative path (host
+    /// applies; visitor forwards and gets the result in the next snapshot), with
+    /// coin/DNA particles + notifications. Shared by the mouse-click redeem and
+    /// the gamepad interact-to-collect path.
+    fn collect_critter_at(&mut self, idx: usize, now: DateTime<Utc>) {
+        let id = self.critters[idx].animal_id;
+        let pos = self.critters[idx].pos;
         match self.dispatch(Action::CollectAnimal(id), now) {
             Some(ActionOutcome::Collected(res)) if res.total() > 0 => {
                 self.sounds.play("income_sfx");
@@ -3254,6 +3292,25 @@ impl GameApp {
             }
             _ => {}
         }
+    }
+
+    /// Collect the nearest at-cap critter within `INTERACT_RANGE` of the avatar.
+    /// Returns true if one was collected — drives the gamepad/keyboard
+    /// interact-to-collect.
+    fn try_collect_nearest_full(&mut self, now: DateTime<Utc>) -> bool {
+        let apos = self.session.my_avatar().pos;
+        let cand = self
+            .critters
+            .iter()
+            .enumerate()
+            .filter(|(_, c)| self.zoo.animals.get(&c.animal_id).is_some_and(|a| a.is_at_cap(now)))
+            .map(|(i, c)| ((c.pos - apos).length_squared(), i))
+            .filter(|(d, _)| *d <= INTERACT_RANGE * INTERACT_RANGE)
+            .min_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+        let Some((_, idx)) = cand else { return false };
+        self.play_poke(self.critters[idx].species);
+        self.collect_critter_at(idx, now);
+        true
     }
 
 

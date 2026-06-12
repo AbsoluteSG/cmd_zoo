@@ -50,11 +50,12 @@ impl AvatarController for LocalController {
             }
             // LeftBumper dashes; LeftTrigger (held) sprints. A/B/X/Y are left
             // free for interact/confirm/cancel/skills so movement never fights
-            // the action buttons.
+            // the action buttons. The trigger is read both as an analog axis and
+            // as a digital button, since which one a pad reports varies.
             if pad.just_pressed(PadButton::LeftBumper) {
                 actions.insert(ActionFlags::DASH);
             }
-            if pad.lt > 0.5 {
+            if pad.held(PadButton::LeftTrigger) || pad.lt > 0.2 {
                 actions.insert(ActionFlags::SPRINT);
             }
         }

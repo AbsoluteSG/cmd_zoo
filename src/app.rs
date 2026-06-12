@@ -76,6 +76,9 @@ pub struct MainMenuState {
     pub arm_phase: f32,
     /// Intro fade/scale-in for the whole menu (0 → 1 on first frames).
     pub appear: f32,
+    /// Gamepad-focused card (0 = Solo, 1 = Online). Drives the hover tween when
+    /// the pad is the active device (mouse hover drives it otherwise).
+    pub focus: u8,
 }
 
 /// An interactive ground pad reachable with E: a breeding nest (top row), a
@@ -477,6 +480,13 @@ pub struct GameApp {
     /// Gamepad input side-channel (gilrs), polled once per frame at the top of
     /// `handle_input`. `None` if gilrs failed to initialise (keyboard-only).
     gamepad: Option<GamepadHub>,
+    /// Which input device is currently driving the UI (flips on fresh input).
+    devices: crate::input::DeviceTracker,
+    /// Gamepad focus navigator for the immediate-mode menus.
+    pub focus_nav: crate::render::focus::FocusNav,
+    /// The menu screen focus was last reset for, so opening a new panel restarts
+    /// the highlight at the top.
+    focus_screen: Screen,
     /// Per-visitor controllers, keyed by the visitor's stable `player_id`.
     /// The host pushes inbound `WireIntent`s into the matching entry each
     /// frame; each visitor's avatar samples from its own controller.
@@ -697,6 +707,9 @@ impl GameApp {
             session,
             controller: Box::new(LocalController::default()),
             gamepad: GamepadHub::new(),
+            devices: crate::input::DeviceTracker::default(),
+            focus_nav: crate::render::focus::FocusNav::default(),
+            focus_screen: Screen::World,
             remotes: HashMap::new(),
             behaviors: avatar_system::default_behaviors(),
             snapshot_broadcast_t: 0.0,
@@ -784,6 +797,44 @@ impl GameApp {
     /// True if `btn` was just pressed on the active gamepad this frame.
     fn pad_pressed(&self, btn: PadButton) -> bool {
         self.gamepad.as_ref().is_some_and(|g| g.snapshot().just_pressed(btn))
+    }
+
+    /// True while the gamepad is the active UI device (drives focus rings + nav).
+    pub fn gamepad_active(&self) -> bool {
+        self.devices.is_gamepad()
+    }
+
+    /// UI "confirm" this frame — gamepad A or the Enter key. Read by `menus` to
+    /// activate the focused widget.
+    pub fn ui_confirm(&self) -> bool {
+        self.pad_pressed(PadButton::South) || is_key_pressed(KeyCode::Enter)
+    }
+
+    /// Move the menu focus highlight with the D-pad while a panel is open and the
+    /// gamepad is active. Resets to the top when the panel changes.
+    fn update_focus_nav(&mut self) {
+        if self.screen != self.focus_screen {
+            self.focus_screen = self.screen;
+            self.focus_nav.reset();
+        }
+        if self.screen == Screen::World || !self.devices.is_gamepad() {
+            return;
+        }
+        use crate::render::focus::NavDir;
+        let dir = if self.pad_pressed(PadButton::DPadUp) {
+            Some(NavDir::Up)
+        } else if self.pad_pressed(PadButton::DPadDown) {
+            Some(NavDir::Down)
+        } else if self.pad_pressed(PadButton::DPadLeft) {
+            Some(NavDir::Left)
+        } else if self.pad_pressed(PadButton::DPadRight) {
+            Some(NavDir::Right)
+        } else {
+            None
+        };
+        if let Some(d) = dir {
+            self.focus_nav.step(d);
+        }
     }
 
     pub fn ability_cooldown_frac(&self, slot: usize) -> f32 {
@@ -1230,21 +1281,41 @@ impl GameApp {
         let over_solo = inset_rect(solo, 0.16, 0.06).contains(mouse);
         let over_online = inset_rect(online, 0.16, 0.06).contains(mouse);
 
+        // Gamepad selection: D-pad / left-stick pick a card, A confirms.
+        let gp = self.devices.is_gamepad();
+        let pad_left = self.pad_pressed(PadButton::DPadLeft);
+        let pad_right = self.pad_pressed(PadButton::DPadRight);
+        let pad_confirm = self.pad_pressed(PadButton::South);
+        let stick_x = self.gamepad.as_ref().map_or(0.0, |g| g.snapshot().left_stick.x);
+
         // Exponential smoothing toward each target (frame-rate independent).
         let approach = |cur: f32, target: f32, rate: f32| cur + (target - cur) * (1.0 - (-rate * dt).exp());
         if let Some(m) = self.main_menu.as_mut() {
+            if pad_left || stick_x < -0.5 {
+                m.focus = 0;
+            }
+            if pad_right || stick_x > 0.5 {
+                m.focus = 1;
+            }
+            // When the gamepad drives the menu, focus selects the lit card;
+            // otherwise the mouse hover does.
+            let (want_solo, want_online) = if gp {
+                (m.focus == 0, m.focus == 1)
+            } else {
+                (over_solo, over_online)
+            };
             m.appear = approach(m.appear, 1.0, 6.0);
-            m.solo_hover = approach(m.solo_hover, if over_solo { 1.0 } else { 0.0 }, 14.0);
-            m.online_hover = approach(m.online_hover, if over_online { 1.0 } else { 0.0 }, 14.0);
+            m.solo_hover = approach(m.solo_hover, if want_solo { 1.0 } else { 0.0 }, 14.0);
+            m.online_hover = approach(m.online_hover, if want_online { 1.0 } else { 0.0 }, 14.0);
             m.arm_phase += dt;
         }
 
-        if is_mouse_button_pressed(MouseButton::Left) {
-            if over_solo {
-                self.start_mode(now, false);
-            } else if over_online {
-                self.start_mode(now, true);
-            }
+        let focus = self.main_menu.as_ref().map_or(0, |m| m.focus);
+        let click = is_mouse_button_pressed(MouseButton::Left);
+        if (click && over_solo) || (gp && pad_confirm && focus == 0) {
+            self.start_mode(now, false);
+        } else if (click && over_online) || (gp && pad_confirm && focus == 1) {
+            self.start_mode(now, true);
         }
     }
 
@@ -1975,11 +2046,26 @@ impl GameApp {
     /// plus critter wandering (which continues behind menus).
     pub fn handle_input(&mut self, now: DateTime<Utc>) {
         // Poll the gamepad once per frame, before any input is read, so every
-        // path this frame sees a consistent pad snapshot. (Hot-plug / active-
-        // device handling lands in a later phase; for now we just refresh state.)
+        // path this frame sees a consistent pad snapshot. Drive active-device
+        // switching from it, and fall back to keyboard/mouse if the active pad
+        // unplugs mid-session.
+        let mut pad_disconnected = false;
         if let Some(pad) = self.gamepad.as_mut() {
-            let _events = pad.poll();
+            for ev in pad.poll() {
+                if matches!(ev, crate::input::PadEvent::Disconnected) {
+                    pad_disconnected = true;
+                }
+            }
         }
+        let pad_activity = self.gamepad.as_ref().is_some_and(|g| g.snapshot().any_activity);
+        self.devices.update(pad_activity);
+        if pad_disconnected && self.gamepad.as_ref().is_none_or(|g| !g.has_pad()) {
+            self.devices.set(crate::input::ActiveDevice::KeyboardMouse);
+        }
+        // Gamepad focus navigation for an open menu panel: D-pad moves the
+        // highlight (the panel itself is drawn later this frame). Reset focus when
+        // the panel changes so the highlight starts at the top.
+        self.update_focus_nav();
 
         // Pre-game main menu owns input until the player picks a mode.
         if self.main_menu.is_some() {

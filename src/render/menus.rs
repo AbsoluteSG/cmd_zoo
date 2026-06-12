@@ -20,18 +20,21 @@ const BTN: Color = color_u8!(46, 52, 64, 255);
 const BTN_HOVER: Color = color_u8!(70, 80, 98, 255);
 const BTN_DISABLED: Color = color_u8!(30, 34, 41, 255);
 
-/// Per-frame draw context carrying the scale/fade transform + cursor state.
+/// Per-frame draw context carrying the scale/fade transform, cursor state, and
+/// the gamepad focus frame. Holds only `Copy`/shared-ref fields so it stays cheap
+/// to pass by value; `focus` is a shared `&` with interior mutability.
 #[derive(Clone, Copy)]
-struct Ctx {
+struct Ctx<'a> {
     center: Vec2,
     scale: f32,
     alpha: f32,
     mouse: Vec2,
     click: bool,
     interactive: bool,
+    focus: &'a crate::render::focus::FocusFrame,
 }
 
-impl Ctx {
+impl Ctx<'_> {
     /// Transform a logical (full-size) point into the animated screen point.
     fn pt(&self, x: f32, y: f32) -> Vec2 {
         self.center + (vec2(x, y) - self.center) * self.scale
@@ -41,7 +44,7 @@ impl Ctx {
 /// Shift a menu's pivot to one side so the panel pops up on the screen edge
 /// *opposite* the player (mirroring the inspect panel), keeping the NPC the
 /// player is talking to visible. Used by the NPC interaction shops.
-fn side_ctx(app: &GameApp, mut ctx: Ctx) -> Ctx {
+fn side_ctx<'a>(app: &GameApp, mut ctx: Ctx<'a>) -> Ctx<'a> {
     let apos = app.session.my_avatar().pos;
     let screen = view::world_to_screen(apos, &app.camera);
     // Player on the left half → panel on the right, and vice versa.
@@ -57,6 +60,12 @@ pub fn draw(app: &mut GameApp, now: DateTime<Utc>) {
     }
     let t = app.menu_t.clamp(0.0, 1.0);
     let eased = 0.6 + 0.4 * ease_out_back(t); // slight pop past 1.0 mid-open
+    let interactive = app.screen != Screen::World && app.menu_t > 0.9;
+    // Gamepad focus frame for this draw: rings shown when the pad is active and
+    // the panel is interactive; confirm activates the focused widget.
+    let focus = app
+        .focus_nav
+        .frame(interactive && app.gamepad_active(), interactive && app.ui_confirm());
     let ctx = Ctx {
         center: vec2(screen_width() * 0.5, screen_height() * 0.5),
         scale: eased,
@@ -66,7 +75,8 @@ pub fn draw(app: &mut GameApp, now: DateTime<Utc>) {
             vec2(mx, my)
         },
         click: is_mouse_button_pressed(MouseButton::Left),
-        interactive: app.screen != Screen::World && app.menu_t > 0.9,
+        interactive,
+        focus: &focus,
     };
     match app.shown_menu {
         Screen::Shop => draw_shop(app, now, ctx),
@@ -83,13 +93,15 @@ pub fn draw(app: &mut GameApp, now: DateTime<Utc>) {
         Screen::ExpeditionBoard => draw_expedition_board(app, now, ctx),
         Screen::World => {}
     }
+    // Store this frame's widget rects for next-frame directional navigation.
+    app.focus_nav.commit(focus.take_rects());
 }
 
 // ─────────────────────────── Player (co-op) ───────────────────────────
 
 /// Press-E-on-a-player panel. The host can grant/revoke a visitor's sell
 /// permission here; a visitor sees a read-only view of another player.
-fn draw_player(app: &mut GameApp, now: DateTime<Utc>, ctx: Ctx) {
+fn draw_player(app: &mut GameApp, now: DateTime<Utc>, ctx: Ctx<'_>) {
     use crate::game::action::Action;
     use crate::game::visitor::PermissionSet;
 
@@ -141,7 +153,7 @@ fn draw_player(app: &mut GameApp, now: DateTime<Utc>, ctx: Ctx) {
 
 /// Shown to a visitor when the host's zoo goes away. Offers to return to the
 /// player's own zoo (the only action — the world behind is a frozen mirror).
-fn draw_disconnected(app: &mut GameApp, now: DateTime<Utc>, ctx: Ctx) {
+fn draw_disconnected(app: &mut GameApp, now: DateTime<Utc>, ctx: Ctx<'_>) {
     let pw = 460.0;
     let ph = 180.0;
     let (px, py) = (ctx.center.x - pw * 0.5, ctx.center.y - ph * 0.5);
@@ -160,7 +172,7 @@ fn draw_disconnected(app: &mut GameApp, now: DateTime<Utc>, ctx: Ctx) {
 
 // ─────────────────────────── Waypoints ───────────────────────────
 
-fn draw_waypoints(app: &mut GameApp, now: DateTime<Utc>, ctx: Ctx) {
+fn draw_waypoints(app: &mut GameApp, now: DateTime<Utc>, ctx: Ctx<'_>) {
 
     // Snapshot the list so we can call &mut app methods while iterating.
     let waypoints: Vec<(uuid::Uuid, String, Vec2)> = app
@@ -220,7 +232,7 @@ fn draw_waypoints(app: &mut GameApp, now: DateTime<Utc>, ctx: Ctx) {
 
 // ─────────────────────────── Settings ───────────────────────────
 
-fn draw_settings(app: &mut GameApp, now: DateTime<Utc>, ctx: Ctx) {
+fn draw_settings(app: &mut GameApp, now: DateTime<Utc>, ctx: Ctx<'_>) {
     let pw = 560.0;
     let effects = PostEffect::ALL;
     // Layout: effects, then Online (host toggle, join, gifts).
@@ -423,7 +435,7 @@ fn draw_settings(app: &mut GameApp, now: DateTime<Utc>, ctx: Ctx) {
 /// fauna — especially the catch-only new-biome species); the vendor roster gives
 /// a stable order + flavour names. Selecting one closes the board and drops the
 /// avatar into the instance.
-fn draw_expedition_board(app: &mut GameApp, _now: DateTime<Utc>, ctx: Ctx) {
+fn draw_expedition_board(app: &mut GameApp, _now: DateTime<Utc>, ctx: Ctx<'_>) {
     use crate::game::vendor::VENDORS;
 
     // Two-column grid of biome buttons.
@@ -482,7 +494,7 @@ fn draw_expedition_board(app: &mut GameApp, _now: DateTime<Utc>, ctx: Ctx) {
 
 // ───────────────────────────── Shop ─────────────────────────────
 
-fn draw_shop(app: &mut GameApp, now: DateTime<Utc>, ctx: Ctx) {
+fn draw_shop(app: &mut GameApp, now: DateTime<Utc>, ctx: Ctx<'_>) {
     let coins = app.zoo.coins;
     let dna = app.zoo.dna_helix;
 
@@ -617,7 +629,7 @@ fn draw_shop(app: &mut GameApp, now: DateTime<Utc>, ctx: Ctx) {
 
 /// The UPGRADES menu (key 1). Currently houses the zoo expansion; more
 /// player/zoo upgrades will join it here. The animal Shop is reached via NPCs.
-fn draw_upgrades(app: &mut GameApp, now: DateTime<Utc>, ctx: Ctx) {
+fn draw_upgrades(app: &mut GameApp, now: DateTime<Utc>, ctx: Ctx<'_>) {
     use crate::game::plot::zoo_tiles_for_level;
     use crate::game::zoo::{MAX_ZOO_LEVEL, ZOO_CAPACITY_PER_LEVEL, zoo_upgrade_duration};
 
@@ -731,7 +743,7 @@ fn buy_exotic(app: &mut GameApp, sp: SpeciesId, price: Price, now: DateTime<Utc>
 
 // ───────────────────────────── Nest ─────────────────────────────
 
-fn draw_nest(app: &mut GameApp, now: DateTime<Utc>, ctx: Ctx) {
+fn draw_nest(app: &mut GameApp, now: DateTime<Utc>, ctx: Ctx<'_>) {
     use uuid::Uuid;
 
     let Some(nest_id) = app.active_nest else {
@@ -952,7 +964,7 @@ fn draw_nest(app: &mut GameApp, now: DateTime<Utc>, ctx: Ctx) {
 
 // ────────────────────────── Food structure ──────────────────────────
 
-fn draw_structure(app: &mut GameApp, now: DateTime<Utc>, ctx: Ctx) {
+fn draw_structure(app: &mut GameApp, now: DateTime<Utc>, ctx: Ctx<'_>) {
     use crate::game::structure::{MAX_STRUCTURE_LEVEL, structure_upgrade_cost};
 
     let Some(sid) = app.active_structure else {
@@ -1024,7 +1036,7 @@ fn draw_structure(app: &mut GameApp, now: DateTime<Utc>, ctx: Ctx) {
 /// Panel for a placed pedestal: shows its dedicated animal's auto-income (if
 /// any) and offers Dedicate / Release / Move / Remove. Unlike the host-gated
 /// Sell, every co-op player may manage pedestals.
-fn draw_pedestal(app: &mut GameApp, now: DateTime<Utc>, ctx: Ctx) {
+fn draw_pedestal(app: &mut GameApp, now: DateTime<Utc>, ctx: Ctx<'_>) {
     use crate::game::action::Action;
     use crate::game::species::{self, IncomeKind};
 
@@ -1143,7 +1155,7 @@ fn draw_pedestal(app: &mut GameApp, now: DateTime<Utc>, ctx: Ctx) {
 
 /// Structure-merchant shop: buys placeable structures into the hotbar. Today
 /// one offer (pedestals); the catalog is future-proofed via `merchant::offers`.
-fn draw_merchant(app: &mut GameApp, now: DateTime<Utc>, ctx: Ctx) {
+fn draw_merchant(app: &mut GameApp, now: DateTime<Utc>, ctx: Ctx<'_>) {
     use crate::game::action::Action;
     use crate::game::merchant::{self, StructureItemKind};
     use crate::game::pedestal::{MAX_PEDESTALS, pedestal_cost};
@@ -1207,7 +1219,7 @@ fn draw_merchant(app: &mut GameApp, now: DateTime<Utc>, ctx: Ctx) {
 /// `exotic_shop` window logic + the shared `buy_exotic` path). When the window is
 /// closed, offers the DNA "skip wait" to open it early. Pops up on the side
 /// opposite the player, like the other NPC shops.
-fn draw_exotic_shop(app: &mut GameApp, now: DateTime<Utc>, ctx: Ctx) {
+fn draw_exotic_shop(app: &mut GameApp, now: DateTime<Utc>, ctx: Ctx<'_>) {
     let ctx = side_ctx(app, ctx);
     let coins = app.zoo.coins;
     let dna = app.zoo.dna_helix;
@@ -1284,7 +1296,7 @@ fn draw_exotic_shop(app: &mut GameApp, now: DateTime<Utc>, ctx: Ctx) {
 
 // ──────────────────────────── widgets ───────────────────────────
 
-fn panel(ctx: &Ctx, x: f32, y: f32, w: f32, h: f32) {
+fn panel(ctx: &Ctx<'_>, x: f32, y: f32, w: f32, h: f32) {
     let p = ctx.pt(x, y);
     let s = vec2(w, h) * ctx.scale;
     let r = 16.0 * ctx.scale;
@@ -1292,41 +1304,49 @@ fn panel(ctx: &Ctx, x: f32, y: f32, w: f32, h: f32) {
     ui::rrect_outline(p.x, p.y, s.x, s.y, r, fade(PANEL_EDGE, ctx.alpha));
 }
 
-fn title(ctx: &Ctx, x: f32, y: f32, text: &str) {
+fn title(ctx: &Ctx<'_>, x: f32, y: f32, text: &str) {
     let p = ctx.pt(x, y);
     draw_text(text, p.x, p.y, 26.0 * ctx.scale, fade(TEXT, ctx.alpha));
 }
 
-fn right_text(ctx: &Ctx, right_x: f32, y: f32, text: &str) {
+fn right_text(ctx: &Ctx<'_>, right_x: f32, y: f32, text: &str) {
     let fs = 18.0 * ctx.scale;
     let dim = measure_text(text, None, fs as u16, 1.0);
     let p = ctx.pt(right_x, y);
     draw_text(text, p.x - dim.width, p.y, fs, fade(TEXT_DIM, ctx.alpha));
 }
 
-fn label(ctx: &Ctx, x: f32, y: f32, text: &str, size: f32, color: Color) {
+fn label(ctx: &Ctx<'_>, x: f32, y: f32, text: &str, size: f32, color: Color) {
     let p = ctx.pt(x, y);
     draw_text(text, p.x, p.y, size * ctx.scale, fade(color, ctx.alpha));
 }
 
 /// A rounded button. Returns true if clicked this frame (when interactive).
-fn button(ctx: &Ctx, x: f32, y: f32, w: f32, h: f32, text: &str, enabled: bool) -> bool {
+fn button(ctx: &Ctx<'_>, x: f32, y: f32, w: f32, h: f32, text: &str, enabled: bool) -> bool {
     let p = ctx.pt(x, y);
     let s = vec2(w, h) * ctx.scale;
+    // Register with the gamepad focus navigator (in draw order) — returns true
+    // when this is the focused widget and the pad is the active device.
+    let focused = ctx.focus.register(Rect::new(p.x, p.y, s.x, s.y)) && enabled;
     let over = ctx.interactive
         && enabled
         && ctx.mouse.x >= p.x
         && ctx.mouse.x <= p.x + s.x
         && ctx.mouse.y >= p.y
         && ctx.mouse.y <= p.y + s.y;
+    let hot = over || focused;
     let bg = if !enabled {
         BTN_DISABLED
-    } else if over {
+    } else if hot {
         BTN_HOVER
     } else {
         BTN
     };
     ui::rrect(p.x, p.y, s.x, s.y, 7.0 * ctx.scale, fade(bg, ctx.alpha));
+    // Focus ring while the gamepad drives the UI.
+    if focused {
+        ui::rrect_outline(p.x, p.y, s.x, s.y, 7.0 * ctx.scale, fade(ACCENT, ctx.alpha));
+    }
     let fs = 17.0 * ctx.scale;
     let dim = measure_text(text, None, fs as u16, 1.0);
     let tc = if enabled { TEXT } else { TEXT_DIM };
@@ -1337,7 +1357,7 @@ fn button(ctx: &Ctx, x: f32, y: f32, w: f32, h: f32, text: &str, enabled: bool) 
         fs,
         fade(tc, ctx.alpha),
     );
-    over && ctx.click
+    (over && ctx.click) || (focused && ctx.focus.confirm())
 }
 
 fn fmt_secs(secs: i64) -> String {

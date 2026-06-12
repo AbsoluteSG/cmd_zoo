@@ -20,7 +20,7 @@ use crate::game::action::{Action, ActionOutcome};
 use crate::game::avatar_system::{self, Behavior};
 use crate::game::{Zoo, economy, species};
 use crate::game::plot::{WORLD_W, WORLD_H};
-use crate::input::{AvatarController, ControllerCtx, GamepadHub, LocalController, RemoteController};
+use crate::input::{AvatarController, ControllerCtx, GamepadHub, LocalController, PadButton, RemoteController};
 use crate::net::Session;
 use crate::persistence::json_file::JsonFileRepository;
 use crate::render::particles::Particles;
@@ -781,6 +781,11 @@ impl GameApp {
 
     /// Cooldown fraction `[0,1]` of ability `slot` (1 = just used, 0 = ready),
     /// for the skill-slot radial timer.
+    /// True if `btn` was just pressed on the active gamepad this frame.
+    fn pad_pressed(&self, btn: PadButton) -> bool {
+        self.gamepad.as_ref().is_some_and(|g| g.snapshot().just_pressed(btn))
+    }
+
     pub fn ability_cooldown_frac(&self, slot: usize) -> f32 {
         let max = self.skill_loadout.get(slot).map(|s| s.def().cooldown).unwrap_or(0.0);
         if max <= 0.0 {
@@ -966,9 +971,11 @@ impl GameApp {
         // Skills (slots 0..3) are gated by per-slot cooldowns; firing one starts
         // its cooldown (the skill-slot UI shows a radial timer). The slot→skill
         // binding comes from `self.skill_loadout`, so it's re-bindable later.
+        // Keyboard 1/2/3 or D-pad Left/Up/Right fire the three skill slots.
         let keys = [KeyCode::Key1, KeyCode::Key2, KeyCode::Key3];
-        for (slot, key) in keys.into_iter().enumerate() {
-            if is_key_pressed(key) && self.ability_cooldowns[slot] <= 0.0 {
+        let pads = [PadButton::DPadLeft, PadButton::DPadUp, PadButton::DPadRight];
+        for (slot, (key, pad)) in keys.into_iter().zip(pads).enumerate() {
+            if (is_key_pressed(key) || self.pad_pressed(pad)) && self.ability_cooldowns[slot] <= 0.0 {
                 let skill = self.skill_loadout[slot];
                 // Skills require an engaged target — no target, no use (and no
                 // cooldown burned).
@@ -991,7 +998,8 @@ impl GameApp {
                 }
             }
         }
-        if is_key_pressed(KeyCode::Space) {
+        // Space or gamepad X hits the live skill check.
+        if is_key_pressed(KeyCode::Space) || self.pad_pressed(PadButton::West) {
             if let Some(exp) = self.expedition.as_mut() {
                 exp.hit_skill_check(&stats);
             }
@@ -2105,20 +2113,20 @@ impl GameApp {
         let placing_mode = self.placing.is_some();
         let modal = deposit_mode || dedicate_mode || placing_mode;
         if deposit_mode {
-            if is_key_pressed(KeyCode::Escape) {
+            if is_key_pressed(KeyCode::Escape) || self.pad_pressed(PadButton::East) {
                 self.depositing = None;
             } else if is_mouse_button_pressed(MouseButton::Left) {
                 self.try_deposit_select(now);
             }
         } else if dedicate_mode {
-            if is_key_pressed(KeyCode::Escape) {
+            if is_key_pressed(KeyCode::Escape) || self.pad_pressed(PadButton::East) {
                 self.dedicating = None;
             } else if is_mouse_button_pressed(MouseButton::Left) {
                 self.try_dedicate_select(now);
             }
         } else if placing_mode {
-            // Right-click or Escape cancels; left-click drops the pedestal.
-            if is_key_pressed(KeyCode::Escape) || is_mouse_button_pressed(MouseButton::Right) {
+            // Right-click, Escape, or gamepad B cancels; left-click drops it.
+            if is_key_pressed(KeyCode::Escape) || self.pad_pressed(PadButton::East) || is_mouse_button_pressed(MouseButton::Right) {
                 self.placing = None;
                 self.set_status("placement cancelled");
             } else if is_mouse_button_pressed(MouseButton::Left) {
@@ -2164,9 +2172,16 @@ impl GameApp {
                     self.select_hotbar_slot(i);
                 }
             }
+            // D-pad Left/Right cycle the hotbar (pad analogue of the scroll wheel).
+            if self.pad_pressed(PadButton::DPadLeft) {
+                self.cycle_hotbar_slot(-1);
+            }
+            if self.pad_pressed(PadButton::DPadRight) {
+                self.cycle_hotbar_slot(1);
+            }
         }
 
-        if !modal && is_key_pressed(KeyCode::Escape) {
+        if !modal && (is_key_pressed(KeyCode::Escape) || self.pad_pressed(PadButton::East)) {
             // On the disconnect screen, Escape means "return to my zoo" rather
             // than dismissing the overlay onto a dead, frozen session.
             if self.screen == Screen::Disconnected {
@@ -2180,7 +2195,7 @@ impl GameApp {
         // E opens the nearest pad's panel (breeding nest along the top, food
         // structure along the bottom), otherwise inspects the nearest owned
         // animal (only when no menu is open).
-        if !modal && is_key_pressed(KeyCode::E) && self.menu_t < 0.02 {
+        if !modal && (is_key_pressed(KeyCode::E) || self.pad_pressed(PadButton::South)) && self.menu_t < 0.02 {
             let pad = if self.inspect.is_none() { self.nearest_pad() } else { None };
             match pad {
                 Some(Pad::Nest(i)) if i < self.zoo.nest_count as usize => {

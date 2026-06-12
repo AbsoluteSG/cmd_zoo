@@ -48,11 +48,13 @@ impl AvatarController for LocalController {
             if stick.length() > 0.0 {
                 dir = stick;
             }
-            // South (A) dashes; LeftBumper / LeftTrigger sprints.
-            if pad.just_pressed(PadButton::South) {
+            // LeftBumper dashes; LeftTrigger (held) sprints. A/B/X/Y are left
+            // free for interact/confirm/cancel/skills so movement never fights
+            // the action buttons.
+            if pad.just_pressed(PadButton::LeftBumper) {
                 actions.insert(ActionFlags::DASH);
             }
-            if pad.held(PadButton::LeftBumper) || pad.lt > 0.5 {
+            if pad.lt > 0.5 {
                 actions.insert(ActionFlags::SPRINT);
             }
         }

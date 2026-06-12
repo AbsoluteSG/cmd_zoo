@@ -88,6 +88,11 @@ pub fn snapshot_from_zoo(zoo: &Zoo) -> ZooSnapshot {
             .map(|s| s.to_string())
             .collect(),
         nest_count: zoo.nest_count,
+        nests: zoo
+            .nests
+            .iter()
+            .map(|n| NestDto { id: n.id, slots: n.slots })
+            .collect(),
         exotic_skip_window: zoo.exotic_skip_window,
         visitors: zoo
             .visitors
@@ -249,6 +254,10 @@ pub fn parse_snapshot_with_notes(bytes: &[u8]) -> Result<(ZooSnapshot, Migration
             19 => {
                 migrate_v19_to_v20(&mut value);
                 version = 20;
+            }
+            20 => {
+                migrate_v20_to_v21(&mut value);
+                version = 21;
             }
             v => bail!("no migration path from schema version {v}"),
         }
@@ -618,6 +627,15 @@ fn migrate_v19_to_v20(value: &mut Value) {
     }
 }
 
+/// v20 → v21: nests gained persisted ids/occupants (`nests`). Pre-v21 saves have
+/// none — `serde(default)` yields an empty list and the loader rebuilds nests
+/// from `nest_count`, so this step only bumps the version.
+fn migrate_v20_to_v21(value: &mut Value) {
+    if let Value::Object(map) = value {
+        map.insert("schema_version".into(), Value::from(21u64));
+    }
+}
+
 /// v11 introduces isometric grid placement: each habitat gains `tile_x`/`tile_y`.
 /// Pre-v11 saves have no coordinates, so auto-layout the habitats onto the grid
 /// deterministically — row-major, stepping by the 2×2 footprint so nothing
@@ -865,11 +883,22 @@ pub fn zoo_from_snapshot(s: ZooSnapshot) -> Result<LoadedZoo> {
         claimed_gifts: s.claimed_gifts.into_iter().collect::<HashSet<_>>(),
         discovered_recipes,
         nest_count: s.nest_count.min(crate::game::zoo::MAX_NESTS),
-        // Physical nests aren't persisted yet; recreate one per owned nest and
-        // let `relink_breeding_nests` re-seat in-progress pairs below.
-        nests: (0..s.nest_count.min(crate::game::zoo::MAX_NESTS))
-            .map(|_| crate::game::zoo::Nest::new())
-            .collect(),
+        // Restore persisted nests (stable ids + deposited occupants) so an open
+        // nest panel survives a snapshot round-trip and partial deposits aren't
+        // lost. Pre-v21 saves have no `nests` → rebuild one per owned nest with a
+        // fresh id and let `relink_breeding_nests` re-seat in-progress pairs.
+        nests: {
+            let cap = s.nest_count.min(crate::game::zoo::MAX_NESTS) as usize;
+            if s.nests.is_empty() {
+                (0..cap).map(|_| crate::game::zoo::Nest::new()).collect()
+            } else {
+                s.nests
+                    .iter()
+                    .take(cap)
+                    .map(|n| crate::game::zoo::Nest { id: n.id, slots: n.slots, offspring: None })
+                    .collect()
+            }
+        },
         exotic_skip_window: s.exotic_skip_window,
         // A 0 seed means a pre-v13 save that slipped through without derivation;
         // derive a stable seed from the player id so the world is reproducible.
@@ -937,6 +966,28 @@ mod tests {
         assert_eq!(zoo2.claimed_gifts, zoo.claimed_gifts);
         assert_eq!(zoo2.zoo_level, 1);
         assert_eq!(zoo2.zoo_upgrade_finishes_at, zoo.zoo_upgrade_finishes_at);
+    }
+
+    #[test]
+    fn nest_ids_and_occupants_survive_roundtrip() {
+        // Regression: nests used to be rebuilt from `nest_count` with fresh ids on
+        // every load, so an open nest panel closed on the next reload/online
+        // resync (its `active_nest` id no longer matched). Now ids + deposited
+        // occupants round-trip intact.
+        let now = Utc.with_ymd_and_hms(2026, 1, 1, 12, 0, 0).unwrap();
+        let mut zoo = Zoo::new(now);
+        zoo.coins = 1_000_000;
+        zoo.buy_nest().unwrap();
+        let (_, a) = zoo.buy_animal("field_mouse", now).unwrap();
+        zoo.nests[0].slots = [Some(a), None]; // a partial deposit
+        let nest_id = zoo.nests[0].id;
+
+        let json = serde_json::to_vec(&snapshot_from_zoo(&zoo)).unwrap();
+        let zoo2 = zoo_from_snapshot(parse_snapshot(&json).unwrap()).unwrap().zoo;
+
+        assert_eq!(zoo2.nests.len(), 1);
+        assert_eq!(zoo2.nests[0].id, nest_id, "nest id must be stable across a reload");
+        assert_eq!(zoo2.nests[0].slots, [Some(a), None], "deposited occupant survives");
     }
 
     #[test]

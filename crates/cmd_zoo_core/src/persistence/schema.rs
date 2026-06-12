@@ -2,7 +2,7 @@
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-pub const SCHEMA_VERSION: u32 = 20;
+pub const SCHEMA_VERSION: u32 = 21;
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct ZooSnapshot {
@@ -23,6 +23,14 @@ pub struct ZooSnapshot {
     pub discovered_recipes: Vec<String>,
     /// How many concurrent breedings the player can run (1..=4).
     pub nest_count: u8,
+    /// New in v21. The physical breeding nests with their **stable ids** and any
+    /// deposited occupants, so nest identity (and partial deposits) survive a
+    /// reload/snapshot round-trip. Previously nests were rebuilt from `nest_count`
+    /// with fresh ids each load, which broke an open nest panel on every online
+    /// resync. `serde(default)` → empty for pre-v21 saves (rebuilt from
+    /// `nest_count`). Pending offspring stays in-session only.
+    #[serde(default)]
+    pub nests: Vec<NestDto>,
     /// New in v10. Index of an exotic-shop window the player paid to open
     /// early; `None` normally. `serde(default)` keeps older test JSON loadable.
     #[serde(default)]
@@ -58,6 +66,13 @@ pub struct ZooSnapshot {
     /// New in v19. Unplaced pedestals held in the hotbar inventory.
     #[serde(default)]
     pub unplaced_pedestals: u32,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct NestDto {
+    pub id: Uuid,
+    /// The (up to two) deposited animal ids; `None` = empty slot.
+    pub slots: [Option<Uuid>; 2],
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]

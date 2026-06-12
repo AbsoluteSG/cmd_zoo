@@ -21,6 +21,7 @@
 //! model builds on.
 
 use crate::game::biome::LcgRng;
+use crate::game::skill::{Skill, SkillEffect};
 use crate::game::species::{self, SpeciesId};
 
 /// Catch tier 1–5 — the difficulty/scarcity band of a target. Reuses the same
@@ -56,37 +57,44 @@ pub struct CatchClass {
     /// Multiplier on how much a *landed* skill check depletes (on top of tier
     /// scaling). >1 rewards twitch play; <1 makes checks matter less.
     pub skill_reward_mult: f32,
+    /// Fraction of `resistance_max` the target **regenerates per catch tick**
+    /// while engaged — the "capture-regen" that makes a stall lose ground. Lure
+    /// suppresses this temporarily. Higher = the catch is more of a race.
+    pub regen_per_tick_frac: f32,
 }
 
 impl CatchClass {
     /// Baseline archetype — reproduces the original tier-only tuning.
     pub const NORMAL: Self = Self {
-        resistance_base: 60.0,
-        resistance_per_tier: 40.0,
+        resistance_base: 95.0,
+        resistance_per_tier: 70.0,
         skill_freq_base: 0.15,
         skill_freq_per_tier: 0.12,
-        miss_refill_frac: 0.75,
+        miss_refill_frac: 0.8,
         skill_reward_mult: 1.0,
+        regen_per_tick_frac: 0.03,
     };
     /// Jumpy prey: lots of skill checks, harsh miss penalty, but each hit helps a
     /// lot. A twitchy, high-variance catch.
     pub const SKITTISH: Self = Self {
-        resistance_base: 50.0,
-        resistance_per_tier: 30.0,
+        resistance_base: 80.0,
+        resistance_per_tier: 55.0,
         skill_freq_base: 0.30,
         skill_freq_per_tier: 0.20,
         miss_refill_frac: 1.0,
         skill_reward_mult: 1.3,
+        regen_per_tick_frac: 0.025,
     };
     /// Stubborn bruiser: a deep bar and few skill checks — a slow grind that
     /// leans on raw catch power/stamina rather than reflexes.
     pub const STUBBORN: Self = Self {
-        resistance_base: 90.0,
-        resistance_per_tier: 70.0,
+        resistance_base: 150.0,
+        resistance_per_tier: 115.0,
         skill_freq_base: 0.10,
         skill_freq_per_tier: 0.06,
-        miss_refill_frac: 0.5,
+        miss_refill_frac: 0.55,
         skill_reward_mult: 0.8,
+        regen_per_tick_frac: 0.04,
     };
 }
 
@@ -126,6 +134,10 @@ pub struct TargetProfile {
     pub resistance_max: f32,
     /// Expected skill-check moments per second while engaged. Scales with tier.
     pub skill_check_frequency: f32,
+    /// Resistance the target regenerates **per catch tick** while engaged (the
+    /// "capture-regen"), derived from `class.regen_per_tick_frac × resistance_max`.
+    /// Lure suppresses it temporarily.
+    pub resist_regen_per_tick: f32,
     /// The resolved catch class (carries miss-refill + skill-reward tuning the
     /// engagement reads each tick).
     pub class: CatchClass,
@@ -137,11 +149,13 @@ impl TargetProfile {
     pub fn for_species(species: SpeciesId) -> Self {
         let tier = catch_tier(species);
         let class = catch_config(species);
+        let resistance_max = class.resistance_base + class.resistance_per_tier * tier as f32;
         Self {
             species,
             tier,
-            resistance_max: class.resistance_base + class.resistance_per_tier * tier as f32,
+            resistance_max,
             skill_check_frequency: class.skill_freq_base + class.skill_freq_per_tier * tier as f32,
+            resist_regen_per_tick: class.regen_per_tick_frac * resistance_max,
             class,
         }
     }
@@ -273,6 +287,15 @@ pub struct Debuffs {
     pub flee_lock_secs: f32,
     /// Seconds remaining on the current `weaken` stack.
     pub weaken_secs: f32,
+    /// Fraction (0..1) by which the target's per-tick capture-regen is suppressed
+    /// (Lure). Held flat while `regen_reduction_secs > 0`, then snaps to 0.
+    pub regen_reduction: f32,
+    /// Seconds remaining on the regen-suppression (Lure).
+    pub regen_reduction_secs: f32,
+    /// Resistance the active DOT (Trap) depletes **per catch tick** while live.
+    pub dot_per_tick: f32,
+    /// Seconds remaining on the DOT (Trap).
+    pub dot_secs: f32,
 }
 
 /// A DBD-style timed skill-check window. Surfaced on the engagement for the
@@ -287,21 +310,29 @@ pub struct SkillCheck {
     /// Resistance depleted if hit (already tier-scaled; `skill_bonus` applies
     /// on top at hit time).
     pub reward: f32,
+    /// Current needle/pointer angle in radians, measured **clockwise from the
+    /// top (12 o'clock)**. Advances by `spin` each tick — a DBD-style sweep.
+    pub angle: f32,
+    /// Needle angular velocity (rad/s); sign sets sweep direction.
+    pub spin: f32,
+    /// Start of the valid arc (radians, clockwise from top).
+    pub zone_start: f32,
+    /// Angular length of the valid arc (radians).
+    pub zone_len: f32,
+}
+
+impl SkillCheck {
+    /// True when the needle currently sits inside the valid arc — i.e. pressing
+    /// now would be a successful (great) hit.
+    pub fn in_zone(&self) -> bool {
+        use std::f32::consts::TAU;
+        let rel = (self.angle - self.zone_start).rem_euclid(TAU);
+        rel <= self.zone_len
+    }
 }
 
 /// An equippable ability the player triggers mid-engagement. Sourced from gear;
 /// the engagement resolves each into instant depletion and/or a debuff.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum AbilityKind {
-    /// A net: a big burst of instant catch-resistance depletion.
-    Net,
-    /// A lure/tether: locks the target in place so it can't flee (a support
-    /// role in a group); minor depletion.
-    Lure,
-    /// A trap: weakens the target's resistance over time (a depletion debuff).
-    Trap,
-}
-
 /// How an engagement resolved this tick.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum EngagementOutcome {
@@ -356,8 +387,6 @@ pub const STAMINA_PER_TICK_PER_RESISTANCE: f32 = 0.1;
 /// the per-class `skill_reward_mult`. Tuned so a well-timed check is a meaningful
 /// chunk of a low-tier bar.
 const SKILL_CHECK_BASE_REWARD: f32 = 18.0;
-/// How long a skill-check window stays hittable.
-const SKILL_CHECK_WINDOW: f32 = 1.1;
 
 impl CatchEngagement {
     /// Begin engaging `target`. `seed` makes the skill-check cadence
@@ -420,13 +449,26 @@ impl CatchEngagement {
             self.last_hit_crit = stats.crit_chance > 0.0 && self.rng.next_f32() < stats.crit_chance;
             let amount = if self.last_hit_crit { per_tick * stats.crit_mult } else { per_tick };
             self.deplete(amount);
+            // Trap DOT: an extra chunk of depletion each catch tick while live.
+            if self.debuffs.dot_secs > 0.0 {
+                self.deplete(self.debuffs.dot_per_tick);
+            }
+            // Capture-regen: the target heals a little each tick (Lure suppresses
+            // a fraction of it). Applied after damage so a finishing tick still
+            // captures.
+            if !self.is_captured() {
+                let regen = self.target.resist_regen_per_tick * (1.0 - self.debuffs.regen_reduction);
+                self.heal(regen);
+            }
             if self.is_captured() {
                 break;
             }
         }
 
-        // Skill-check lifecycle: expire a live window, or count down to the next.
+        // Skill-check lifecycle: spin the needle and expire a live window, or
+        // count down to the next.
         if let Some(sc) = &mut self.skill_check {
+            sc.angle = (sc.angle + sc.spin * dt).rem_euclid(std::f32::consts::TAU);
             sc.remaining -= dt;
             if sc.remaining <= 0.0 {
                 // Missed it — the target claws back part of the bar (lose-con).
@@ -444,37 +486,47 @@ impl CatchEngagement {
         self.outcome()
     }
 
-    /// Trigger an equipped ability. Resolves to instant depletion and/or a
-    /// debuff, scaled by the engager's stats. Safe to call any time.
-    pub fn use_ability(&mut self, ability: AbilityKind, stats: &CatchStats) {
-        match ability {
-            AbilityKind::Net => {
-                // A burst proportional to baseline power — the bread-and-butter
-                // active. Scales with tier so it stays relevant on deep bars.
-                self.deplete(stats.catch_power * 2.5 + 8.0 * self.target.tier as f32);
+    /// Fire a [`Skill`], applying its [`SkillEffect`] to this engagement, scaled by
+    /// the engager's stats. Safe to call any time (cooldown gating lives in the
+    /// app/UI). See [`crate::game::skill`] for the catalog.
+    pub fn use_skill(&mut self, skill: Skill, stats: &CatchStats) {
+        let tier = self.target.tier as f32;
+        match skill.def().effect {
+            // Net: instant, un-channelled flat damage (gear-scaled).
+            SkillEffect::FlatDamage { base, per_tier } => {
+                self.deplete((base + per_tier * tier) * stats.debuff_power);
             }
-            AbilityKind::Lure => {
-                self.deplete(stats.catch_power * 0.5);
-                self.debuffs.flee_lock_secs = self.debuffs.flee_lock_secs.max(4.0);
+            // Lure: suppress the target's capture-regen for a while (re-cast refreshes).
+            SkillEffect::ReduceRegen { frac, secs } => {
+                self.debuffs.regen_reduction = self.debuffs.regen_reduction.max(frac.clamp(0.0, 1.0));
+                self.debuffs.regen_reduction_secs = self.debuffs.regen_reduction_secs.max(secs);
             }
-            AbilityKind::Trap => {
-                // Stack a weaken debuff that speeds all depletion for a while.
-                self.debuffs.weaken = (self.debuffs.weaken + 0.4 * stats.debuff_power).min(1.5);
-                self.debuffs.weaken_secs = self.debuffs.weaken_secs.max(5.0);
+            // Trap: start a short DOT that procs each catch tick (gear-scaled).
+            SkillEffect::Dot { base, per_tier, secs } => {
+                self.debuffs.dot_per_tick = (base + per_tier * tier) * stats.debuff_power;
+                self.debuffs.dot_secs = self.debuffs.dot_secs.max(secs);
             }
         }
     }
 
-    /// The player hit the live skill check. Applies its (skill-bonus-scaled)
-    /// reward and clears the window. Returns `true` if a window was live.
+    /// The player pressed during a live skill check. If the needle was inside the
+    /// valid arc it's a **great** hit — applies the (skill-bonus-scaled) reward;
+    /// otherwise it's an early/late press that counts as a **miss** (the target
+    /// claws part of the bar back). Either way the window clears and the cadence
+    /// resumes. Returns `true` only on a successful in-zone hit.
     pub fn hit_skill_check(&mut self, stats: &CatchStats) -> bool {
         let Some(sc) = self.skill_check.take() else {
             return false;
         };
-        self.deplete(sc.reward * stats.skill_bonus);
+        let hit = sc.in_zone();
+        if hit {
+            self.deplete(sc.reward * stats.skill_bonus);
+        } else {
+            self.refill(sc.reward * self.target.class.miss_refill_frac);
+        }
         // The next window cadence resumes from here.
         self.next_check_in = Self::roll_next_check(&self.target, &mut self.rng);
-        true
+        hit
     }
 
     /// The player let the skill check lapse (or deliberately skipped it). Refills
@@ -524,6 +576,17 @@ impl CatchEngagement {
         self.contribution = (self.contribution - applied).max(0.0);
     }
 
+    /// The target's own capture-regen healing the bar back up (clamped to full).
+    /// Unlike [`refill`], this does **not** walk back banked contribution — the
+    /// engager's credited damage stands; the animal is just recovering.
+    fn heal(&mut self, amount: f32) {
+        if amount <= 0.0 {
+            return;
+        }
+        let headroom = (self.target.resistance_max - self.resistance).max(0.0);
+        self.resistance += amount.min(headroom);
+    }
+
     fn decay_debuffs(&mut self, dt: f32) {
         if self.debuffs.flee_lock_secs > 0.0 {
             self.debuffs.flee_lock_secs = (self.debuffs.flee_lock_secs - dt).max(0.0);
@@ -534,16 +597,43 @@ impl CatchEngagement {
                 self.debuffs.weaken = 0.0;
             }
         }
+        if self.debuffs.regen_reduction_secs > 0.0 {
+            self.debuffs.regen_reduction_secs = (self.debuffs.regen_reduction_secs - dt).max(0.0);
+            if self.debuffs.regen_reduction_secs == 0.0 {
+                self.debuffs.regen_reduction = 0.0;
+            }
+        }
+        if self.debuffs.dot_secs > 0.0 {
+            self.debuffs.dot_secs = (self.debuffs.dot_secs - dt).max(0.0);
+            if self.debuffs.dot_secs == 0.0 {
+                self.debuffs.dot_per_tick = 0.0;
+            }
+        }
     }
 
     fn spawn_skill_check(&mut self) {
-        let reward = SKILL_CHECK_BASE_REWARD
-            * (0.6 + 0.2 * self.target.tier as f32)
-            * self.target.class.skill_reward_mult;
+        use std::f32::consts::{PI, TAU};
+        let tier = self.target.tier as f32;
+        let reward = SKILL_CHECK_BASE_REWARD * (0.6 + 0.2 * tier) * self.target.class.skill_reward_mult;
+
+        // The valid arc shrinks with tier (harder), the needle spins faster, and
+        // its direction is randomised. The needle starts opposite the zone centre
+        // so there's a moment of lead-in before it reaches the band.
+        let zone_len = (1.20 - 0.10 * tier).clamp(0.45, 1.30);
+        let zone_start = self.rng.next_f32() * TAU;
+        let dir = if self.rng.next_f32() < 0.5 { -1.0 } else { 1.0 };
+        let spin = dir * (3.0 + 0.5 * tier).min(7.0);
+        let angle = (zone_start + zone_len * 0.5 + PI).rem_euclid(TAU);
+        // Lifetime ≈ 1.5 sweeps so the needle passes the band ~once or twice.
+        let window = (TAU * 1.5 / spin.abs()).clamp(1.3, 3.0);
         self.skill_check = Some(SkillCheck {
-            remaining: SKILL_CHECK_WINDOW,
-            window: SKILL_CHECK_WINDOW,
+            remaining: window,
+            window,
             reward,
+            angle,
+            spin,
+            zone_start,
+            zone_len,
         });
     }
 
@@ -566,6 +656,7 @@ mod tests {
             tier: 1,
             resistance_max: tier_resistance,
             skill_check_frequency: 0.5,
+            resist_regen_per_tick: 0.0, // tests opt in by setting this explicitly
             class: CatchClass::NORMAL,
         }
     }
@@ -601,28 +692,29 @@ mod tests {
     }
 
     #[test]
-    fn net_ability_bursts_the_bar() {
+    fn net_skill_bursts_the_bar() {
         let mut e = CatchEngagement::new(profile(100.0), 7);
         let before = e.resistance;
-        e.use_ability(AbilityKind::Net, &CatchStats::default());
+        e.use_skill(Skill::Net, &CatchStats::default());
         assert!(e.resistance < before, "net should deplete the bar");
         assert!(e.contribution > 0.0);
     }
 
     #[test]
-    fn trap_weaken_speeds_depletion() {
+    fn trap_dot_speeds_depletion() {
         let stats = CatchStats::default();
-        // Two identical engagements; one gets a Trap weaken first.
+        // Two identical engagements; one gets a Trap DOT first. Over a few catch
+        // ticks the DOT procs each tick, so the trapped target loses more.
         let mut plain = CatchEngagement::new(profile(500.0), 3);
         let mut trapped = CatchEngagement::new(profile(500.0), 3);
-        trapped.use_ability(AbilityKind::Trap, &stats);
+        trapped.use_skill(Skill::Trap, &stats);
         for _ in 0..30 {
             plain.tick(0.1, &stats, &mut 1.0e9_f32);
             trapped.tick(0.1, &stats, &mut 1.0e9_f32);
         }
         assert!(
             trapped.resistance < plain.resistance,
-            "weakened target should have less resistance left"
+            "the DOT should leave the trapped target with less resistance"
         );
     }
 
@@ -640,10 +732,38 @@ mod tests {
             }
         }
         assert!(spawned, "a skill check should spawn within ~30s");
+        // Line the needle up inside the valid arc so the press is a great hit.
+        if let Some(sc) = e.skill_check.as_mut() {
+            sc.angle = sc.zone_start + sc.zone_len * 0.5;
+            assert!(sc.in_zone(), "needle parked in the band reads as in-zone");
+        }
         let before = e.resistance;
-        assert!(e.hit_skill_check(&stats));
+        assert!(e.hit_skill_check(&stats), "an in-zone press is a hit");
         assert!(e.resistance < before, "hitting the check should deplete the bar");
         assert!(e.skill_check.is_none(), "window clears after a hit");
+    }
+
+    #[test]
+    fn pressing_out_of_zone_is_a_miss() {
+        let mut e = CatchEngagement::new(profile(1000.0), 7);
+        let stats = CatchStats::default();
+        for _ in 0..600 {
+            e.tick(0.05, &stats, &mut 1.0e9_f32);
+            if e.skill_check.is_some() {
+                break;
+            }
+        }
+        assert!(e.skill_check.is_some(), "a skill check should spawn");
+        e.deplete(60.0); // headroom so a refill is observable
+        // Park the needle directly opposite the band — well outside it.
+        if let Some(sc) = e.skill_check.as_mut() {
+            sc.angle = sc.zone_start + sc.zone_len * 0.5 + std::f32::consts::PI;
+            assert!(!sc.in_zone());
+        }
+        let before = e.resistance;
+        assert!(!e.hit_skill_check(&stats), "an out-of-zone press is not a hit");
+        assert!(e.resistance > before, "a mistimed press claws the bar back up");
+        assert!(e.skill_check.is_none(), "window clears after a press");
     }
 
     #[test]
@@ -666,12 +786,26 @@ mod tests {
     }
 
     #[test]
-    fn lure_locks_flee() {
-        let mut e = CatchEngagement::new(profile(100.0), 5);
-        e.use_ability(AbilityKind::Lure, &CatchStats::default());
-        assert!(e.debuffs.flee_lock_secs > 0.0);
-        e.tick(1.0, &CatchStats::default(), &mut 1.0e9_f32);
-        assert!(e.debuffs.flee_lock_secs > 0.0, "lock persists a few seconds");
+    fn lure_suppresses_capture_regen() {
+        // Two identical engagements with capture-regen; one is Lured (regen cut).
+        // With no depletion power, only regen moves the bar — so the lured target
+        // climbs back slower and ends lower.
+        let mut p = profile(500.0);
+        p.resist_regen_per_tick = 30.0;
+        let stats = CatchStats { catch_power: 0.0, ..Default::default() };
+        let mut plain = CatchEngagement::new(p.clone(), 3);
+        let mut lured = CatchEngagement::new(p, 3);
+        plain.deplete(350.0); // open headroom so regen has room to heal
+        lured.deplete(350.0);
+        lured.use_skill(Skill::Lure, &stats);
+        for _ in 0..40 {
+            plain.tick(0.1, &stats, &mut 1.0e9_f32);
+            lured.tick(0.1, &stats, &mut 1.0e9_f32);
+        }
+        assert!(
+            lured.resistance < plain.resistance,
+            "lure should suppress regen, so the bar recovers slower"
+        );
     }
 
     #[test]

@@ -5,14 +5,15 @@
 //! holds, so both feed back into the collection loop.
 //!
 //! A [`GearItem`] grants passive catch stats and (optionally) an active
-//! [`AbilityKind`] usable mid-engagement. A [`Loadout`] is the small set of
+//! [`Skill`] usable mid-engagement. A [`Loadout`] is the small set of
 //! equipped items; its combined stats + abilities flow into a
 //! [`CatchEngagement`](crate::game::catch::CatchEngagement) via [`CatchStats`].
 //!
 //! Pure data + arithmetic, headless and unit-tested — the same derivation runs
 //! client-side for Solo and inside a SpacetimeDB reducer online.
 
-use crate::game::catch::{AbilityKind, CatchMods, CatchStats};
+use crate::game::catch::{CatchMods, CatchStats};
+use crate::game::skill::Skill;
 
 /// Stable string id of a gear item (mirrors `SpeciesId`'s `&'static str` style).
 pub type GearId = &'static str;
@@ -41,7 +42,7 @@ pub struct GearItem {
     /// Passive stat modifiers granted while equipped.
     pub mods: CatchMods,
     /// The active ability this item grants, if any.
-    pub ability: Option<AbilityKind>,
+    pub ability: Option<Skill>,
 }
 
 /// The starter catalog. Intentionally tiny for Phase 3: a baseline tool plus one
@@ -52,7 +53,7 @@ pub const STARTER_NET: GearItem = GearItem {
     display_name: "Starter Net",
     slot: GearSlot::Tool,
     mods: CatchMods { catch_power: 8.0, ..CatchMods::NONE },
-    ability: Some(AbilityKind::Net),
+    ability: Some(Skill::Net),
 };
 
 pub const SNARE_LURE: GearItem = GearItem {
@@ -60,7 +61,7 @@ pub const SNARE_LURE: GearItem = GearItem {
     display_name: "Snare Lure",
     slot: GearSlot::Support,
     mods: CatchMods { skill_bonus: 0.15, debuff_power: 0.2, ..CatchMods::NONE },
-    ability: Some(AbilityKind::Lure),
+    ability: Some(Skill::Lure),
 };
 
 pub const BOX_TRAP: GearItem = GearItem {
@@ -68,7 +69,7 @@ pub const BOX_TRAP: GearItem = GearItem {
     display_name: "Box Trap",
     slot: GearSlot::Support,
     mods: CatchMods { catch_power: 2.0, debuff_power: 0.5, ..CatchMods::NONE },
-    ability: Some(AbilityKind::Trap),
+    ability: Some(Skill::Trap),
 };
 
 /// Look up a gear item by id.
@@ -119,7 +120,7 @@ impl Loadout {
     }
 
     /// The active abilities this loadout grants, in slot order.
-    pub fn abilities(&self) -> Vec<AbilityKind> {
+    pub fn abilities(&self) -> Vec<Skill> {
         self.items().filter_map(|g| g.ability).collect()
     }
 }
@@ -173,8 +174,8 @@ mod tests {
     fn starter_loadout_grants_net_and_lure() {
         let lo = Loadout::starter();
         let abilities = lo.abilities();
-        assert!(abilities.contains(&AbilityKind::Net));
-        assert!(abilities.contains(&AbilityKind::Lure));
+        assert!(abilities.contains(&Skill::Net));
+        assert!(abilities.contains(&Skill::Lure));
     }
 
     #[test]
@@ -184,8 +185,8 @@ mod tests {
         let displaced = lo.equip(&BOX_TRAP);
         assert_eq!(displaced, Some(SNARE_LURE.id));
         assert_eq!(lo.support, Some(BOX_TRAP.id));
-        assert!(lo.abilities().contains(&AbilityKind::Trap));
-        assert!(!lo.abilities().contains(&AbilityKind::Lure));
+        assert!(lo.abilities().contains(&Skill::Trap));
+        assert!(!lo.abilities().contains(&Skill::Lure));
     }
 
     #[test]

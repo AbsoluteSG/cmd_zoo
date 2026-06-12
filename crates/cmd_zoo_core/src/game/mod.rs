@@ -19,6 +19,7 @@ pub mod player;
 pub mod power;
 pub mod rank;
 pub mod rng;
+pub mod skill;
 pub mod species;
 pub mod structure;
 pub mod structure_kind;

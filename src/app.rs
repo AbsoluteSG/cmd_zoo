@@ -62,6 +62,22 @@ pub enum Screen {
     ExpeditionBoard,
 }
 
+/// Animated state for the pre-game main menu (Solo vs Online). Lives while the
+/// player is on the title screen; cleared to `None` once a mode is chosen, after
+/// which the normal World/HUD flow takes over. All fields are smoothed each
+/// frame so hover reveals/tweens never snap.
+#[derive(Clone, Copy, Default)]
+pub struct MainMenuState {
+    /// Eased hover amount on the Solo card (0 = idle/darkened, 1 = lit + armed).
+    pub solo_hover: f32,
+    /// Eased hover amount on the Online card.
+    pub online_hover: f32,
+    /// Ever-advancing phase (seconds) driving the pointer-arm bob.
+    pub arm_phase: f32,
+    /// Intro fade/scale-in for the whole menu (0 → 1 on first frames).
+    pub appear: f32,
+}
+
 /// An interactive ground pad reachable with E: a breeding nest (top row), a
 /// food structure (bottom row), or a placed pedestal (anywhere).
 #[derive(Clone, Copy)]
@@ -370,8 +386,6 @@ const EXPEDITION_CLICK_RADIUS: f32 = 60.0;
 /// `CatchStats::stamina_regen_per_tick` — a **stat**, so gear/buffs can raise it
 /// (set its baseline in `catch::CatchStats::base`).
 const STAMINA_REGEN_TICK_SECS: f32 = 1.0;
-/// Per-slot ability cooldowns (seconds), slots = [Net, Lure, Trap].
-const ABILITY_COOLDOWNS: [f32; 3] = [6.0, 8.0, 10.0];
 /// How much closer the camera zooms (× the expedition base) while engaging.
 const ENGAGE_ZOOM_MULT: f32 = 1.6;
 
@@ -434,6 +448,10 @@ pub struct GameApp {
     pub menu_t: f32,
     /// The menu being rendered — lags `screen` during the close tween.
     pub shown_menu: Screen,
+    /// When `Some`, the pre-game main menu (Solo vs Online) owns the whole
+    /// screen and input; `tick`/`handle_input`/`draw` short-circuit to it. Set
+    /// to `None` once the player picks a mode.
+    pub main_menu: Option<MainMenuState>,
     /// Offscreen target the world scene is rendered into for post-processing
     /// (menu blur and/or fullscreen effects). Recreated on resize.
     scene_rt: Option<RenderTarget>,
@@ -593,8 +611,11 @@ pub struct GameApp {
     pub catch_buffs: Vec<crate::game::catch::CatchMods>,
     /// Accumulator for **tick-rate** stamina regen (stepped, not continuous).
     pub stamina_regen_accum: f32,
-    /// Per-slot ability cooldown remaining (seconds), slots = [Net, Lure, Trap].
+    /// Per-slot ability cooldown remaining (seconds).
     pub ability_cooldowns: [f32; 3],
+    /// Which [`Skill`] each hotbar slot fires (`0` = key `1`, …). Defaults to
+    /// [`crate::game::skill::DEFAULT_LOADOUT`]; re-bindable later.
+    pub skill_loadout: [crate::game::skill::Skill; 3],
     /// The expedition's base camera zoom (captured at launch); engaging zooms in
     /// a multiple of this and reverts to it on disengage.
     pub expedition_base_zoom: f32,
@@ -663,6 +684,7 @@ impl GameApp {
             screen: Screen::World,
             menu_t: 0.0,
             shown_menu: Screen::World,
+            main_menu: Some(MainMenuState::default()),
             scene_rt: None,
             effect: PostEffect::None,
             post: build_post_material(),
@@ -713,6 +735,7 @@ impl GameApp {
             catch_buffs: Vec::new(),
             stamina_regen_accum: 0.0,
             ability_cooldowns: [0.0; 3],
+            skill_loadout: crate::game::skill::DEFAULT_LOADOUT,
             expedition_base_zoom: 1.0,
             font: crate::render::textures::ui_font(),
             catch_numbers: Vec::new(),
@@ -755,7 +778,7 @@ impl GameApp {
     /// Cooldown fraction `[0,1]` of ability `slot` (1 = just used, 0 = ready),
     /// for the skill-slot radial timer.
     pub fn ability_cooldown_frac(&self, slot: usize) -> f32 {
-        let max = ABILITY_COOLDOWNS.get(slot).copied().unwrap_or(0.0);
+        let max = self.skill_loadout.get(slot).map(|s| s.def().cooldown).unwrap_or(0.0);
         if max <= 0.0 {
             return 0.0;
         }
@@ -886,7 +909,6 @@ impl GameApp {
     /// `T`, fire abilities/skill-checks, tick the engagement, and grant any
     /// capture into the hub zoo.
     fn update_expedition(&mut self, now: DateTime<Utc>) {
-        use crate::game::catch::AbilityKind;
         if self.expedition.is_none() {
             return;
         }
@@ -937,23 +959,21 @@ impl GameApp {
                 }
             }
         }
-        // Abilities (slots 0..3) are gated by per-slot cooldowns; using one starts
-        // its cooldown (the skill-slot UI shows a radial timer).
-        let slots = [
-            (KeyCode::Key1, AbilityKind::Net),
-            (KeyCode::Key2, AbilityKind::Lure),
-            (KeyCode::Key3, AbilityKind::Trap),
-        ];
-        for (slot, (key, kind)) in slots.into_iter().enumerate() {
+        // Skills (slots 0..3) are gated by per-slot cooldowns; firing one starts
+        // its cooldown (the skill-slot UI shows a radial timer). The slot→skill
+        // binding comes from `self.skill_loadout`, so it's re-bindable later.
+        let keys = [KeyCode::Key1, KeyCode::Key2, KeyCode::Key3];
+        for (slot, key) in keys.into_iter().enumerate() {
             if is_key_pressed(key) && self.ability_cooldowns[slot] <= 0.0 {
-                // Abilities require an engaged target — no target, no use (and no
+                let skill = self.skill_loadout[slot];
+                // Skills require an engaged target — no target, no use (and no
                 // cooldown burned).
                 let used = self
                     .expedition
                     .as_mut()
                     .map(|exp| {
                         if exp.is_engaging() {
-                            exp.use_ability(kind, &stats);
+                            exp.use_skill(skill, &stats);
                             true
                         } else {
                             false
@@ -961,9 +981,9 @@ impl GameApp {
                     })
                     .unwrap_or(false);
                 if used {
-                    self.ability_cooldowns[slot] = ABILITY_COOLDOWNS[slot];
+                    self.ability_cooldowns[slot] = skill.def().cooldown;
                 } else if self.expedition.as_ref().is_some_and(|e| !e.is_engaging()) {
-                    self.set_status("Select a target first to use abilities");
+                    self.set_status("Select a target first to use skills");
                 }
             }
         }
@@ -1183,6 +1203,50 @@ impl GameApp {
             format!("local:{}", self.zoo.player.id),
             self.zoo.player.name.clone(),
         )
+    }
+
+    /// Drive the pre-game main menu: smooth the hover/intro tweens, and on a
+    /// left-click over a card start that mode. Layout mirrors `draw_main_menu`.
+    fn handle_main_menu(&mut self, now: DateTime<Utc>) {
+        let dt = get_frame_time().min(0.05);
+        let mouse = {
+            let (mx, my) = mouse_position();
+            vec2(mx, my)
+        };
+        let (solo, online) = crate::render::menus::main_menu_card_rects();
+        // Hit-test a tighter inset so the transparent card margins don't count.
+        let over_solo = inset_rect(solo, 0.16, 0.06).contains(mouse);
+        let over_online = inset_rect(online, 0.16, 0.06).contains(mouse);
+
+        // Exponential smoothing toward each target (frame-rate independent).
+        let approach = |cur: f32, target: f32, rate: f32| cur + (target - cur) * (1.0 - (-rate * dt).exp());
+        if let Some(m) = self.main_menu.as_mut() {
+            m.appear = approach(m.appear, 1.0, 6.0);
+            m.solo_hover = approach(m.solo_hover, if over_solo { 1.0 } else { 0.0 }, 14.0);
+            m.online_hover = approach(m.online_hover, if over_online { 1.0 } else { 0.0 }, 14.0);
+            m.arm_phase += dt;
+        }
+
+        if is_mouse_button_pressed(MouseButton::Left) {
+            if over_solo {
+                self.start_mode(now, false);
+            } else if over_online {
+                self.start_mode(now, true);
+            }
+        }
+    }
+
+    /// Leave the main menu into gameplay. `online` also opens the hub connection;
+    /// otherwise we drop straight into solo play (offline World).
+    fn start_mode(&mut self, now: DateTime<Utc>, online: bool) {
+        self.main_menu = None;
+        self.set_screen(Screen::World);
+        self.sounds.play("income_sfx");
+        if online {
+            self.toggle_online(now);
+        } else {
+            self.set_status("Solo play — F7 to go online anytime");
+        }
     }
 
     fn toggle_online(&mut self, now: DateTime<Utc>) {
@@ -1828,6 +1892,10 @@ impl GameApp {
     /// One simulation step: pick up external writes, advance breeding, persist
     /// completions. Ported from the egui `EguiApp::tick` critical section.
     pub fn tick(&mut self, now: DateTime<Utc>) {
+        // The pre-game main menu freezes the world simulation entirely.
+        if self.main_menu.is_some() {
+            return;
+        }
         self.clear_stale_status();
         // As a guest, the on-screen zoo is the host's mirror. We must NOT read
         // our own save off disk into it (that caused the "flash back to my zoo"
@@ -1894,6 +1962,11 @@ impl GameApp {
     /// Menu toggles + (when no menu is open) camera input + click-to-redeem,
     /// plus critter wandering (which continues behind menus).
     pub fn handle_input(&mut self, now: DateTime<Utc>) {
+        // Pre-game main menu owns input until the player picks a mode.
+        if self.main_menu.is_some() {
+            self.handle_main_menu(now);
+            return;
+        }
         // F3 toggles the biome-preview debug mode (free-fly, biomes only).
         if is_key_pressed(KeyCode::F3) {
             self.debug_biome = !self.debug_biome;
@@ -3093,6 +3166,12 @@ impl GameApp {
     }
 
     pub fn draw(&mut self, now: DateTime<Utc>) {
+        // Pre-game main menu owns the whole screen.
+        if self.main_menu.is_some() {
+            menus::draw_main_menu(self);
+            self.draw_cursor();
+            return;
+        }
         // Biome-preview debug mode short-circuits the whole gameplay render:
         // just the biome colour field + a minimal HUD, then the cursor.
         if self.debug_biome {
@@ -3420,6 +3499,14 @@ fn build_grass_material() -> Option<Material> {
 
 /// Draw a render-target texture to the screen at `(x,y)` sized `w×h`. Render
 /// targets are stored bottom-up, so flip vertically.
+/// Shrink a rect toward its centre by fractional `fx`/`fy` of its size (per
+/// side). Used to hit-test the visible card inside its transparent PNG margin.
+fn inset_rect(r: Rect, fx: f32, fy: f32) -> Rect {
+    let dx = r.w * fx;
+    let dy = r.h * fy;
+    Rect::new(r.x + dx, r.y + dy, r.w - 2.0 * dx, r.h - 2.0 * dy)
+}
+
 fn blit(tex: &Texture2D, x: f32, y: f32, w: f32, h: f32, alpha: f32) {
     draw_texture_ex(
         tex,

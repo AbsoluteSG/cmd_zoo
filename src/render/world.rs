@@ -750,10 +750,6 @@ fn draw_prop(world: Vec2, tex: Option<&Texture2D>, scale: f32, flip: bool, cam: 
         return;
     }
     let feet = view::world_to_screen(world, cam);
-    // Soft contact shadow at the base. Both radii scale with the prop's *width*
-    // so the flat ground disc stays tight to the base — keying the vertical
-    // radius off height pushed tall props' shadows far below their feet.
-    draw_ellipse(feet.x, feet.y, w * 0.32, w * 0.11, 0.0, SHADOW);
     draw_texture_ex(
         t,
         feet.x - w * 0.5,
@@ -1048,20 +1044,23 @@ fn draw_expedition_bars(app: &mut GameApp) {
             crate::game::species::get(eng.target.species).display_name,
             eng.target.tier,
             (1.0 - eng.progress()).clamp(0.0, 1.0), // remaining, empties toward capture
-            eng.skill_check.is_some(),
+            eng.skill_check, // Copy: carries needle angle + valid arc
         )
     });
-    if let Some((name, tier, remaining, skill_up)) = engaged {
+    if let Some((name, tier, remaining, skill_check)) = engaged {
         let cy = 30.0 * s;
         draw_meter_bar(container.as_ref(), fill.as_ref(), bx, cy, w, h, inset, remaining, catch_container, catch_fill);
         // Label centred *inside* the bar.
         let label = format!("Catching {name}  (T{tier})");
         text_centered(&label, bx + w * 0.5, cy + h * 0.5, fs, WHITE, font);
-        // Skill-check prompt pulses just below the catch bar.
-        if skill_up {
-            let pulse = (get_time() as f32 * 8.0).sin() * 0.5 + 0.5;
-            let col = Color::new(1.0, 0.9, 0.3, 0.6 + 0.4 * pulse);
-            text_centered("SKILL CHECK!  [SPACE]", bx + w * 0.5, cy + h + 18.0 * s, fs, col, font);
+        // DBD-style compass skill check, centred on screen (large — it may cover
+        // the engaged animal, which is fine: the player is focused on the check).
+        if let Some(sc) = skill_check {
+            let size = (screen_height() * 0.42).clamp(220.0, 520.0);
+            let ccx = screen_width() * 0.5;
+            let ccy = screen_height() * 0.5;
+            draw_skill_check(app, sc, ccx, ccy, size);
+            text_centered("[SPACE]", ccx, ccy + size * 0.5 + 18.0 * s, fs, color_u8!(245, 240, 220, 230), font);
         }
     }
 
@@ -1083,13 +1082,13 @@ fn draw_expedition_bars(app: &mut GameApp) {
     draw_skill_slots(app, bx + w * 0.5, sy, s);
 }
 
-/// The three ability slots (Net/Lure/Trap), centred above the stamina bar. Each:
-/// `skill_container` frame, `skill_icon`, and a radial `skill_timer_overlay`
-/// cooldown sweep. Falls back to simple squares without the sprites.
-/// `(center_x, bar_y)` is the stamina bar's top-centre.
+/// The three skill slots, centred above the stamina bar. Each: `skill_container`
+/// frame, the slot skill's icon (from its `SkillDef`), and a radial
+/// `skill_timer_overlay` cooldown sweep. Falls back to simple squares without the
+/// sprites. `(center_x, bar_y)` is the stamina bar's top-centre. The slot→skill
+/// binding (and thus each icon) comes from `app.skill_loadout`.
 fn draw_skill_slots(app: &mut GameApp, center_x: f32, bar_y: f32, s: f32) {
     let container = app.textures.ui("skill_container");
-    let icon = app.textures.ui("skill_icon");
     let overlay = app.textures.ui("skill_timer_overlay");
     let slot = 80.0 * s; // fixed 80×80 at the reference resolution, scaled
     let gap = slot * 0.18;
@@ -1106,8 +1105,10 @@ fn draw_skill_slots(app: &mut GameApp, center_x: f32, bar_y: f32, s: f32) {
             draw_rectangle(x, y, slot, slot, color_u8!(40, 44, 52, 230));
             draw_rectangle_lines(x, y, slot, slot, 2.0, color_u8!(255, 255, 255, 70));
         }
-        // Icon (inset).
+        // Icon (inset) for the skill bound to this slot.
         let pad = slot * 0.14;
+        let icon_id = app.skill_loadout.get(i).map(|sk| sk.def().icon).filter(|id| !id.is_empty());
+        let icon = icon_id.and_then(|id| app.textures.skill(id));
         if let Some(ic) = icon.as_ref() {
             draw_texture_ex(
                 ic,
@@ -2072,6 +2073,103 @@ fn draw_radial(tex: &Texture2D, cx: f32, cy: f32, size: f32, frac: f32, tint: Co
     let segs = ((48.0 * frac).ceil() as usize).max(1);
     let start = -std::f32::consts::FRAC_PI_2; // top
     let sweep = std::f32::consts::TAU * frac;
+    let uv = |dx: f32, dy: f32| (0.5 + dx / size, 0.5 + dy / size);
+    let mut vertices = Vec::with_capacity(segs + 2);
+    let (u0, v0) = uv(0.0, 0.0);
+    vertices.push(macroquad::models::Vertex::new(cx, cy, 0.0, u0, v0, tint));
+    for i in 0..=segs {
+        let a = start + sweep * (i as f32 / segs as f32);
+        let (dx, dy) = (a.cos() * r, a.sin() * r);
+        let (u, v) = uv(dx, dy);
+        vertices.push(macroquad::models::Vertex::new(cx + dx, cy + dy, 0.0, u, v, tint));
+    }
+    let mut indices = Vec::with_capacity(segs * 3);
+    for i in 1..=segs as u16 {
+        indices.extend_from_slice(&[0, i, i + 1]);
+    }
+    draw_mesh(&macroquad::models::Mesh { vertices, indices, texture: Some(tex.clone()) });
+}
+
+/// DBD-style compass skill check: the `empty_compass` face, the `green_band`
+/// trimmed to the valid arc, and the `compass_needle` rotated to the live
+/// pointer angle. Hitting `[SPACE]` while the needle overlaps the band succeeds
+/// (see `CatchEngagement::hit_skill_check`). Falls back to primitive arcs/lines
+/// when the sprites aren't bundled. `size` is the compass's drawn edge length.
+fn draw_skill_check(app: &mut GameApp, sc: crate::game::catch::SkillCheck, cx: f32, cy: f32, size: f32) {
+    use std::f32::consts::FRAC_PI_2;
+
+    // 1. Compass face background.
+    match app.textures.ui("empty_compass") {
+        Some(t) => draw_texture_ex(
+            &t,
+            cx - size * 0.5,
+            cy - size * 0.5,
+            WHITE,
+            DrawTextureParams { dest_size: Some(vec2(size, size)), ..Default::default() },
+        ),
+        None => {
+            draw_circle(cx, cy, size * 0.5, color_u8!(28, 30, 36, 230));
+            draw_circle_lines(cx, cy, size * 0.5, 3.0, color_u8!(200, 180, 120, 230));
+        }
+    }
+
+    // 2. Valid arc (green band). Angles are clockwise from the top, so convert to
+    //    screen space (where 0 rad points right) by subtracting 90°. The band PNG
+    //    is a full ring that's transparent off-ring, so a textured pie wedge over
+    //    the zone reveals only the ring arc; a flat-tinted fallback otherwise.
+    let band_size = size * 0.96; // the ring sits a touch inside the face rim
+    let start = sc.zone_start - FRAC_PI_2;
+    match app.textures.ui("green_band") {
+        Some(t) => draw_textured_wedge(&t, cx, cy, band_size, start, sc.zone_len, WHITE),
+        None => {
+            // Thick stroked arc as a stand-in for the band.
+            let r = band_size * 0.42;
+            let segs = ((sc.zone_len / 0.12).ceil() as usize).max(2);
+            for i in 0..segs {
+                let a0 = start + sc.zone_len * (i as f32 / segs as f32);
+                let a1 = start + sc.zone_len * ((i + 1) as f32 / segs as f32);
+                draw_line(
+                    cx + a0.cos() * r, cy + a0.sin() * r,
+                    cx + a1.cos() * r, cy + a1.sin() * r,
+                    6.0, color_u8!(120, 200, 110, 235),
+                );
+            }
+        }
+    }
+
+    // 3. Needle, rotated to the live angle. The art points up; macroquad rotates
+    //    clockwise (screen y down), so `angle` (clockwise-from-top) maps directly.
+    match app.textures.ui("compass_needle") {
+        Some(t) => draw_texture_ex(
+            &t,
+            cx - size * 0.5,
+            cy - size * 0.5,
+            WHITE,
+            DrawTextureParams {
+                dest_size: Some(vec2(size, size)),
+                rotation: sc.angle,
+                ..Default::default()
+            },
+        ),
+        None => {
+            let a = sc.angle - FRAC_PI_2;
+            let r = size * 0.46;
+            draw_line(cx, cy, cx + a.cos() * r, cy + a.sin() * r, 4.0, color_u8!(240, 230, 120, 240));
+            draw_circle(cx, cy, size * 0.05, color_u8!(200, 180, 120, 255));
+        }
+    }
+}
+
+/// Textured pie wedge of `tex` spanning `[start, start + sweep]` (screen-space
+/// radians), as a triangle fan with UVs that map screen offset → texture, so the
+/// drawn wedge samples exactly that region of the sprite. Used to trim a ring
+/// sprite to an arc (the green band). `size` is the sprite's full drawn edge.
+fn draw_textured_wedge(tex: &Texture2D, cx: f32, cy: f32, size: f32, start: f32, sweep: f32, tint: Color) {
+    if sweep <= 0.0 {
+        return;
+    }
+    let r = size * 0.5;
+    let segs = ((sweep / 0.12).ceil() as usize).max(1);
     let uv = |dx: f32, dy: f32| (0.5 + dx / size, 0.5 + dy / size);
     let mut vertices = Vec::with_capacity(segs + 2);
     let (u0, v0) = uv(0.0, 0.0);

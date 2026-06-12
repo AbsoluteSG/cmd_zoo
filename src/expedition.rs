@@ -14,7 +14,8 @@ use glam::Vec2;
 use uuid::Uuid;
 
 use crate::game::biome_instance::BiomeInstance;
-use crate::game::catch::{AbilityKind, CatchEngagement, CatchStats, EngagementOutcome};
+use crate::game::catch::{CatchEngagement, CatchStats, EngagementOutcome};
+use crate::game::skill::Skill;
 use crate::game::species::{HabitatTheme, SpeciesId};
 
 /// The result of advancing an expedition's engagement one frame.
@@ -78,10 +79,10 @@ impl Expedition {
         self.engagement = None;
     }
 
-    /// Trigger an equipped ability against the current target, if engaging.
-    pub fn use_ability(&mut self, ability: AbilityKind, stats: &CatchStats) {
+    /// Fire a skill against the current target, if engaging.
+    pub fn use_skill(&mut self, skill: Skill, stats: &CatchStats) {
         if let Some(e) = &mut self.engagement {
-            e.use_ability(ability, stats);
+            e.use_skill(skill, stats);
         }
     }
 
@@ -134,7 +135,6 @@ impl Expedition {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::game::catch::AbilityKind;
 
     fn strong_stats() -> CatchStats {
         CatchStats { catch_power: 5_000.0, ..Default::default() }
@@ -166,10 +166,10 @@ mod tests {
     }
 
     #[test]
-    fn abilities_and_skill_check_are_noops_without_a_target() {
+    fn skills_and_skill_check_are_noops_without_a_target() {
         let mut exp = Expedition::launch(HabitatTheme::Forest, 3);
         let stats = CatchStats::default();
-        exp.use_ability(AbilityKind::Net, &stats); // no panic, no target
+        exp.use_skill(Skill::Net, &stats); // no panic, no target
         assert!(!exp.hit_skill_check(&stats));
         assert_eq!(exp.tick(0.5, &stats, &mut 1.0e9_f32), CatchResult::None);
     }

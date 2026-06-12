@@ -38,6 +38,9 @@ static TERRAIN_TABLE: &[(&str, &[u8])] = include!(concat!(env!("OUT_DIR"), "/ter
 /// `assets/player/`. Used by the animated avatar; `None` falls back to the
 /// procedural toon-ball.
 static PLAYER_TABLE: &[(&str, &[u8])] = include!(concat!(env!("OUT_DIR"), "/player_table.rs"));
+/// Active-skill icons, keyed by stem (e.g. `"net_skill_icon"`), from
+/// `assets/skills/`. A dedicated folder since the skill catalog will grow.
+static SKILL_TABLE: &[(&str, &[u8])] = include!(concat!(env!("OUT_DIR"), "/skill_table.rs"));
 
 /// Which embedded table to look an id up in.
 #[derive(Clone, Copy)]
@@ -52,6 +55,7 @@ enum Kind {
     Terrain,
     Structure,
     Player,
+    Skill,
 }
 
 impl Kind {
@@ -67,6 +71,7 @@ impl Kind {
             Kind::Terrain => TERRAIN_TABLE,
             Kind::Structure => STRUCTURE_TABLE,
             Kind::Player => PLAYER_TABLE,
+            Kind::Skill => SKILL_TABLE,
         }
     }
     fn prefix(self) -> &'static str {
@@ -81,6 +86,7 @@ impl Kind {
             Kind::Terrain => "tp:",
             Kind::Structure => "s:",
             Kind::Player => "pl:",
+            Kind::Skill => "sk:",
         }
     }
 }
@@ -159,6 +165,12 @@ impl Textures {
     /// "player"). `None` falls back to the procedural toon-ball avatar.
     pub fn player(&mut self, id: &str) -> Option<Texture2D> {
         self.get(Kind::Player, id)
+    }
+
+    /// An active-skill icon by id, from `assets/skills/` (e.g. "net_skill_icon").
+    /// `None` falls back to the empty slot frame.
+    pub fn skill(&mut self, id: &str) -> Option<Texture2D> {
+        self.get(Kind::Skill, id)
     }
 
     /// Any bundled ground tile (first by sorted id), for auto-detecting the

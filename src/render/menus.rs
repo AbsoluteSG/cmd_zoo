@@ -1353,3 +1353,171 @@ fn fmt_secs(secs: i64) -> String {
         format!("{sec}s")
     }
 }
+
+// ════════════════════════════════════════════════════════════════════════════
+// Pre-game main menu (Solo vs Online)
+// ════════════════════════════════════════════════════════════════════════════
+
+/// Screen-space square draw rects for the two play-mode cards (Solo left, Online
+/// right). The PNGs are 500×500 with the card art centred inside a transparent
+/// margin; callers hit-test an inset of these (see `app::inset_rect`). Shared by
+/// the renderer and the input handler so layout stays in lock-step.
+pub fn main_menu_card_rects() -> (Rect, Rect) {
+    let (w, h) = (screen_width(), screen_height());
+    let side = (h * 0.74).min(w * 0.45); // square card side, clamped for narrow windows
+    let cy = h * 0.56;
+    let gap = side * 0.56; // half the centre-to-centre spacing of the two cards
+    let cx = w * 0.5;
+    let r = |center_x: f32| Rect::new(center_x - side * 0.5, cy - side * 0.5, side, side);
+    (r(cx - gap), r(cx + gap))
+}
+
+/// Full-screen pre-game title menu: background art + vignette overlay, the two
+/// play-mode cards (darkened until hovered), and the pointer-arm that reveals
+/// over whichever card is hovered. All motion is driven by `app.main_menu`'s
+/// smoothed tweens (updated in `GameApp::handle_main_menu`).
+pub fn draw_main_menu(app: &mut GameApp) {
+    let (w, h) = (screen_width(), screen_height());
+    let m = app.main_menu.unwrap_or_default();
+    let appear = ease_out_back(m.appear.clamp(0.0, 1.0));
+
+    // 1. Background, cover-fit so it always fills the window.
+    match app.textures.ui("main_menu_bg") {
+        Some(bg) => draw_cover(&bg, w, h, fade(WHITE, 1.0)),
+        None => {
+            clear_background(color_u8!(22, 24, 28, 255));
+        }
+    }
+
+    // 2. Vignette / mood overlay on top of the background. Drawn at partial alpha
+    //    so it deepens the edges without washing the art out.
+    if let Some(ov) = app.textures.ui("main_menu_overlay") {
+        draw_cover(&ov, w, h, fade(WHITE, 0.55 * m.appear.clamp(0.0, 1.0)));
+    }
+
+    // 3. Title + hint text.
+    let title = "WELCOME TO THE ZOO";
+    let tfs = (h * 0.075).round();
+    let tw = measure_text(title, app.font.as_ref(), tfs as u16, 1.0).width;
+    let ty = h * 0.16 * appear.min(1.0);
+    text_dropshadow(app, title, (w - tw) * 0.5, ty, tfs, color_u8!(252, 246, 230, 255));
+
+    // 4. The two cards.
+    let (solo, online) = main_menu_card_rects();
+    draw_play_card(app, "solo_play", solo, m.solo_hover, appear);
+    draw_play_card(app, "online_play", online, m.online_hover, appear);
+
+    // 5. The pointer-paw over whichever card is hovered (fades/slides in). Solo's
+    //    paw rises from the bottom of the screen; Online's enters from the right.
+    draw_paw_from_bottom(app, "cat_paw_1", solo, m.solo_hover, m.arm_phase);
+    draw_paw_from_right(app, "cat_paw_2", online, m.online_hover, m.arm_phase);
+
+    // 6. Footer hint.
+    let hint = "Click a card to begin";
+    let hfs = (h * 0.03).round();
+    let hw = measure_text(hint, app.font.as_ref(), hfs as u16, 1.0).width;
+    text_dropshadow(app, hint, (w - hw) * 0.5, h * 0.95, hfs, fade(color_u8!(240, 236, 224, 255), 0.85 * appear.min(1.0)));
+}
+
+/// Draw one play-mode card centred in its square rect. The card is darkened and
+/// sits slightly lower/smaller when not hovered; on hover it brightens, scales
+/// up a touch, and lifts. `appear` fades + slides the whole card in on entry.
+fn draw_play_card(app: &mut GameApp, id: &str, sq: Rect, hover: f32, appear: f32) {
+    let Some(t) = app.textures.ui(id) else { return };
+    let cx = sq.x + sq.w * 0.5;
+    let cy = sq.y + sq.h * 0.5 - 14.0 * hover + (1.0 - appear) * 40.0;
+    let scale = (1.0 + 0.06 * hover) * (0.9 + 0.1 * appear.min(1.0));
+    let side = sq.w * scale;
+    // Brightness: darkened (0.52) at rest → full (1.0) when hovered.
+    let b = 0.52 + 0.48 * hover;
+    let tint = Color::new(b, b, b, appear.min(1.0));
+    draw_texture_ex(
+        &t,
+        cx - side * 0.5,
+        cy - side * 0.5,
+        tint,
+        DrawTextureParams { dest_size: Some(vec2(side, side)), ..Default::default() },
+    );
+}
+
+/// Pointer-paw for the Solo card: a cat paw whose sleeve enters from the bottom
+/// of the screen, paw pointing up into the card. Hidden until hovered; on hover
+/// it fades in, slides up from below, and bobs vertically. The art (`cat_paw_1`)
+/// is vertical with the toes near the top, so we anchor the toes inside the
+/// card's lower half and let the arm run off the bottom edge.
+fn draw_paw_from_bottom(app: &mut GameApp, id: &str, sq: Rect, hover: f32, phase: f32) {
+    if hover < 0.01 {
+        return;
+    }
+    let Some(t) = app.textures.ui(id) else { return };
+    let h = hover.clamp(0.0, 1.0);
+    let pw = sq.w * 0.80;
+    let ph = pw * aspect(&t);
+    let bob = (phase * 3.0).sin() * 7.0;
+    // A little left of centre, flipped horizontally, anchored lower on the card.
+    let cx = sq.x + sq.w * 0.44;
+    let top = sq.y + sq.h * 0.60 - ph * 0.18 - bob + (1.0 - h) * 70.0;
+    draw_texture_ex(
+        &t,
+        cx - pw * 0.5,
+        top,
+        fade(WHITE, h),
+        DrawTextureParams { dest_size: Some(vec2(pw, ph)), flip_x: true, ..Default::default() },
+    );
+}
+
+/// Pointer-paw for the Online card: a cat paw whose watch-arm enters from the
+/// right of the screen, paw pointing left into the card. Hidden until hovered;
+/// on hover it fades in, slides in from the right, and bobs horizontally. The art
+/// (`cat_paw_2`) has the toes near the left edge, so we anchor those inside the
+/// card and let the arm run off the right edge.
+fn draw_paw_from_right(app: &mut GameApp, id: &str, sq: Rect, hover: f32, phase: f32) {
+    if hover < 0.01 {
+        return;
+    }
+    let Some(t) = app.textures.ui(id) else { return };
+    let h = hover.clamp(0.0, 1.0);
+    let pw = sq.w * 0.88;
+    let ph = pw * aspect(&t);
+    let bob = (phase * 3.0).sin() * 7.0;
+    let cy = sq.y + sq.h * 0.5;
+    // Toes (image left) reach to ~47% across the card; slide in from the right.
+    let left = sq.x + sq.w * 0.47 - pw * 0.05 + bob + (1.0 - h) * 70.0;
+    draw_texture_ex(
+        &t,
+        left,
+        cy - ph * 0.5,
+        fade(WHITE, h),
+        DrawTextureParams { dest_size: Some(vec2(pw, ph)), ..Default::default() },
+    );
+}
+
+/// Height-to-width ratio of a texture (1.0 if degenerate).
+fn aspect(t: &Texture2D) -> f32 {
+    if t.width() > 0.0 { t.height() / t.width() } else { 1.0 }
+}
+
+/// Cover-fit a texture to fill `w`×`h` (centre-crop, preserving aspect).
+fn draw_cover(t: &Texture2D, w: f32, h: f32, tint: Color) {
+    let (tw, th) = (t.width(), t.height());
+    if tw <= 0.0 || th <= 0.0 {
+        return;
+    }
+    let scale = (w / tw).max(h / th);
+    let (dw, dh) = (tw * scale, th * scale);
+    draw_texture_ex(
+        t,
+        (w - dw) * 0.5,
+        (h - dh) * 0.5,
+        tint,
+        DrawTextureParams { dest_size: Some(vec2(dw, dh)), ..Default::default() },
+    );
+}
+
+/// Title-style text with a soft drop shadow, using the bundled UI font.
+fn text_dropshadow(app: &GameApp, s: &str, x: f32, y: f32, fs: f32, color: Color) {
+    let font = app.font.as_ref();
+    let params = |c: Color| TextParams { font, font_size: fs as u16, color: c, ..Default::default() };
+    draw_text_ex(s, x + 2.0, y + 3.0, params(fade(BLACK, color.a * 0.5)));
+    draw_text_ex(s, x, y, params(color));
+}

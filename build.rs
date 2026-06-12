@@ -26,6 +26,7 @@ fn main() {
     emit_png_table("assets/ui", "ui_table.rs");
     emit_png_table("assets/structures", "structure_table.rs");
     emit_png_table("assets/player", "player_table.rs");
+    emit_png_table("assets/skills", "skill_table.rs");
     // Terrain props live in per-biome subfolders (`assets/terrain/<Biome>/*.png`);
     // each entry is keyed `"<biome>/<stem>"` so the renderer can pick scenery by
     // biome. Subfolder names should match the biome display names (case-insensitive).

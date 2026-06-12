@@ -12,6 +12,10 @@ pub struct ControllerCtx<'a> {
     /// True while a menu overlay is open or tweening — controllers should
     /// return idle so the avatar stops while the player is in a menu.
     pub menu_open: bool,
+    /// The current gamepad snapshot, if a pad is present. Polled once per frame
+    /// on `GameApp` and passed in so the local controller reads it without a
+    /// second poll. `None` when no pad / keyboard-only.
+    pub pad: Option<&'a crate::input::gamepad::PadSnapshot>,
 }
 
 pub trait AvatarController {

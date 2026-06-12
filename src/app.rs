@@ -20,7 +20,7 @@ use crate::game::action::{Action, ActionOutcome};
 use crate::game::avatar_system::{self, Behavior};
 use crate::game::{Zoo, economy, species};
 use crate::game::plot::{WORLD_W, WORLD_H};
-use crate::input::{AvatarController, ControllerCtx, KeyboardController, RemoteController};
+use crate::input::{AvatarController, ControllerCtx, GamepadHub, LocalController, RemoteController};
 use crate::net::Session;
 use crate::persistence::json_file::JsonFileRepository;
 use crate::render::particles::Particles;
@@ -471,9 +471,12 @@ pub struct GameApp {
     /// In M2 single-player this is `Session::solo`; toggling "Open to online"
     /// promotes it to `Host`; joining a friend's zoo replaces it with `Visit`.
     pub session: Session,
-    /// Local controller (keyboard). Boxed for symmetry with remote
-    /// controllers; future gamepad support drops in here.
+    /// Local controller (keyboard + gamepad). Boxed for symmetry with remote
+    /// controllers.
     controller: Box<dyn AvatarController>,
+    /// Gamepad input side-channel (gilrs), polled once per frame at the top of
+    /// `handle_input`. `None` if gilrs failed to initialise (keyboard-only).
+    gamepad: Option<GamepadHub>,
     /// Per-visitor controllers, keyed by the visitor's stable `player_id`.
     /// The host pushes inbound `WireIntent`s into the matching entry each
     /// frame; each visitor's avatar samples from its own controller.
@@ -692,7 +695,8 @@ impl GameApp {
             status: None,
             errors: VecDeque::new(),
             session,
-            controller: Box::new(KeyboardController::default()),
+            controller: Box::new(LocalController::default()),
+            gamepad: GamepadHub::new(),
             remotes: HashMap::new(),
             behaviors: avatar_system::default_behaviors(),
             snapshot_broadcast_t: 0.0,
@@ -1962,6 +1966,13 @@ impl GameApp {
     /// Menu toggles + (when no menu is open) camera input + click-to-redeem,
     /// plus critter wandering (which continues behind menus).
     pub fn handle_input(&mut self, now: DateTime<Utc>) {
+        // Poll the gamepad once per frame, before any input is read, so every
+        // path this frame sees a consistent pad snapshot. (Hot-plug / active-
+        // device handling lands in a later phase; for now we just refresh state.)
+        if let Some(pad) = self.gamepad.as_mut() {
+            let _events = pad.poll();
+        }
+
         // Pre-game main menu owns input until the player picks a mode.
         if self.main_menu.is_some() {
             self.handle_main_menu(now);
@@ -2036,6 +2047,7 @@ impl GameApp {
                     dt,
                     avatar: self.session.my_avatar(),
                     menu_open: false,
+                    pad: self.gamepad.as_ref().map(|g| g.snapshot()),
                 };
                 self.controller.sample(&ctx)
             };
@@ -2307,6 +2319,7 @@ impl GameApp {
                 dt,
                 avatar: self.session.my_avatar(),
                 menu_open,
+                pad: self.gamepad.as_ref().map(|g| g.snapshot()),
             };
             self.controller.sample(&ctx)
         };
@@ -2344,6 +2357,7 @@ impl GameApp {
                     dt,
                     avatar: &self.session.avatars[&id],
                     menu_open: false, // remote intents are not menu-gated locally
+                    pad: None,        // remote avatars never read the local pad
                 };
                 intents.push((id, rc.sample(&ctx)));
             } else {

@@ -36,6 +36,10 @@ fs2 = "0.4"
 steamworks = { version = "0.11", optional = true }
 # SpacetimeDB client SDK (online backend). Matches the module + CLI (2.4.x).
 spacetimedb-sdk = "2.4"
+# Cross-platform gamepad input (Windows XInput/DirectInput, Linux evdev for the
+# Steam Deck, macOS, web). macroquad/miniquad expose no usable gamepad API, so
+# this is polled as an independent side-channel.
+gilrs = "0.11"
 
 [dev-dependencies]
 tempfile = "3"

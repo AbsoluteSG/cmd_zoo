@@ -4,9 +4,13 @@
 //! the avatar pipeline.
 
 pub mod controller;
+pub mod gamepad;
 pub mod keyboard;
+pub mod local;
 pub mod remote;
 
 pub use controller::{ActionFlags, AvatarController, ControllerCtx, ControllerIntent};
+pub use gamepad::{GamepadHub, PadButton, PadEvent, PadSnapshot};
 pub use keyboard::KeyboardController;
+pub use local::LocalController;
 pub use remote::RemoteController;

@@ -836,7 +836,7 @@ static CATALOG: Lazy<HashMap<SpeciesId, SpeciesDef>> = Lazy::new(|| {
         coin_species("glitchpaw", "Glitchpaw", HabitatTheme::Forest, 14.0, 7000, 55000, 39600, SPRINTER, true),
         coin_species("tuxtide", "Tuxtide", HabitatTheme::Ocean, 7.0, 24000, 70000, 46800, TANK, true),
         coin_species("hopocalypse", "Hopocalypse", HabitatTheme::Forest, 6.0, 15000, 42000, 36000, BALANCED, true),
-        coin_species("cinderfrost", "Cinderfrost", HabitatTheme::Arctic, 16.0, 9000, 95000, 50400, BALANCED, true),
+        coin_species("glass_fox", "Glass Fox", HabitatTheme::Arctic, 16.0, 9000, 95000, 50400, BALANCED, true),
         coin_species("prismhart", "Prismhart", HabitatTheme::Arctic, 8.0, 28000, 88000, 54000, TANK, true),
         coin_species("foldfeather", "Foldfeather", HabitatTheme::Wetland, 6.5, 9000, 33000, 28800, BALANCED, true),
         coin_species("ticktalon", "Ticktalon", HabitatTheme::Arctic, 10.0, 12000, 60000, 41400, SPRINTER, true),
@@ -1120,6 +1120,37 @@ static CATALOG: Lazy<HashMap<SpeciesId, SpeciesDef>> = Lazy::new(|| {
         coin_species("pastrycoil", "Pastry Coil", HabitatTheme::Food, 2.4, 520, 820, 300, BALANCED, true),
         coin_species("creamfin", "Creamfin", HabitatTheme::Food, 2.6, 640, 900, 320, TANK, true),
         coin_species("toffeestag", "Toffee Stag", HabitatTheme::Food, 2.8, 560, 1000, 340, BALANCED, true),
+
+        // ── Collections content ───────────────────────────────────────────────
+        // Obtainable starters (shop, open-vendor themes) — collection requirements.
+        coin_species("wedding_dove", "Wedding Dove", HabitatTheme::Farmland, 0.7, 80, 60, 70, BALANCED, false),
+        coin_species("flamingo", "Flamingo", HabitatTheme::Wetland, 0.9, 110, 140, 90, BALANCED, false),
+        coin_species("ruby_rabbit", "Ruby Rabbit", HabitatTheme::Farmland, 0.8, 90, 120, 80, SPRINTER, false),
+        coin_species("ducklet", "Ducklet", HabitatTheme::Farmland, 0.5, 60, 30, 55, BALANCED, false),
+        coin_species("lamblet", "Lamblet", HabitatTheme::Farmland, 0.5, 70, 35, 60, TANK, false),
+        coin_species("piglet", "Piglet", HabitatTheme::Farmland, 0.6, 70, 40, 60, BALANCED, false),
+        coin_species("petal_deer", "Petal Deer", HabitatTheme::Forest, 0.9, 120, 150, 95, BALANCED, false),
+        coin_species("glow_moth", "Glow Moth", HabitatTheme::Forest, 0.7, 80, 90, 75, SPRINTER, false),
+        coin_species("dew_sprite", "Dew Sprite", HabitatTheme::Wetland, 0.8, 90, 110, 80, SPRINTER, false),
+        coin_species("dapper_seal", "Dapper Seal", HabitatTheme::Arctic, 1.0, 140, 180, 100, BALANCED, false),
+        coin_species("acro_monkey", "Acro Monkey", HabitatTheme::Jungle, 1.0, 130, 170, 100, SPRINTER, false),
+        coin_species("tophat_bear", "Top-Hat Bear", HabitatTheme::Forest, 1.1, 160, 200, 110, TANK, false),
+        coin_species("comet_cat", "Comet Cat", HabitatTheme::Forest, 1.0, 120, 160, 100, SPRINTER, false),
+        coin_species("lunar_hare", "Lunar Hare", HabitatTheme::Arctic, 0.9, 110, 150, 95, SPRINTER, false),
+        coin_species("solar_finch", "Solar Finch", HabitatTheme::Savanna, 0.8, 90, 130, 85, BALANCED, false),
+        // Extra early-game hybrids (breeding) — general content + collection fodder.
+        coin_species("bunnybird", "Bunnybird", HabitatTheme::Forest, 1.4, 220, 300, 150, SPRINTER, true),
+        coin_species("frogoat", "Frogoat", HabitatTheme::Farmland, 1.3, 260, 280, 150, TANK, true),
+        // Exclusive collection rewards — collection-only (see COLLECTION_ONLY_IDS),
+        // never sold/spawned/bred; granted at Neon. High cost → tier-5 power.
+        coin_species("golden_goose", "Golden Goose", HabitatTheme::Farmland, 14.0, 5000, 90000, 3600, SPRINTER, false),
+        coin_species("aurora_bear", "Aurora Bear", HabitatTheme::Arctic, 16.0, 6000, 110000, 4200, TANK, false),
+        coin_species("sunmane_lion", "Sunmane Lion", HabitatTheme::Savanna, 18.0, 5500, 130000, 4200, SPRINTER, false),
+        coin_species("cupid_swan", "Cupid Swan", HabitatTheme::Farmland, 15.0, 5200, 100000, 3900, BALANCED, false),
+        coin_species("golden_chick", "Golden Chick", HabitatTheme::Farmland, 13.0, 4800, 85000, 3600, SPRINTER, false),
+        coin_species("bloomcat", "Bloomcat", HabitatTheme::Forest, 15.0, 5200, 105000, 3900, BALANCED, false),
+        coin_species("ringmaster_lion", "Ringmaster Lion", HabitatTheme::Savanna, 19.0, 6000, 140000, 4500, SPRINTER, false),
+        coin_species("astral_owl", "Astral Owl", HabitatTheme::Mythical, 20.0, 6500, 160000, 4800, SPRINTER, false),
     ]);
 
     entries.into_iter().map(|d| (d.id, d)).collect()
@@ -1261,13 +1292,15 @@ static RECIPES: Lazy<HashMap<(SpeciesId, SpeciesId), Vec<PoolEntry>>> = Lazy::ne
         ("blue_frog", "lion",       40, 40, &[("bogmane", 14), ("marshpride", 6)]),
         ("field_mouse", "lion",     39, 39, &[("pridelet", 15), ("squeakmane", 7)]),
         ("mole", "field_mouse",     38, 40, &[("burrowkin", 16), ("tunnelnib", 6)]),
+        ("rabbit", "robin",         39, 39, &[("bunnybird", 16)]),
+        ("blue_frog", "goat",       39, 39, &[("frogoat", 15)]),
         ("lynx", "albinoDeer",      41, 41, &[("stagstalker", 12), ("snowprowl", 6)]),
         // Concept hybrids: a themed exotic crossed with something from the roster.
         ("candy_dove", "blue_frog", 40, 40, &[("gumdrop", 14), ("fizzhopper", 6)]),
         ("robot_cat", "field_mouse",41, 41, &[("glitchpaw", 12), ("bitsqueak", 6)]),
         ("moophin", "penguin",      42, 40, &[("tuxtide", 12), ("frostmoo", 6)]),
         ("zombie_dog", "rabbit",    40, 40, &[("hopocalypse", 14), ("gnawhop", 6)]),
-        ("lava_lynx", "arctic_fox", 41, 41, &[("cinderfrost", 12), ("ashpaw", 6)]),
+        ("lava_lynx", "arctic_fox", 41, 41, &[("glass_fox", 12), ("ashpaw", 6)]),
         ("crystal_stag", "albinoDeer",40, 40, &[("prismhart", 11), ("gleamantler", 5), ("auroracrown", 2)]),
         ("origami_crane", "heron",  41, 41, &[("foldfeather", 12), ("creasewing", 6)]),
         ("clockwork_owl", "snowyOwl",42, 42, &[("ticktalon", 11), ("gearhoot", 5)]),
@@ -1353,9 +1386,29 @@ pub fn try_get(id: &str) -> Option<&'static SpeciesDef> {
     CATALOG.get(id)
 }
 
-/// Regular shop species — neither crossbreed offspring nor exotics.
+/// Species obtainable **only** by completing a collection (see
+/// `game::collection`). They live in the catalog (so icons / power / lookup work)
+/// but must never appear in any shop, wild spawn, or crossbreed pool.
+pub const COLLECTION_ONLY_IDS: &[SpeciesId] = &[
+    "golden_goose",
+    "aurora_bear",
+    "sunmane_lion",
+    "cupid_swan",
+    "golden_chick",
+    "bloomcat",
+    "ringmaster_lion",
+    "astral_owl",
+];
+
+/// True if `id` is a collection-only reward species.
+pub fn is_collection_only(id: SpeciesId) -> bool {
+    COLLECTION_ONLY_IDS.contains(&id)
+}
+
+/// Regular shop species — neither crossbreed offspring, exotics, nor
+/// collection-only rewards.
 pub fn all_purchasable() -> impl Iterator<Item = &'static SpeciesDef> {
-    CATALOG.values().filter(|d| !d.hybrid && !d.exotic)
+    CATALOG.values().filter(|d| !d.hybrid && !d.exotic && !is_collection_only(d.id))
 }
 
 /// Hybrid species. Used by the codex.
@@ -1488,9 +1541,21 @@ mod tests {
                 in_recipe.insert(e.species);
             }
         }
+        // Collection content (the required starters + the exclusive rewards) is a
+        // separate acquisition path (shop + collection claim), intentionally
+        // outside the breeding economy — exclude it from this guardrail.
+        let mut collection_ids: HashSet<SpeciesId> = HashSet::new();
+        for c in crate::game::collection::COLLECTIONS {
+            for s in c.required {
+                collection_ids.insert(*s);
+            }
+            if let crate::game::collection::Reward::Animal(sp) = c.reward {
+                collection_ids.insert(sp);
+            }
+        }
         let roster: Vec<&SpeciesDef> = CATALOG
             .values()
-            .filter(|d| is_breeding_theme(d.theme))
+            .filter(|d| is_breeding_theme(d.theme) && !collection_ids.contains(d.id))
             .collect();
         let total = roster.len();
         let covered = roster.iter().filter(|d| in_recipe.contains(d.id)).count();

@@ -82,6 +82,7 @@ pub fn snapshot_from_zoo(zoo: &Zoo) -> ZooSnapshot {
             })
             .collect(),
         claimed_gifts: zoo.claimed_gifts.iter().copied().collect(),
+        claimed_collections: zoo.claimed_collections.iter().cloned().collect(),
         discovered_recipes: zoo
             .discovered_recipes
             .iter()
@@ -258,6 +259,10 @@ pub fn parse_snapshot_with_notes(bytes: &[u8]) -> Result<(ZooSnapshot, Migration
             20 => {
                 migrate_v20_to_v21(&mut value);
                 version = 21;
+            }
+            21 => {
+                migrate_v21_to_v22(&mut value);
+                version = 22;
             }
             v => bail!("no migration path from schema version {v}"),
         }
@@ -636,6 +641,16 @@ fn migrate_v20_to_v21(value: &mut Value) {
     }
 }
 
+/// v21 → v22: collections. New `claimed_collections` — empty on old saves
+/// (`serde(default)` covers it; this just bumps the version + seeds the field).
+fn migrate_v21_to_v22(value: &mut Value) {
+    if let Value::Object(map) = value {
+        map.insert("schema_version".into(), Value::from(22u64));
+        map.entry("claimed_collections".to_string())
+            .or_insert(Value::Array(Vec::new()));
+    }
+}
+
 /// v11 introduces isometric grid placement: each habitat gains `tile_x`/`tile_y`.
 /// Pre-v11 saves have no coordinates, so auto-layout the habitats onto the grid
 /// deterministically — row-major, stepping by the 2×2 footprint so nothing
@@ -881,6 +896,7 @@ pub fn zoo_from_snapshot(s: ZooSnapshot) -> Result<LoadedZoo> {
         species_dupes,
         structures,
         claimed_gifts: s.claimed_gifts.into_iter().collect::<HashSet<_>>(),
+        claimed_collections: s.claimed_collections.into_iter().collect::<HashSet<_>>(),
         discovered_recipes,
         nest_count: s.nest_count.min(crate::game::zoo::MAX_NESTS),
         // Restore persisted nests (stable ids + deposited occupants) so an open

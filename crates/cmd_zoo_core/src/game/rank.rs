@@ -34,6 +34,12 @@ pub fn next_threshold(stage: u8) -> Option<u32> {
     THRESHOLDS.get(stage as usize).copied()
 }
 
+/// Lifetime-duplicate count that puts a species at the max rank (Neon). Used to
+/// grant collection-reward animals straight at max rank.
+pub fn max_rank_dupes() -> u32 {
+    THRESHOLDS[MAX_RANK as usize - 1]
+}
+
 pub fn rank_name(stage: u8) -> &'static str {
     NAMES[(stage as usize).min(MAX_RANK as usize)]
 }

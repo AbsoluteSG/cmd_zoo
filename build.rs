@@ -27,6 +27,9 @@ fn main() {
     emit_png_table("assets/structures", "structure_table.rs");
     emit_png_table("assets/player", "player_table.rs");
     emit_png_table("assets/skills", "skill_table.rs");
+    // Hand-authored level/blueprint documents, embedded so the shipped game can
+    // load them without disk access (the dev editor writes them under the same dir).
+    emit_asset_table("assets/levels", "level_table.rs", &["json"]);
     // Terrain props live in per-biome subfolders (`assets/terrain/<Biome>/*.png`);
     // each entry is keyed `"<biome>/<stem>"` so the renderer can pick scenery by
     // biome. Subfolder names should match the biome display names (case-insensitive).

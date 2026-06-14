@@ -103,6 +103,19 @@ pub fn terrain_prop_ids(biome: &str) -> Vec<&'static str> {
         .collect()
 }
 
+/// Resolve a terrain-prop id `String` (e.g. from an authored level) back to its
+/// bundled `&'static str` key, so it can flow through the renderer's
+/// `PropInstance.id`. `None` if no such prop is bundled.
+pub fn terrain_id_static(id: &str) -> Option<&'static str> {
+    TERRAIN_TABLE.iter().map(|(k, _)| *k).find(|k| *k == id)
+}
+
+/// All bundled ground-tile ids (from `assets/tiles/`), excluding the grass atlas
+/// helper. Used by the level editor's tile palette.
+pub fn tile_ids() -> Vec<&'static str> {
+    TILE_TABLE.iter().map(|(k, _)| *k).filter(|k| *k != "grass_atlas").collect()
+}
+
 #[derive(Default)]
 pub struct Textures {
     /// Cache keyed by "<prefix><id>". Value is `None` when no PNG is bundled,

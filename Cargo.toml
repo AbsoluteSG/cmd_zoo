@@ -14,6 +14,9 @@ resolver = "2"
 # the linker path). Off by default so plain `cargo build` works without SDK.
 default = []
 steam = ["dep:steamworks"]
+# Dev-only level editor (F8). Authors blueprint JSON under assets/levels/; never
+# enabled in shipped builds. The level *loader* is always compiled.
+editor = []
 
 [dependencies]
 cmd_zoo_core = { path = "crates/cmd_zoo_core" }

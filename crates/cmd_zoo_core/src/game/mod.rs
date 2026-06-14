@@ -5,6 +5,7 @@ pub mod avatar_system;
 pub mod biome;
 pub mod biome_instance;
 pub mod catch;
+pub mod collection;
 pub mod economy;
 pub mod gear;
 pub mod exotic_shop;

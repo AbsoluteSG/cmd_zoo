@@ -37,6 +37,31 @@ pub fn draw(app: &mut GameApp, now: DateTime<Utc>) {
     draw_hud(app, now);
 }
 
+/// Owned map of authored painted ground tiles for the current location (empty if
+/// the location has no level). Cloned so the texture cache can be borrowed
+/// mutably while drawing.
+fn authored_tiles(app: &GameApp) -> std::collections::HashMap<(i32, i32), String> {
+    app.active_level()
+        .map(|l| l.tiles.iter().map(|c| ((c.tx, c.ty), c.tile_id.clone())).collect())
+        .unwrap_or_default()
+}
+
+/// Authored terrain props for the current location (resolved to bundled `'static`
+/// ids), or `None` to fall back to the procedural scatter.
+fn authored_props(app: &GameApp) -> Option<Vec<super::terrain::PropInstance>> {
+    let level = app.active_level()?;
+    Some(
+        level
+            .props
+            .iter()
+            .filter_map(|p| {
+                super::textures::terrain_id_static(&p.id)
+                    .map(|id| super::terrain::PropInstance { world: vec2(p.x, p.y), id, scale: p.scale, flip: p.flip })
+            })
+            .collect(),
+    )
+}
+
 /// The world scene — ground + critters. No text (render-target safe).
 pub fn draw_scene(app: &mut GameApp, now: DateTime<Utc>) {
     // An active expedition renders its own bounded biome scene instead of the
@@ -57,6 +82,11 @@ pub fn draw_scene(app: &mut GameApp, now: DateTime<Utc>) {
     let tx1 = (cam_br.x / BTILE).ceil()  as i32;
     let ty0 = (cam_tl.y / BTILE).floor() as i32;
     let ty1 = (cam_br.y / BTILE).ceil()  as i32;
+    // Authored ground tiles (owned snapshot so the texture cache can be borrowed
+    // mutably in the loop). Painted cells draw their tile sprite; the rest keep
+    // procedural biome colour.
+    let painted = authored_tiles(app);
+    let seed = app.ground_seed();
     for ty in ty0..=ty1 {
         for tx in tx0..=tx1 {
             let tile_cx = (tx as f32 + 0.5) * BTILE;
@@ -64,9 +94,21 @@ pub fn draw_scene(app: &mut GameApp, now: DateTime<Utc>) {
             if tile_cx < 0.0 || tile_cx > PLANE_W || tile_cy < 0.0 || tile_cy > PLANE_H {
                 continue;
             }
-            let color = biome_color(biome::biome_tile_color(vec2(tile_cx, tile_cy), app.ground_seed()));
             let (pos, size) = view::tile_rect(tx, ty, BTILE, &cam);
             // +1 px overlap prevents seams between tiles.
+            if let Some(id) = painted.get(&(tx, ty)) {
+                if let Some(tex) = app.textures.tile(id) {
+                    draw_texture_ex(
+                        &tex,
+                        pos.x,
+                        pos.y,
+                        WHITE,
+                        DrawTextureParams { dest_size: Some(vec2(size.x + 1.0, size.y + 1.0)), ..Default::default() },
+                    );
+                    continue;
+                }
+            }
+            let color = biome_color(biome::biome_tile_color(vec2(tile_cx, tile_cy), seed));
             draw_rectangle(pos.x, pos.y, size.x + 1.0, size.y + 1.0, color);
         }
     }
@@ -101,15 +143,18 @@ pub fn draw_scene(app: &mut GameApp, now: DateTime<Utc>) {
     // screen-Y (feet). Props (rocks/plants/trees scattered by world-gen) join the
     // same painter's-algorithm pass so a tree correctly occludes — or is occluded
     // by — a passing critter or avatar.
-    let props = super::terrain::gather(
-        app.ground_seed(),
-        tx0,
-        tx1,
-        ty0,
-        ty1,
-        app.zoo.plot_origin,
-        app.zoo.plot_half_extent(),
-    );
+    let props = match authored_props(app) {
+        Some(p) => p,
+        None => super::terrain::gather(
+            app.ground_seed(),
+            tx0,
+            tx1,
+            ty0,
+            ty1,
+            app.zoo.plot_origin,
+            app.zoo.plot_half_extent(),
+        ),
+    };
     enum Item {
         Critter(usize),
         Avatar(uuid::Uuid),
@@ -904,6 +949,10 @@ fn draw_expedition_scene(app: &mut GameApp, now: DateTime<Utc>) {
     let _ = now;
     clear_background(BG);
     let cam = app.camera;
+    // Authored content snapshot (owned) before borrowing the expedition, so the
+    // texture cache can be used mutably later without borrow conflicts.
+    let painted = authored_tiles(app);
+    let authored = authored_props(app);
     let Some(exp) = app.expedition.as_ref() else { return };
     let inst = &exp.instance;
 
@@ -917,7 +966,8 @@ fn draw_expedition_scene(app: &mut GameApp, now: DateTime<Utc>) {
     // Decorative terrain props scattered across the arena, themed to the biome
     // and deterministic from the instance seed (same scatter every visit).
     let (view_tl, view_br) = view::camera_world_rect(&cam, screen_width(), screen_height());
-    let props = super::terrain::gather_themed(inst.seed, inst.theme, view_tl, view_br, inst.size);
+    let props = authored
+        .unwrap_or_else(|| super::terrain::gather_themed(inst.seed, inst.theme, view_tl, view_br, inst.size));
 
     // Collect roaming-animal render data first (ends the immutable borrow on
     // `exp` before we touch `app.textures`/`app.session` below).
@@ -939,6 +989,22 @@ fn draw_expedition_scene(app: &mut GameApp, now: DateTime<Utc>) {
         .collect();
     let target_pos = exp.target_pos().map(|p| vec2(p.x, p.y));
     let avatar_y = app.session.my_avatar().pos.y;
+
+    // Authored ground tiles overlaid on the flat biome ground (above the ground
+    // rect, below props/animals). The `exp` borrow has ended, so the texture
+    // cache is free to use here.
+    for ((tx, ty), id) in &painted {
+        if let Some(tex) = app.textures.tile(id) {
+            let (pos, size) = view::tile_rect(*tx, *ty, 128.0, &cam);
+            draw_texture_ex(
+                &tex,
+                pos.x,
+                pos.y,
+                WHITE,
+                DrawTextureParams { dest_size: Some(vec2(size.x + 1.0, size.y + 1.0)), ..Default::default() },
+            );
+        }
+    }
 
     // Unified depth-sorted pass (props + animals + the avatar + party mates),
     // painter's-algorithm by feet-Y so everything occludes correctly — exactly
@@ -1653,7 +1719,7 @@ pub fn draw_hud(app: &mut GameApp, now_utc: DateTime<Utc>) {
 
     // Hint line below the chips, with a soft drop shadow so it stays legible
     // over the world (the old letterbox bar is gone).
-    let hint = "WASD move · Shift sprint · Space dash · E inspect / nest · 1–5 hotbar · F6 expedition · U Upgrades O Settings M Waypoints";
+    let hint = "WASD move · Shift sprint · Space dash · E inspect / nest · 1–5 hotbar · F6 expedition · U Upgrades O Settings M Waypoints C Collections";
     text_shadow(hint, 16.0, 62.0, 18.0, TEXT_DIM);
 
     // While hosting, always show our own join code so it's readable without

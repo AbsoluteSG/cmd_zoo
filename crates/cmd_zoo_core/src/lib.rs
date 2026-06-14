@@ -7,5 +7,6 @@
 //! module as the online authority.
 
 pub mod game;
+pub mod level;
 pub mod persistence;
 pub mod share;

@@ -60,6 +60,8 @@ pub enum Screen {
     /// Expedition board: pick a biome to launch an expedition into. Opened by
     /// pressing E near the ExpeditionBoard NPC (or F6 in the hub).
     ExpeditionBoard,
+    /// Collections panel: own a set of animals to claim its reward. Opened with C.
+    Collections,
 }
 
 /// Animated state for the pre-game main menu (Solo vs Online). Lives while the
@@ -484,6 +486,12 @@ pub struct GameApp {
     devices: crate::input::DeviceTracker,
     /// Gamepad focus navigator for the immediate-mode menus.
     pub focus_nav: crate::render::focus::FocusNav,
+    /// Hand-authored level blueprints, loaded at startup. When a location has an
+    /// entry, the renderer uses it instead of procedural generation.
+    pub levels: crate::level_store::LevelStore,
+    /// Active level editor (dev-only, `--features editor`); `None` when not editing.
+    #[cfg(feature = "editor")]
+    pub editor: Option<crate::render::editor::EditorState>,
     /// The menu screen focus was last reset for, so opening a new panel restarts
     /// the highlight at the top.
     focus_screen: Screen,
@@ -710,6 +718,9 @@ impl GameApp {
             devices: crate::input::DeviceTracker::default(),
             focus_nav: crate::render::focus::FocusNav::default(),
             focus_screen: Screen::World,
+            levels: crate::level_store::LevelStore::load_all(),
+            #[cfg(feature = "editor")]
+            editor: None,
             remotes: HashMap::new(),
             behaviors: avatar_system::default_behaviors(),
             snapshot_broadcast_t: 0.0,
@@ -802,6 +813,26 @@ impl GameApp {
     /// True while the gamepad is the active UI device (drives focus rings + nav).
     pub fn gamepad_active(&self) -> bool {
         self.devices.is_gamepad()
+    }
+
+    /// Location key for the scene the player is currently in (`"hub"` or
+    /// `"expedition_<theme>"`).
+    pub fn current_level_key(&self) -> String {
+        match self.expedition.as_ref() {
+            Some(exp) => format!("expedition_{}", exp.instance.theme.name().to_ascii_lowercase()),
+            None => "hub".to_string(),
+        }
+    }
+
+    /// The authored level for the current scene, if any — the single accessor the
+    /// renderer consults to decide authored-vs-procedural. In editor builds the
+    /// live editing buffer takes precedence so edits render immediately.
+    pub fn active_level(&self) -> Option<&crate::level::Level> {
+        #[cfg(feature = "editor")]
+        if let Some(ed) = self.editor.as_ref() {
+            return Some(&ed.working);
+        }
+        self.levels.get(&self.current_level_key())
     }
 
     /// UI "confirm" this frame — gamepad A or the Enter key. Read by `menus` to
@@ -1356,6 +1387,148 @@ impl GameApp {
         } else {
             self.set_status("Solo play — F7 to go online anytime");
         }
+    }
+
+    // ── Level editor (dev-only) ────────────────────────────────────────────
+    #[cfg(feature = "editor")]
+    fn handle_editor_input(&mut self, _now: DateTime<Utc>) {
+        use crate::render::editor::EditMode;
+        let dt = get_frame_time();
+
+        // Camera pan (WASD / arrows) + wheel zoom — no avatar movement in editor.
+        let ctrl = is_key_down(KeyCode::LeftControl) || is_key_down(KeyCode::RightControl);
+        let mut pan = vec2(0.0, 0.0);
+        if is_key_down(KeyCode::A) || is_key_down(KeyCode::Left) { pan.x += 1.0; }
+        if is_key_down(KeyCode::D) || is_key_down(KeyCode::Right) { pan.x -= 1.0; }
+        if is_key_down(KeyCode::W) || is_key_down(KeyCode::Up) { pan.y += 1.0; }
+        if (is_key_down(KeyCode::S) && !ctrl) || is_key_down(KeyCode::Down) { pan.y -= 1.0; }
+        self.camera.offset += pan * (900.0 * dt);
+        let (_, wy) = mouse_wheel();
+        if wy != 0.0 {
+            let f = if wy > 0.0 { 1.1 } else { 1.0 / 1.1 };
+            self.zoom_target = (self.zoom_target * f).clamp(ZOOM_MIN, ZOOM_MAX);
+        }
+        self.apply_smooth_zoom(dt);
+
+        // Mode / snap / palette cycling.
+        if is_key_pressed(KeyCode::Key1) {
+            if let Some(e) = self.editor.as_mut() { e.mode = EditMode::Tiles; e.palette_index = 0; }
+        }
+        if is_key_pressed(KeyCode::Key2) {
+            if let Some(e) = self.editor.as_mut() { e.mode = EditMode::Props; e.palette_index = 0; }
+        }
+        if is_key_pressed(KeyCode::T) {
+            if let Some(e) = self.editor.as_mut() { e.snap = !e.snap; }
+        }
+        let pal_len = crate::render::editor::palette(self).len().max(1);
+        if is_key_pressed(KeyCode::RightBracket) {
+            if let Some(e) = self.editor.as_mut() { e.palette_index = (e.palette_index + 1) % pal_len; }
+        }
+        if is_key_pressed(KeyCode::LeftBracket) {
+            if let Some(e) = self.editor.as_mut() { e.palette_index = (e.palette_index + pal_len - 1) % pal_len; }
+        }
+
+        // Save.
+        if ctrl && is_key_pressed(KeyCode::S) {
+            self.save_editor();
+            return;
+        }
+
+        // Place / erase.
+        let mouse = { let (mx, my) = mouse_position(); vec2(mx, my) };
+        match self.editor.as_ref().map(|e| e.mode) {
+            Some(EditMode::Tiles) => {
+                if is_mouse_button_down(MouseButton::Left) { self.editor_paint_tile(mouse); }
+                if is_mouse_button_down(MouseButton::Right) || is_key_pressed(KeyCode::Delete) {
+                    self.editor_erase_tile(mouse);
+                }
+            }
+            Some(EditMode::Props) => {
+                if is_mouse_button_pressed(MouseButton::Left) { self.editor_place_prop(mouse); }
+                if is_mouse_button_pressed(MouseButton::Right) || is_key_pressed(KeyCode::Delete) {
+                    self.editor_erase_prop(mouse);
+                }
+            }
+            None => {}
+        }
+    }
+
+    #[cfg(feature = "editor")]
+    fn editor_paint_tile(&mut self, mouse: Vec2) {
+        let Some(id) = crate::render::editor::selected_id(self) else { return };
+        let (tx, ty) = crate::render::view::screen_to_tile(mouse, 128.0, &self.camera);
+        if let Some(e) = self.editor.as_mut() {
+            match e.working.tiles.iter_mut().find(|c| c.tx == tx && c.ty == ty) {
+                Some(c) => c.tile_id = id,
+                None => e.working.tiles.push(crate::level::TileCell { tx, ty, tile_id: id }),
+            }
+            e.dirty = true;
+        }
+    }
+
+    #[cfg(feature = "editor")]
+    fn editor_erase_tile(&mut self, mouse: Vec2) {
+        let (tx, ty) = crate::render::view::screen_to_tile(mouse, 128.0, &self.camera);
+        if let Some(e) = self.editor.as_mut() {
+            let n = e.working.tiles.len();
+            e.working.tiles.retain(|c| !(c.tx == tx && c.ty == ty));
+            if e.working.tiles.len() != n { e.dirty = true; }
+        }
+    }
+
+    #[cfg(feature = "editor")]
+    fn editor_place_prop(&mut self, mouse: Vec2) {
+        let Some(id) = crate::render::editor::selected_id(self) else { return };
+        let world = crate::render::editor::ghost_world(self, mouse);
+        if let Some(e) = self.editor.as_mut() {
+            e.working.props.push(crate::level::PropEntry { x: world.x, y: world.y, id, scale: 1.0, flip: false });
+            e.dirty = true;
+        }
+    }
+
+    #[cfg(feature = "editor")]
+    fn editor_erase_prop(&mut self, mouse: Vec2) {
+        let cam = self.camera;
+        if let Some(e) = self.editor.as_mut() {
+            let nearest = e
+                .working
+                .props
+                .iter()
+                .enumerate()
+                .map(|(i, p)| ((crate::render::view::world_to_screen(vec2(p.x, p.y), &cam) - mouse).length(), i))
+                .filter(|(d, _)| *d < 48.0)
+                .min_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+            if let Some((_, i)) = nearest {
+                e.working.props.remove(i);
+                e.dirty = true;
+            }
+        }
+    }
+
+    #[cfg(feature = "editor")]
+    fn save_editor(&mut self) {
+        let Some(level) = self.editor.as_ref().map(|e| e.working.clone()) else { return };
+        match crate::level_store::save_level(&level) {
+            Ok(()) => {
+                let key = level.key.clone();
+                self.levels.insert(level);
+                if let Some(e) = self.editor.as_mut() { e.dirty = false; }
+                self.set_status(format!("saved level '{key}'"));
+            }
+            Err(err) => self.set_status(format!("save failed: {err}")),
+        }
+    }
+
+    #[cfg(feature = "editor")]
+    fn exit_editor(&mut self) {
+        let dirty = self.editor.as_ref().map(|e| e.dirty).unwrap_or(false);
+        self.editor = None;
+        self.debug_grid = false;
+        self.set_status(if dirty {
+            "Editor closed — unsaved changes kept in memory only"
+        } else {
+            "Editor closed"
+        });
     }
 
     fn toggle_online(&mut self, now: DateTime<Utc>) {
@@ -2098,6 +2271,26 @@ impl GameApp {
             self.handle_main_menu(now);
             return;
         }
+        // Dev-only level editor (F8): toggles an in-scene authoring mode that
+        // owns input (like `debug_biome`) until exited.
+        #[cfg(feature = "editor")]
+        {
+            if is_key_pressed(KeyCode::F8) {
+                if self.editor.is_some() {
+                    self.exit_editor();
+                } else {
+                    let key = self.current_level_key();
+                    let existing = self.levels.get(&key).cloned();
+                    self.editor = Some(crate::render::editor::EditorState::new(key, existing.as_ref()));
+                    self.debug_grid = true;
+                    self.set_status("Editor on — see panel (1/2 mode, click place, RMB erase, Ctrl+S, F8 exit)");
+                }
+            }
+            if self.editor.is_some() {
+                self.handle_editor_input(now);
+                return;
+            }
+        }
         // F3 toggles the biome-preview debug mode (free-fly, biomes only).
         if is_key_pressed(KeyCode::F3) {
             self.debug_biome = !self.debug_biome;
@@ -2258,6 +2451,9 @@ impl GameApp {
         }
         if !modal && !typing && is_key_pressed(KeyCode::M) {
             self.toggle_screen(Screen::Waypoints);
+        }
+        if !modal && !typing && is_key_pressed(KeyCode::C) {
+            self.toggle_screen(Screen::Collections);
         }
 
         // Hotbar slot selection: number keys 1–5 jump to a slot; plain scroll
@@ -3388,6 +3584,10 @@ impl GameApp {
         }
         if self.depositing.is_some() || self.dedicating.is_some() {
             world::draw_deposit_overlay(self);
+        }
+        #[cfg(feature = "editor")]
+        if self.editor.is_some() {
+            crate::render::editor::draw(self);
         }
         self.draw_cursor();
     }

@@ -91,6 +91,7 @@ pub fn draw(app: &mut GameApp, now: DateTime<Utc>) {
         Screen::Disconnected => draw_disconnected(app, now, ctx),
         Screen::Player => draw_player(app, now, ctx),
         Screen::ExpeditionBoard => draw_expedition_board(app, now, ctx),
+        Screen::Collections => draw_collections(app, now, ctx),
         Screen::World => {}
     }
     // Store this frame's widget rects for next-frame directional navigation.
@@ -489,6 +490,95 @@ fn draw_expedition_board(app: &mut GameApp, _now: DateTime<Utc>, ctx: Ctx<'_>) {
     // closes this menu and teleports the avatar into the instance.
     if let Some(theme) = launch {
         app.launch_expedition(theme);
+    }
+}
+
+/// Collections panel (hotkey C): own every animal in a set to claim its reward
+/// (currency or an exclusive max-rank animal). Claims are permanent.
+fn draw_collections(app: &mut GameApp, now: DateTime<Utc>, ctx: Ctx<'_>) {
+    use crate::game::collection::{self, Reward};
+    use crate::game::species;
+
+    let list = collection::all();
+    let pw = 760.0;
+    let row_h = 52.0;
+    let ph = 96.0 + list.len() as f32 * row_h + 50.0;
+    let (px, py) = (ctx.center.x - pw * 0.5, ctx.center.y - ph * 0.5);
+
+    panel(&ctx, px, py, pw, ph);
+    title(&ctx, px + 26.0, py + 30.0, "COLLECTIONS");
+    label(
+        &ctx,
+        px + 26.0,
+        py + 62.0,
+        "Own every animal in a set to claim its reward — rewards are one-time.",
+        16.0,
+        TEXT_DIM,
+    );
+
+    // The reward as a short string + a notification icon.
+    let reward_text = |r: Reward| match r {
+        Reward::Coins(n) => format!("+{n} coins"),
+        Reward::Dna(n) => format!("+{n} DNA"),
+        Reward::Animal(sp) => format!("{} (Neon)", species::get(sp).display_name),
+    };
+
+    let mut claim: Option<&'static str> = None;
+    let mut y = py + 84.0;
+    for c in list {
+        let claimed = app.zoo.claimed_collections.contains(c.id);
+        let complete = app.zoo.collection_complete(c);
+        let owned = c.required.iter().filter(|s| app.zoo.owns_species(s)).count();
+
+        label(&ctx, px + 26.0, y + 18.0, &format!("{}  —  {}", c.name, reward_text(c.reward)), 18.0, TEXT);
+        // Requirement line: each species marked owned (✓) / missing (·).
+        let reqs: Vec<String> = c
+            .required
+            .iter()
+            .map(|s| {
+                let mark = if app.zoo.owns_species(s) { "✓" } else { "·" };
+                format!("{} {mark}", species::get(s).display_name)
+            })
+            .collect();
+        label(
+            &ctx,
+            px + 26.0,
+            y + 40.0,
+            &format!("{}/{}   {}", owned, c.required.len(), reqs.join("   ")),
+            14.0,
+            if complete { ACCENT } else { TEXT_DIM },
+        );
+
+        // Claim button on the right.
+        let (lbl, enabled) = if claimed {
+            ("Claimed", false)
+        } else if complete {
+            ("Claim", true)
+        } else {
+            ("Incomplete", false)
+        };
+        if button(&ctx, px + pw - 26.0 - 130.0, y + 10.0, 130.0, 32.0, lbl, enabled) {
+            claim = Some(c.id);
+        }
+        y += row_h;
+    }
+
+    if button(&ctx, px + pw - 26.0 - 120.0, py + ph - 42.0, 120.0, 30.0, "Close  [Esc]", true) {
+        app.set_screen(Screen::World);
+    }
+
+    // Defer the claim until after drawing (it mutates the zoo).
+    if let Some(id) = claim {
+        if let Some(c) = collection::get(id) {
+            if app.dispatch(crate::game::action::Action::ClaimCollection { id: id.to_string() }, now).is_some() {
+                let icon = match c.reward {
+                    Reward::Animal(sp) => crate::app::NotifIcon::Animal(sp),
+                    Reward::Dna(_) => crate::app::NotifIcon::Currency("dna_helix"),
+                    Reward::Coins(_) => crate::app::NotifIcon::Currency("coin"),
+                };
+                app.push_notification(c.name, "Collection complete!", icon);
+            }
+        }
     }
 }
 

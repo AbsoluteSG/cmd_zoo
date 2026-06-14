@@ -55,6 +55,8 @@ pub enum Action {
     /// specially in `dispatch_remote` (it mutates the wild world + zoo, which
     /// `apply_action` can't reach), not here.
     RegisterCatch(Uuid),
+    /// Claim a completed collection's reward (see `game::collection`).
+    ClaimCollection { id: String },
 }
 
 /// What an applied action produced, for local feedback (particles, sounds,
@@ -164,6 +166,10 @@ pub fn apply_action(
         // Catch resolution touches the wild world (not just the zoo), so it's
         // intercepted in `GameApp::dispatch_remote` and never reaches here.
         RegisterCatch(_) => ActionOutcome::Done,
+        ClaimCollection { id } => {
+            zoo.claim_collection(&id, now)?;
+            ActionOutcome::Done
+        }
     })
 }
 
@@ -181,6 +187,9 @@ pub fn remote_action_allowed(
             .get(&player_id)
             .is_some_and(|r| r.permissions.has(PermissionSet::SELL)),
         Action::GrantPermission { .. } => false,
+        // Claiming a collection mutates the owner's own zoo — a visitor must not
+        // claim on the host's behalf (online it's already self-scoped).
+        Action::ClaimCollection { .. } => false,
         _ => true,
     }
 }

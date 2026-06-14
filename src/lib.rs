@@ -7,12 +7,13 @@
 // The engine-free simulation core lives in its own crate. Re-export its modules
 // under the original paths so client code keeps using `crate::game`,
 // `crate::persistence`, and `crate::share` unchanged.
-pub use cmd_zoo_core::{game, persistence, share};
+pub use cmd_zoo_core::{game, level, persistence, share};
 
 pub mod app;
 pub mod audio;
 pub mod expedition;
 pub mod input;
+pub mod level_store;
 pub mod net;
 pub mod render;
 pub mod stdb;

@@ -128,6 +128,9 @@ pub struct Zoo {
     /// dropped in the world). Added in schema v19.
     pub unplaced_pedestals: u32,
     pub claimed_gifts: HashSet<Uuid>,
+    /// Ids of collections (`game::collection`) the player has already claimed —
+    /// claims are permanent + non-repeatable. Added in schema v22.
+    pub claimed_collections: HashSet<String>,
     /// Crossbreed recipes the player has unlocked by rolling a hybrid drop.
     /// Recorded only on `claim_completed_breeding` when offspring is not a
     /// parent — parent drops don't count as discoveries.
@@ -288,6 +291,7 @@ impl Zoo {
             pedestals: Vec::new(),
             unplaced_pedestals: 0,
             claimed_gifts: HashSet::new(),
+            claimed_collections: HashSet::new(),
             discovered_recipes: HashSet::new(),
             nest_count: 0,
             nests: Vec::new(),
@@ -1714,6 +1718,45 @@ impl Zoo {
         Ok((habitat_id, animal_id))
     }
 
+    /// True when the player currently owns every species required by `c`.
+    pub fn collection_complete(&self, c: &crate::game::collection::Collection) -> bool {
+        c.required.iter().all(|s| self.owns_species(s))
+    }
+
+    /// Claim a completed collection's reward (permanent, non-repeatable). Errors
+    /// if unknown, already claimed, or incomplete. Animal rewards are granted at
+    /// **max rank** (Neon) and at level 1. Returns the granted reward for UI.
+    pub fn claim_collection(
+        &mut self,
+        id: &str,
+        now: DateTime<Utc>,
+    ) -> Result<crate::game::collection::Reward, ZooError> {
+        use crate::game::collection::Reward;
+        let c = crate::game::collection::get(id).ok_or(ZooError::UnknownCollection)?;
+        if self.claimed_collections.contains(id) {
+            return Err(ZooError::AlreadyClaimed);
+        }
+        if !self.collection_complete(c) {
+            return Err(ZooError::CollectionIncomplete);
+        }
+        match c.reward {
+            Reward::Coins(n) => self.coins = self.coins.saturating_add(n),
+            Reward::Dna(n) => self.dna_helix = self.dna_helix.saturating_add(n),
+            Reward::Animal(sp) => {
+                let def = species::try_get(sp).ok_or(ZooError::UnknownSpecies)?;
+                if !self.owns_species(def.id) && self.at_animal_capacity() {
+                    return Err(ZooError::ZooAtCapacity);
+                }
+                // Seed lifetime dupes so the spawn lands at max rank (Neon).
+                self.species_dupes
+                    .insert(def.id, rank::max_rank_dupes());
+                self.spawn_animal_freeform(def.id, 1, now)?;
+            }
+        }
+        self.claimed_collections.insert(id.to_string());
+        Ok(c.reward)
+    }
+
     pub fn level_up_animal(
         &mut self,
         animal_id: Uuid,
@@ -1812,6 +1855,10 @@ pub enum ZooError {
     PedestalOnCooldown,
     #[allow(dead_code)]
     AlreadyClaimed,
+    /// Referenced a collection id that doesn't exist.
+    UnknownCollection,
+    /// Tried to claim a collection without owning all its required species.
+    CollectionIncomplete,
 }
 
 #[cfg(test)]
@@ -1842,6 +1889,53 @@ mod tests {
         for tile in [(0, 0), (3, -2), (-4, 4), (1, -3)] {
             assert_eq!(zoo.world_to_tile(zoo.tile_to_world(tile)), tile);
         }
+    }
+
+    #[test]
+    fn claim_collection_grants_neon_animal_once() {
+        let now = ts();
+        let mut zoo = Zoo::new(now);
+        for s in ["penguin", "snowyOwl", "arctic_fox", "seal", "polar_bear"] {
+            zoo.spawn_animal_freeform(s, 1, now).unwrap();
+        }
+        let reward = zoo.claim_collection("frozen_few", now).unwrap();
+        assert!(matches!(reward, crate::game::collection::Reward::Animal("aurora_bear")));
+        // Granted at max rank (Neon).
+        let id = zoo.animal_id_for_species("aurora_bear").unwrap();
+        assert_eq!(zoo.animals[&id].stage, crate::game::rank::MAX_RANK);
+        // Non-repeatable.
+        assert!(matches!(
+            zoo.claim_collection("frozen_few", now),
+            Err(ZooError::AlreadyClaimed)
+        ));
+    }
+
+    #[test]
+    fn claim_collection_requires_all_species_and_known_id() {
+        let now = ts();
+        let mut zoo = Zoo::new(now);
+        zoo.spawn_animal_freeform("penguin", 1, now).unwrap();
+        assert!(matches!(
+            zoo.claim_collection("frozen_few", now),
+            Err(ZooError::CollectionIncomplete)
+        ));
+        assert!(matches!(
+            zoo.claim_collection("not_a_collection", now),
+            Err(ZooError::UnknownCollection)
+        ));
+    }
+
+    #[test]
+    fn claim_collection_currency_reward() {
+        let now = ts();
+        let mut zoo = Zoo::new(now);
+        let before = zoo.coins;
+        for s in ["red_fox", "badger", "raccoon", "squirrel", "robin"] {
+            zoo.spawn_animal_freeform(s, 1, now).unwrap();
+        }
+        let reward = zoo.claim_collection("woodland_watch", now).unwrap();
+        assert!(matches!(reward, crate::game::collection::Reward::Coins(4_000)));
+        assert_eq!(zoo.coins, before + 4_000);
     }
 
     /// All durable plot geometry is anchored on `plot_origin`, so moving the
@@ -2742,6 +2836,8 @@ impl fmt::Display for ZooError {
             ZooError::PedestalEmpty => "no pedestal here / none left in your hotbar",
             ZooError::AnimalLocked => "this animal is locked to its pedestal for 48h",
             ZooError::PedestalOnCooldown => "this pedestal is cooling down — try again later",
+            ZooError::UnknownCollection => "unknown collection",
+            ZooError::CollectionIncomplete => "you don't own every animal in this collection yet",
         };
         f.write_str(s)
     }

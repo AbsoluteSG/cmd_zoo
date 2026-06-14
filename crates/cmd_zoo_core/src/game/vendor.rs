@@ -72,7 +72,7 @@ pub fn stock(theme: HabitatTheme) -> Vec<&'static SpeciesDef> {
 /// Catch-only new-biome fauna return false. Unknown themes default to buyable.
 pub fn is_for_sale(id: SpeciesId) -> bool {
     match species::try_get(id) {
-        Some(d) if !d.hybrid && !d.exotic => {
+        Some(d) if !d.hybrid && !d.exotic && !species::is_collection_only(id) => {
             vendor_for(d.theme).map_or(true, |v| !v.coming_soon)
         }
         _ => false,

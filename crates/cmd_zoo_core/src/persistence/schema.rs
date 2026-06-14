@@ -2,7 +2,7 @@
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-pub const SCHEMA_VERSION: u32 = 21;
+pub const SCHEMA_VERSION: u32 = 22;
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct ZooSnapshot {
@@ -66,6 +66,9 @@ pub struct ZooSnapshot {
     /// New in v19. Unplaced pedestals held in the hotbar inventory.
     #[serde(default)]
     pub unplaced_pedestals: u32,
+    /// New in v22. Ids of collections the player has claimed (non-repeatable).
+    #[serde(default)]
+    pub claimed_collections: Vec<String>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
